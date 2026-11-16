@@ -3116,6 +3116,7 @@ def make_handler(rt: CompanionRuntime):
                     "service": "DeckVault",
                     "version": APP_VERSION,
                     "videoEditOrder": "transform_first",
+                    "desktop": _get_current_desktop_name(),
                     "hostId": rt.config.data["host_id"],
                     "deviceName": rt.config.data["device_name"],
                     "os": "Windows",
@@ -4419,6 +4420,21 @@ def _copy_text_win32(text: str) -> None:
         pass
 
 
+def _get_current_desktop_name() -> str:
+    """Return the name of the calling thread's Windows desktop (e.g. 'Default' vs sandbox 'exebox-...')."""
+    if os.name != "nt":
+        return "Default"
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        hdesk = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
+        buf = ctypes.create_unicode_buffer(256)
+        user32.GetUserObjectInformationW(hdesk, 2, buf, 512, None)
+        return (buf.value or "Default").strip()
+    except Exception:
+        return "Default"
+
+
 def _find_deckvault_window() -> int:
     """Return HWND of the visible WinForms/WebView DeckVault Desktop window, or 0."""
     if os.name != "nt":
@@ -4479,28 +4495,72 @@ def _acquire_win32_mutex(name: str):
     return handle, already
 
 
+def _kill_pids_and_children_win32(root_pids: set[int], exclude_pids: set[int]) -> None:
+    if os.name != "nt" or not root_pids:
+        return
+    try:
+        k32 = ctypes.windll.kernel32
+        snap = k32.CreateToolhelp32Snapshot(2, 0)
+        if snap == -1:
+            return
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(pe)
+        procs: list[tuple[int, int, str]] = []
+        if k32.Process32FirstW(snap, ctypes.byref(pe)):
+            while True:
+                procs.append((int(pe.th32ProcessID), int(pe.th32ParentProcessID), pe.szExeFile.lower()))
+                if not k32.Process32NextW(snap, ctypes.byref(pe)):
+                    break
+        k32.CloseHandle(snap)
+
+        to_kill = set(root_pids) - exclude_pids
+        changed = True
+        while changed:
+            changed = False
+            for pid, ppid, _name in procs:
+                if ppid in to_kill and pid not in to_kill and pid not in exclude_pids:
+                    to_kill.add(pid)
+                    changed = True
+
+        for pid in to_kill:
+            h = k32.OpenProcess(1, False, pid)
+            if h:
+                k32.TerminateProcess(h, 0)
+                k32.CloseHandle(h)
+    except Exception:
+        pass
+
+
 def _kill_zombie_window_processes(exclude_pid: int = 0) -> None:
-    """Terminate lingering windowless '--window' processes holding the window mutex."""
+    """Terminate lingering windowless '--window' processes and their WebView2 children."""
     if os.name != "nt":
         return
+    exclude = {os.getpid(), int(exclude_pid)}
     win_pid_file = CONFIG_DIR / "window.pid"
-    killed_fast = False
+    roots: set[int] = set()
     if win_pid_file.is_file():
         try:
             old_pid = int(win_pid_file.read_text(encoding="utf-8").strip() or "0")
-            if old_pid > 0 and old_pid not in (os.getpid(), int(exclude_pid)):
-                h = ctypes.windll.kernel32.OpenProcess(1, False, old_pid)
-                if h:
-                    ctypes.windll.kernel32.TerminateProcess(h, 0)
-                    ctypes.windll.kernel32.CloseHandle(h)
-                    killed_fast = True
+            if old_pid > 0 and old_pid not in exclude:
+                roots.add(old_pid)
         except Exception:
             pass
         try:
             win_pid_file.unlink()
         except OSError:
             pass
-    if killed_fast:
+    if roots:
+        _kill_pids_and_children_win32(roots, exclude)
         return
     try:
         ps_cmd = (
@@ -4515,6 +4575,42 @@ def _kill_zombie_window_processes(exclude_pid: int = 0) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+    except Exception:
+        pass
+
+
+def _kill_all_deckvault_processes(exclude_pid: int = 0) -> None:
+    """Terminate all other DeckVault.exe instances and their child WebView2 processes."""
+    if os.name != "nt":
+        return
+    exclude = {os.getpid(), int(exclude_pid)}
+    try:
+        k32 = ctypes.windll.kernel32
+        snap = k32.CreateToolhelp32Snapshot(2, 0)
+        if snap == -1:
+            return
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(pe)
+        dv_pids: set[int] = set()
+        if k32.Process32FirstW(snap, ctypes.byref(pe)):
+            while True:
+                if pe.szExeFile.lower() == "deckvault.exe" and int(pe.th32ProcessID) not in exclude:
+                    dv_pids.add(int(pe.th32ProcessID))
+                if not k32.Process32NextW(snap, ctypes.byref(pe)):
+                    break
+        k32.CloseHandle(snap)
+        if dv_pids:
+            _kill_pids_and_children_win32(dv_pids, exclude)
     except Exception:
         pass
 
@@ -4857,7 +4953,10 @@ def _launch_desktop_webview(http_port: int, force_process_exit: bool = True) -> 
         pass
 
     import webview
-    storage_dir = str(CONFIG_DIR / "webview_cache")
+    desk_name = _get_current_desktop_name()
+    safe_desk = "".join(c if c.isalnum() or c in "-_" else "_" for c in desk_name)
+    cache_name = "webview_cache" if safe_desk.lower() == "default" else f"webview_cache_{safe_desk}"
+    storage_dir = str(CONFIG_DIR / cache_name)
     os.makedirs(storage_dir, exist_ok=True)
     state: dict[str, Any] = {"win": None, "is_max": False, "closed": False}
     mutex_holder = [mutex_h]
@@ -4988,12 +5087,18 @@ def _launch_desktop_webview(http_port: int, force_process_exit: bool = True) -> 
             os._exit(0)
 
 
-def _is_local_server_up(http_port: int) -> bool:
+def _get_local_server_ping(http_port: int) -> dict[str, Any] | None:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/api/ping", timeout=0.6) as resp:
-            return resp.status == 200
+            if resp.status == 200:
+                return json.loads(resp.read().decode("utf-8"))
     except Exception:
-        return False
+        pass
+    return None
+
+
+def _is_local_server_up(http_port: int) -> bool:
+    return _get_local_server_ping(http_port) is not None
 
 
 def main() -> None:
@@ -5013,7 +5118,7 @@ def main() -> None:
 
     http_port = int(rt.config.data["http_port"])
 
-    # Default app launch (--app): single-instance focus or start tray server + open window cleanly
+    # Default app launch (--app): single-instance focus or start tray server + open window directly on caller desktop
     if args.app:
         if os.name == "nt":
             try:
@@ -5022,19 +5127,23 @@ def main() -> None:
                 pass
         if _focus_existing_desktop_window():
             return
-        if not _is_local_server_up(http_port):
+        ping = _get_local_server_ping(http_port)
+        if ping is not None:
+            my_desk = _get_current_desktop_name().lower()
+            srv_desk = str(ping.get("desktop", "")).lower()
+            if srv_desk != my_desk:
+                _kill_all_deckvault_processes(os.getpid())
+                deadline = time.time() + 2.0
+                while time.time() < deadline and _is_local_server_up(http_port):
+                    time.sleep(0.1)
+                ping = None
+        if ping is None:
             tray_cmd = [sys.executable, "--tray"] if getattr(sys, "frozen", False) else [sys.executable, __file__, "--tray"]
             subprocess.Popen(tray_cmd, creationflags=SUBPROCESS_FLAGS)
             for _ in range(30):
                 if _is_local_server_up(http_port):
                     break
                 time.sleep(0.15)
-        try:
-            freq = urllib.request.Request(f"http://127.0.0.1:{http_port}/api/desktop/focus", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
-            urllib.request.urlopen(freq, timeout=3).close()
-            return
-        except Exception:
-            pass
         args.window = True
 
     if args.window:
