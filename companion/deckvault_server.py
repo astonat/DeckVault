@@ -4455,10 +4455,14 @@ def _focus_existing_desktop_window() -> bool:
     try:
         user32 = ctypes.windll.user32
         SW_RESTORE = 9
+        SWP_NOMOVE_NOSIZE = 0x0002 | 0x0001
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, SW_RESTORE)
         else:
             user32.ShowWindow(hwnd, 5)
+        user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, SWP_NOMOVE_NOSIZE)
+        user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE_NOSIZE)
+        user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
         return True
     except Exception:
@@ -4479,6 +4483,25 @@ def _kill_zombie_window_processes(exclude_pid: int = 0) -> None:
     """Terminate lingering windowless '--window' processes holding the window mutex."""
     if os.name != "nt":
         return
+    win_pid_file = CONFIG_DIR / "window.pid"
+    killed_fast = False
+    if win_pid_file.is_file():
+        try:
+            old_pid = int(win_pid_file.read_text(encoding="utf-8").strip() or "0")
+            if old_pid > 0 and old_pid not in (os.getpid(), int(exclude_pid)):
+                h = ctypes.windll.kernel32.OpenProcess(1, False, old_pid)
+                if h:
+                    ctypes.windll.kernel32.TerminateProcess(h, 0)
+                    ctypes.windll.kernel32.CloseHandle(h)
+                    killed_fast = True
+        except Exception:
+            pass
+        try:
+            win_pid_file.unlink()
+        except OSError:
+            pass
+    if killed_fast:
+        return
     try:
         ps_cmd = (
             f"Get-CimInstance Win32_Process -Filter \"Name='DeckVault.exe' OR Name='python.exe' OR Name='pythonw.exe'\" "
@@ -4488,7 +4511,7 @@ def _kill_zombie_window_processes(exclude_pid: int = 0) -> None:
         subprocess.run(
             ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
             creationflags=SUBPROCESS_FLAGS,
-            timeout=5,
+            timeout=2,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -4827,6 +4850,12 @@ def _launch_desktop_webview(http_port: int, force_process_exit: bool = True) -> 
             _focus_existing_desktop_window()
             return
 
+    win_pid_file = CONFIG_DIR / "window.pid"
+    try:
+        win_pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
     import webview
     storage_dir = str(CONFIG_DIR / "webview_cache")
     os.makedirs(storage_dir, exist_ok=True)
@@ -4841,6 +4870,11 @@ def _launch_desktop_webview(http_port: int, force_process_exit: bool = True) -> 
                 ctypes.windll.kernel32.CloseHandle(h)
             except Exception:
                 pass
+        try:
+            if win_pid_file.is_file() and win_pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                win_pid_file.unlink()
+        except Exception:
+            pass
 
     def _schedule_force_exit(delay_s: float = 0.45) -> None:
         _release_mutex()
@@ -4981,6 +5015,11 @@ def main() -> None:
 
     # Default app launch (--app): single-instance focus or start tray server + open window cleanly
     if args.app:
+        if os.name == "nt":
+            try:
+                ctypes.windll.user32.AllowSetForegroundWindow(-1)
+            except Exception:
+                pass
         if _focus_existing_desktop_window():
             return
         if not _is_local_server_up(http_port):
