@@ -2483,6 +2483,8 @@ function openOptimizeSelected(tab="compress"){
 async function openOptimizeModal(items, tab="compress", hostOverride=""){
   const valid=(items||[]).filter(Boolean);
   if(!valid.length) return;
+  const v=document.getElementById("vidEl");
+  if(v && !v.paused) v.pause();
   state.opt.items=valid;
   state.opt.hostId=hostOverride || state.activeHostId;
   state.opt.tab=tab;
@@ -2623,10 +2625,15 @@ async function refreshOptimizeEstimate(sampleProbe){
   if(!afterEl) return;
   if(sampleProbe) afterEl.textContent="Sampling 1.5s encode...";
   try{
-    const est = await hostApi(state.opt.hostId, "/api/media/compress-estimate", {
+    const est = await sysFetch("/api/media/compress-estimate", {
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify({
+        hostId: state.opt.hostId,
         path: first.path,
+        sizeBytes: first.sizeBytes||0,
+        width: first.meta?.width||0,
+        height: first.meta?.height||0,
+        durationMs: first.meta?.durationMs||0,
         targetHeight: Number(document.getElementById("cmpHeight").value)||0,
         crf: Number(document.getElementById("cmpCrf").value)||24,
         codec: document.getElementById("cmpCodec").value,
@@ -2648,19 +2655,24 @@ async function refreshOptimizeEstimate(sampleProbe){
 }
 async function executeCompress(){
   const btn=document.getElementById("cmpRunBtn"); btn.disabled=true; btn.textContent="Compressing...";
+  const saveMode=document.getElementById("cmpSaveMode").value;
+  if(saveMode==="overwrite" && document.getElementById("videoOverlay").classList.contains("open")){
+    closeVideoOverlay(); await new Promise(r=>setTimeout(r, 120));
+  }
   let done=0, saved=0;
   try{
     for(const item of state.opt.items){
-      const res=await hostApi(state.opt.hostId,"/api/media/compress",{
+      const res=await sysFetch("/api/media/compress",{
         method:"POST", headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
+          hostId:state.opt.hostId,
           path:item.path,
           targetHeight:Number(document.getElementById("cmpHeight").value)||0,
           crf:Number(document.getElementById("cmpCrf").value)||24,
           codec:document.getElementById("cmpCodec").value,
           audioKbps:Number(document.getElementById("cmpAudio").value),
           targetMb:Number(document.getElementById("cmpTargetMb").value)||0,
-          saveMode:document.getElementById("cmpSaveMode").value,
+          saveMode,
           recycleOriginal:true,
         })
       });
@@ -2675,19 +2687,24 @@ async function executeCompress(){
 }
 async function executeUpscale(){
   const btn=document.getElementById("upRunBtn"); btn.disabled=true; btn.textContent="Upscaling...";
+  const saveMode=document.getElementById("upSaveMode").value;
+  if(saveMode==="overwrite" && document.getElementById("videoOverlay").classList.contains("open")){
+    closeVideoOverlay(); await new Promise(r=>setTimeout(r, 120));
+  }
   let done=0;
   try{
     for(const item of state.opt.items){
-      await hostApi(state.opt.hostId,"/api/media/upscale",{
+      await sysFetch("/api/media/upscale",{
         method:"POST", headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
+          hostId:state.opt.hostId,
           path:item.path,
           preset:document.getElementById("upPreset").value,
           sharpen:Number(document.getElementById("upSharpen").value),
           denoise:document.getElementById("upDenoise").checked,
           fps60:document.getElementById("upFps60").checked,
           crf:19,
-          saveMode:document.getElementById("upSaveMode").value,
+          saveMode,
           recycleOriginal:true,
         })
       });

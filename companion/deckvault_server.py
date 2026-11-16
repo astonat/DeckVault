@@ -1193,9 +1193,21 @@ class MediaService:
                 "sizeDeltaBytes": new_size,
                 "saveMode": "copy",
             }
-        if recycle_original:
-            send_to_recycle_bin(orig_path)
-        os.replace(tmp_path, orig_path)
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                if recycle_original:
+                    send_to_recycle_bin(orig_path)
+                os.replace(tmp_path, orig_path)
+                last_err = None
+                break
+            except Exception as exc:
+                last_err = exc
+                if attempt < 2:
+                    gc.collect()
+                    time.sleep(0.15)
+        if last_err is not None:
+            raise last_err
         return {
             "ok": True,
             "path": orig_path,
@@ -1298,7 +1310,9 @@ class MediaService:
                 else:
                     cmd.append("-an")
                 if target_height > 0 and target_height < oh:
-                    cmd.extend(["-vf", f"scale=-2:{target_height}"])
+                    cmd.extend(["-vf", f"scale=-2:{target_height}:flags=lanczos,setsar=1"])
+                else:
+                    cmd.extend(["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1"])
                 crf_clamped = max(16, min(36, int(crf)))
                 cmd.extend(["-c:v", v_enc, "-preset", "veryfast", "-crf", str(crf_clamped), "-pix_fmt", "yuv420p"])
                 if audio_kbps > 0:
@@ -1398,7 +1412,7 @@ class MediaService:
         oh = int(meta.get("height", 0) or 1080)
         use_hevc = (codec.lower() in ("h265", "hevc")) and self.has_encoder("libx265")
         v_enc = "libx265" if use_hevc else "libx264"
-        out_ext = ext if ext in (".mp4", ".mov", ".mkv", ".m4v") else ".mp4"
+        out_ext = ".mp4" if save_mode == "copy" else (ext if ext in (".mp4", ".mov", ".mkv", ".m4v") else ".mp4")
         tmp_path = os.path.join(parent, f".deckvault_cmp_{uuid.uuid4().hex}{out_ext}")
 
         try:
@@ -1408,7 +1422,9 @@ class MediaService:
             else:
                 cmd.extend(["-map", "0:a?"])
             if target_height > 0 and target_height < oh:
-                cmd.extend(["-vf", f"scale=-2:{int(target_height)},setsar=1"])
+                cmd.extend(["-vf", f"scale=-2:{int(target_height)}:flags=lanczos,setsar=1"])
+            else:
+                cmd.extend(["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1"])
             cmd.extend(["-c:v", v_enc, "-preset", "medium", "-pix_fmt", "yuv420p"])
             if use_hevc:
                 cmd.extend(["-tag:v", "hvc1"])
@@ -1422,7 +1438,9 @@ class MediaService:
                 cmd.extend(["-crf", str(max(16, min(36, int(crf))))])
             if audio_kbps > 0:
                 cmd.extend(["-c:a", "aac", "-b:a", f"{int(audio_kbps)}k"])
-            cmd.extend(["-movflags", "+faststart", tmp_path])
+            if out_ext != ".mkv":
+                cmd.extend(["-movflags", "+faststart"])
+            cmd.append(tmp_path)
 
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, creationflags=SUBPROCESS_FLAGS)
             if proc.returncode != 0 or not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
@@ -1497,24 +1515,35 @@ class MediaService:
 
         if not self.ffmpeg or not self.ffprobe:
             raise RuntimeError("FFmpeg is required for video upscaling")
-        out_ext = ext if ext in (".mp4", ".mov", ".mkv", ".m4v") else ".mp4"
+        meta = self.probe_video(path, old_stat)
+        ow = int(meta.get("width", 0) or 1280)
+        oh = int(meta.get("height", 0) or 720)
+        target_long = {"4k": 3840, "1440p": 2560, "1080p": 1920}.get(preset, 0)
+        if target_long > 0:
+            if ow >= oh:
+                nw_f = float(target_long)
+                nh_f = oh * (target_long / max(1, ow))
+            else:
+                nh_f = float(target_long)
+                nw_f = ow * (target_long / max(1, oh))
+        else:
+            scale_f = min(2.0, 3840.0 / max(1, ow, oh))
+            nw_f = ow * scale_f
+            nh_f = oh * scale_f
+        nw = max(2, min(3840, (int(round(nw_f)) // 2) * 2))
+        nh = max(2, min(3840, (int(round(nh_f)) // 2) * 2))
+
+        out_ext = ".mp4" if save_mode == "copy" else (ext if ext in (".mp4", ".mov", ".mkv", ".m4v") else ".mp4")
         tmp_path = os.path.join(parent, f".deckvault_up_{uuid.uuid4().hex}{out_ext}")
         try:
             vf_parts: list[str] = []
             if denoise:
                 vf_parts.append("hqdn3d=2.0:1.5:3.0:2.5")
-            if preset == "4k":
-                vf_parts.append("scale=3840:-2:flags=lanczos")
-            elif preset == "1440p":
-                vf_parts.append("scale=2560:-2:flags=lanczos")
-            elif preset == "1080p":
-                vf_parts.append("scale=1920:-2:flags=lanczos")
-            else:
-                vf_parts.append("scale=trunc(iw*2/2)*2:trunc(ih*2/2)*2:flags=lanczos")
+            vf_parts.append(f"scale={nw}:{nh}:flags=lanczos")
             if sharp_v > 0.05:
                 vf_parts.append(f"unsharp=5:5:{sharp_v:.2f}:5:5:0.0")
             if fps60:
-                vf_parts.append("framerate=fps=60:interp_mode=mci:mc_mode=aobmc")
+                vf_parts.append("framerate=fps=60")
             vf_parts.append("setsar=1")
 
             cmd = [
@@ -1525,8 +1554,10 @@ class MediaService:
                 "-crf", str(max(14, min(28, int(crf)))),
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
-                "-movflags", "+faststart", tmp_path,
             ]
+            if out_ext != ".mkv":
+                cmd.extend(["-movflags", "+faststart"])
+            cmd.append(tmp_path)
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, creationflags=SUBPROCESS_FLAGS)
             if proc.returncode != 0 or not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
                 raise RuntimeError(proc.stderr[-600:] or "FFmpeg upscale failed")
@@ -2508,51 +2539,8 @@ def make_handler(rt: CompanionRuntime):
                     rt.config.data["cloud_providers"] = list_p
                     rt.config.save()
                     self._send_json(HTTPStatus.OK, {"cloudProviders": detect_cloud_storage_providers(rt.config.data)})
-                elif route == "/api/media/compress-estimate":
-                    safe = rt.config.resolve_safe_path(str(body.get("path", "")))
-                    res = rt.media.estimate_compression(
-                        path=safe,
-                        target_height=int(body.get("targetHeight", 0) or 0),
-                        crf=int(body.get("crf", 24) or 24),
-                        codec=str(body.get("codec", "h264")),
-                        audio_kbps=int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128),
-                        target_mb=float(body.get("targetMb", 0.0) or 0.0),
-                        sample_probe=bool(body.get("sampleProbe", False)),
-                        quality=int(body.get("quality", 82) or 82),
-                    )
-                    self._send_json(HTTPStatus.OK, res)
-                elif route == "/api/media/compress":
-                    safe = rt.config.resolve_safe_path(str(body.get("path", "")))
-                    res = rt.media.compress_media(
-                        path=safe,
-                        target_height=int(body.get("targetHeight", 0) or 0),
-                        crf=int(body.get("crf", 24) or 24),
-                        codec=str(body.get("codec", "h264")),
-                        audio_kbps=int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128),
-                        target_mb=float(body.get("targetMb", 0.0) or 0.0),
-                        save_mode=str(body.get("saveMode", "copy")),
-                        recycle_original=bool(body.get("recycleOriginal", True)),
-                        quality=int(body.get("quality", 82) or 82),
-                    )
-                    rt.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res["saveMode"] == "copy" else 0, 0)
-                    total_saved = rt.config.add_space_saved(res["savedBytes"])
-                    res["totalSpaceSavedBytes"] = total_saved
-                    rt.log(f"Compressed {os.path.basename(res['path'])} -> {res['newSizeBytes'] / (1024*1024):.1f} MB")
-                    self._send_json(HTTPStatus.OK, res)
-                elif route == "/api/media/upscale":
-                    safe = rt.config.resolve_safe_path(str(body.get("path", "")))
-                    res = rt.media.upscale_media(
-                        path=safe,
-                        preset=str(body.get("preset", "2x")),
-                        sharpen=float(body.get("sharpen", 0.9) if body.get("sharpen") is not None else 0.9),
-                        denoise=bool(body.get("denoise", False)),
-                        fps60=bool(body.get("fps60", False)),
-                        crf=int(body.get("crf", 19) or 19),
-                        save_mode=str(body.get("saveMode", "copy")),
-                        recycle_original=bool(body.get("recycleOriginal", True)),
-                    )
-                    rt.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res["saveMode"] == "copy" else 0, 0)
-                    rt.log(f"Upscaled {os.path.basename(res['path'])} ({body.get('preset', '2x')})")
+                elif route in ("/api/media/compress-estimate", "/api/media/compress", "/api/media/upscale"):
+                    res = self._run_or_relay_media_op(route, body)
                     self._send_json(HTTPStatus.OK, res)
                 elif route == "/api/system/prepare-drag":
                     if not self._is_loopback():
@@ -2770,6 +2758,175 @@ def make_handler(rt: CompanionRuntime):
                 transferred += 1
 
             self._send_json(HTTPStatus.OK, {"transferredCount": transferred})
+
+        def _exec_local_media_op(self, route: str, path_str: str, body: dict[str, Any], force_copy: bool = False) -> dict[str, Any]:
+            if route == "/api/media/compress-estimate":
+                return rt.media.estimate_compression(
+                    path=path_str,
+                    target_height=int(body.get("targetHeight", 0) or 0),
+                    crf=int(body.get("crf", 24) or 24),
+                    codec=str(body.get("codec", "h264")),
+                    audio_kbps=int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128),
+                    target_mb=float(body.get("targetMb", 0.0) or 0.0),
+                    sample_probe=bool(body.get("sampleProbe", False)),
+                    quality=int(body.get("quality", 82) or 82),
+                )
+            save_mode = "copy" if force_copy else str(body.get("saveMode", "copy"))
+            recycle = bool(body.get("recycleOriginal", True))
+            if route == "/api/media/compress":
+                res = rt.media.compress_media(
+                    path=path_str,
+                    target_height=int(body.get("targetHeight", 0) or 0),
+                    crf=int(body.get("crf", 24) or 24),
+                    codec=str(body.get("codec", "h264")),
+                    audio_kbps=int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128),
+                    target_mb=float(body.get("targetMb", 0.0) or 0.0),
+                    save_mode=save_mode,
+                    recycle_original=recycle,
+                    quality=int(body.get("quality", 82) or 82),
+                )
+                if not force_copy:
+                    rt.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res["saveMode"] == "copy" else 0, 0)
+                    res["totalSpaceSavedBytes"] = rt.config.add_space_saved(res["savedBytes"])
+                return res
+            res = rt.media.upscale_media(
+                path=path_str,
+                preset=str(body.get("preset", "2x")),
+                sharpen=float(body.get("sharpen", 0.9) if body.get("sharpen") is not None else 0.9),
+                denoise=bool(body.get("denoise", False)),
+                fps60=bool(body.get("fps60", False)),
+                crf=int(body.get("crf", 19) or 19),
+                save_mode=save_mode,
+                recycle_original=recycle,
+            )
+            if not force_copy:
+                rt.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res["saveMode"] == "copy" else 0, 0)
+            return res
+
+        def _run_or_relay_media_op(self, route: str, body: dict[str, Any]) -> dict[str, Any]:
+            local_id = rt.config.data["host_id"]
+            host_id = str(body.get("hostId") or local_id)
+            raw_path = str(body.get("path", ""))
+
+            if host_id == local_id:
+                safe = rt.config.resolve_safe_path(raw_path)
+                res = self._exec_local_media_op(route, safe, body, force_copy=False)
+                if route != "/api/media/compress-estimate":
+                    rt.log(f"{route.rsplit('/', 1)[-1].title()} {os.path.basename(res['path'])}")
+                return res
+
+            host = rt.fleet.get(host_id)
+            if not host:
+                raise ValueError("Paired device not found")
+
+            try:
+                req = urllib.request.Request(
+                    f"http://{host['ip']}:{host['port']}{route}",
+                    data=json.dumps(body).encode("utf-8"),
+                    headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=3600) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                err_txt = exc.read().decode("utf-8", errors="replace")
+                if exc.code != 404 and "Unknown route" not in err_txt:
+                    raise RuntimeError(err_txt or f"HTTP {exc.code}")
+
+            # Remote device runs older companion or mobile peer server -> process cleanly on this PC and upload result back.
+            if route == "/api/media/compress-estimate" and not bool(body.get("sampleProbe", False)):
+                old_sz = int(body.get("sizeBytes") or 0)
+                ow = int(body.get("width") or 1920)
+                oh = int(body.get("height") or 1080)
+                dur_ms = int(body.get("durationMs") or 10000)
+                dur_s = max(0.5, dur_ms / 1000.0)
+                th = int(body.get("targetHeight", 0) or 0)
+                crf = int(body.get("crf", 24) or 24)
+                codec = str(body.get("codec", "h264"))
+                audio_kbps = int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128)
+                target_mb = float(body.get("targetMb", 0.0) or 0.0)
+                use_hevc = (codec.lower() in ("h265", "hevc")) and rt.media.has_encoder("libx265")
+                scale = (th / oh) if (th > 0 and th < oh) else 1.0
+                nw = max(2, int(round(ow * scale)) // 2 * 2)
+                nh = max(2, int(round(oh * scale)) // 2 * 2)
+                if target_mb > 0:
+                    est_bytes = max(32 * 1024, int(target_mb * 1024 * 1024))
+                    method = "target_size"
+                else:
+                    pix_ratio = (nw * nh) / max(1, ow * oh)
+                    crf_factor = 2.0 ** ((23.0 - float(crf)) / 6.0)
+                    codec_factor = 0.66 if use_hevc else 1.0
+                    src_bps = int((old_sz * 8) / dur_s) if old_sz > 0 else 4_000_000
+                    base_v_bps = min(max(src_bps * 0.85, 400_000), max(3_500_000 * pix_ratio, src_bps * 0.92))
+                    est_v_bps = max(160_000, base_v_bps * (pix_ratio ** 0.82) * crf_factor * codec_factor)
+                    est_bytes = max(32 * 1024, int(((est_v_bps + max(0, audio_kbps) * 1000) / 8.0) * dur_s))
+                    method = "analytical"
+                return {
+                    "mediaType": classify_media_type(raw_path),
+                    "oldSizeBytes": old_sz,
+                    "estimatedBytes": est_bytes,
+                    "oldWidth": ow,
+                    "oldHeight": oh,
+                    "newWidth": nw,
+                    "newHeight": nh,
+                    "durationMs": dur_ms,
+                    "method": method,
+                    "encoderUsed": "libx265" if use_hevc else "libx264",
+                }
+
+            sep = "\\" if "\\" in raw_path else "/"
+            remote_dir = raw_path.rsplit(sep, 1)[0] if sep in raw_path else ""
+            orig_base = raw_path.rsplit(sep, 1)[-1] or f"media_{uuid.uuid4().hex[:6]}.mp4"
+            stage_dir = DRAG_STAGING_DIR / uuid.uuid4().hex
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            local_src = str(stage_dir / orig_base)
+            try:
+                q = url_quote(raw_path, safe="")
+                sreq = urllib.request.Request(
+                    f"http://{host['ip']}:{host['port']}/api/stream?path={q}",
+                    headers={"X-DeckVault-Token": host["token"]},
+                    method="GET",
+                )
+                with urllib.request.urlopen(sreq, timeout=600) as resp, open(local_src, "wb") as out:
+                    shutil.copyfileobj(resp, out)
+
+                res = self._exec_local_media_op(route, local_src, body, force_copy=(route != "/api/media/compress-estimate"))
+                if route == "/api/media/compress-estimate":
+                    return res
+
+                out_local = res["path"]
+                out_name = os.path.basename(out_local)
+                up_url = (
+                    f"http://{host['ip']}:{host['port']}/api/file/upload"
+                    f"?dir={url_quote(remote_dir, safe='')}&name={url_quote(out_name, safe='')}&conflict=rename"
+                )
+                with open(out_local, "rb") as uf:
+                    up_data = uf.read()
+                ureq = urllib.request.Request(
+                    up_url, data=up_data,
+                    headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/octet-stream"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(ureq, timeout=600) as uresp:
+                    if uresp.status >= 400:
+                        raise OSError(f"Remote upload failed: HTTP {uresp.status}")
+
+                want_overwrite = str(body.get("saveMode", "copy")) == "overwrite"
+                if want_overwrite:
+                    dreq = urllib.request.Request(
+                        f"http://{host['ip']}:{host['port']}/api/file/delete",
+                        data=json.dumps({"paths": [raw_path], "recycle": bool(body.get("recycleOriginal", True))}).encode("utf-8"),
+                        headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    urllib.request.urlopen(dreq, timeout=30).close()
+
+                res["path"] = f"{remote_dir}{sep}{out_name}" if remote_dir else out_name
+                res["savedBytes"] = max(0, res["oldSizeBytes"] - res["newSizeBytes"]) if want_overwrite else 0
+                res["relayedViaLocal"] = True
+                return res
+            finally:
+                shutil.rmtree(stage_dir, ignore_errors=True)
 
         def _stream_transcoded_playable(self, file_path: str, start_s: float = 0.0) -> None:
             if not rt.media.ffmpeg:
