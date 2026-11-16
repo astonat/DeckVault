@@ -14,6 +14,9 @@
   - Visual **Crop Box** (`C`), aspect presets (`16:9`, `9:16`, `1:1`, `4:3`, `Free`), live `Rotate 90°`, `Flip H/V`, mute audio export, and PNG snapshots.
   - **Draggable Cut Start/End Bars** directly on the storyboard strip with automatic loop + **Cropped Preview (`P`)** playback on release before rendering.
   - Fast lossless copy cuts (`ffmpeg -c copy`) when trimming without visual transforms, or compressed H.264 re-encode (`CRF 16–32`) saving over original (with Recycle Bin backup) or as `_edited.mp4`.
+- **Built-In Compressor & Upscaler Studio**: Shrink videos/images with live Before → After size estimates (including a `1.5s` FFmpeg sample probe or exact Target MB mode, H.264/HEVC, `1080p/720p/480p`), or upscale (`2x`, `4K`, `1440p`, `1080p` Lanczos + sharpen + denoise + optional `60 FPS`).
+- **Cloud & Storage Apps Tabs**: Browse **Google Drive** as its own tab under Devices and connect **Dropbox**, **OneDrive**, **iCloud Drive**, **MEGA**, or custom network folders (`Open`, `Split View`, drag-and-drop).
+- **Split View, Multi-Select & External App Drag-Out**: Right-click any device, cloud tab, drive, or folder to **Open in Split View**; multi-select via checkboxes, `Shift+Click`, or marquee drag box; drag files directly out of DeckVault (or press `Ctrl+C`) to drop/paste into Dropbox or Explorer; choose between **Move to Recycle Bin (`Del`)** and **Permanently Delete (`Shift+Del`)**.
 - **Cross-Device Favorites & Google Drive Backup**: Bookmark folders from any device and back up files straight to Google Drive for Desktop or `rclone` remotes.
 - **Single-Instance Desktop Window + Tray Server**: Runs cleanly in the Windows system tray (`48720` HTTP / `48721` UDP) so paired devices stay connected while the frameless OLED studio window opens on demand.
 
@@ -27,7 +30,7 @@
 
 ---
 
-## Quick Start (Prebuilt Release)
+## Quick Start (Prebuilt Release v1.3.0)
 
 Download the latest binaries from the **Releases** page:
 

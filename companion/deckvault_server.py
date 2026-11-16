@@ -12,7 +12,9 @@ import argparse
 import ctypes
 from ctypes import wintypes
 import concurrent.futures
+import gc
 import hashlib
+import io
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -36,7 +38,7 @@ import uuid
 from desktop_ui import DESKTOP_APP_HTML
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.3.0"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
 DISCOVERY_MAGIC = b"DECKVAULT_DISCOVER_V1"
@@ -63,7 +65,7 @@ FRAMES_DIR = CONFIG_DIR / "frames"
 
 
 def detect_windows_drives() -> list[str]:
-    """Return fixed/removable accessible Windows drive roots such as ['C:\\', 'D:\\']."""
+    """Return fixed/removable/cloud Windows drive roots such as ['C:\\', 'D:\\', 'I:\\']."""
     if os.name != "nt":
         return [str(Path.home())]
     drives: list[str] = []
@@ -73,8 +75,8 @@ def detect_windows_drives() -> list[str]:
             letter = chr(ord("A") + i)
             root = f"{letter}:\\"
             drive_type = ctypes.windll.kernel32.GetDriveTypeW(root)
-            # 2 = removable, 3 = fixed, 4 = network
-            if drive_type in (2, 3) and os.path.exists(root):
+            # 2 = removable, 3 = fixed, 4 = network / cloud virtual drive (e.g. Google Drive)
+            if drive_type in (2, 3, 4) and os.path.exists(root):
                 drives.append(root)
     return drives or [str(Path.home())]
 
@@ -91,9 +93,15 @@ def get_drive_volume_label(drive_root: str) -> str:
 
 
 def send_to_recycle_bin(file_path: str) -> None:
-    """Move a file to the Windows Recycle Bin silently using SHFileOperationW."""
+    """Move a file or folder to the Windows Recycle Bin silently using SHFileOperationW."""
+    clean_path = os.path.abspath(file_path).rstrip("\\/")
+    if len(clean_path) == 2 and clean_path[1] == ":":
+        clean_path += "\\"
     if os.name != "nt":
-        os.remove(file_path)
+        if os.path.isdir(clean_path):
+            shutil.rmtree(clean_path)
+        else:
+            os.remove(clean_path)
         return
 
     class SHFILEOPSTRUCTW(ctypes.Structure):
@@ -115,20 +123,25 @@ def send_to_recycle_bin(file_path: str) -> None:
     FOF_NOERRORUI = 0x0400
 
     # Double null-terminated path list required by SHFileOperationW
-    double_null_path = os.path.abspath(file_path) + "\0\0"
-    op = SHFILEOPSTRUCTW()
-    op.hwnd = None
-    op.wFunc = FO_DELETE
-    op.pFrom = double_null_path
-    op.pTo = None
-    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT
-    op.fAnyOperationsAborted = False
-    op.hNameMappings = None
-    op.lpszProgressTitle = None
-
-    rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
-    if rc != 0:
-        raise OSError(f"SHFileOperationW recycle failed with error code {rc}")
+    double_null_path = clean_path + "\0\0"
+    last_rc = 0
+    for attempt in range(3):
+        op = SHFILEOPSTRUCTW()
+        op.hwnd = None
+        op.wFunc = FO_DELETE
+        op.pFrom = double_null_path
+        op.pTo = None
+        op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT
+        op.fAnyOperationsAborted = False
+        op.hNameMappings = None
+        op.lpszProgressTitle = None
+        last_rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+        if last_rc == 0 and not op.fAnyOperationsAborted:
+            return
+        if attempt < 2:
+            gc.collect()
+            time.sleep(0.15)
+    raise OSError(f"Recycle Bin failed (code {last_rc}) — drive may not support Recycle Bin; use Permanently Delete")
 
 
 def _resolve_unique_dest(dest_dir: str, raw_name: str, conflict: str = "rename") -> str | None:
@@ -345,7 +358,29 @@ class ServerConfig:
         return total
 
     def get_roots(self) -> list[str]:
-        roots = [os.path.normpath(r) for r in self.data.get("roots", []) if os.path.exists(r)]
+        candidates: list[str] = [
+            *(self.data.get("roots", []) or []),
+            *detect_windows_drives(),
+            str(Path.home()),
+        ]
+        for prov in (self.data.get("cloud_providers", []) or []):
+            p = str((prov or {}).get("path", "")).strip()
+            if p:
+                candidates.append(p)
+        gd_dir = str(self.data.get("gdrive_backup_dir", "") or "").strip()
+        if gd_dir:
+            candidates.append(gd_dir)
+
+        seen: set[str] = set()
+        roots: list[str] = []
+        for raw in candidates:
+            norm = os.path.normpath(str(raw))
+            if len(norm) == 2 and norm[1] == ":":
+                norm += "\\"
+            key = norm.lower()
+            if key not in seen and os.path.exists(norm):
+                seen.add(key)
+                roots.append(norm)
         return roots or detect_windows_drives()
 
     def resolve_safe_path(self, raw_path: str) -> str:
@@ -1112,6 +1147,402 @@ class MediaService:
             raise RuntimeError("Snapshot extraction failed")
         return dest
 
+    def has_encoder(self, encoder_name: str) -> bool:
+        """Check whether the local ffmpeg binary supports a specific encoder."""
+        if not self.ffmpeg:
+            return False
+        cache_attr = "_enc_cache"
+        enc_map = getattr(self, cache_attr, None)
+        if enc_map is None:
+            enc_map = {}
+            try:
+                out = subprocess.check_output(
+                    [self.ffmpeg, "-hide_banner", "-encoders"],
+                    stderr=subprocess.DEVNULL, timeout=8, creationflags=SUBPROCESS_FLAGS,
+                ).decode("utf-8", errors="replace")
+                for key in ("libx264", "libx265", "libsvtav1"):
+                    enc_map[key] = (key in out)
+            except Exception:
+                enc_map = {"libx264": True, "libx265": False}
+            setattr(self, cache_attr, enc_map)
+        return bool(enc_map.get(encoder_name, False))
+
+    @staticmethod
+    def _atomic_finish_media(
+        tmp_path: str,
+        orig_path: str,
+        suffix: str,
+        out_ext: str,
+        save_mode: str,
+        recycle_original: bool,
+        old_size: int,
+    ) -> dict[str, Any]:
+        new_size = os.path.getsize(tmp_path)
+        parent = os.path.dirname(orig_path)
+        stem = os.path.splitext(os.path.basename(orig_path))[0]
+        if save_mode == "copy":
+            dest_path = _resolve_unique_dest(parent, f"{stem}{suffix}{out_ext}", "rename") or orig_path
+            os.replace(tmp_path, dest_path)
+            return {
+                "ok": True,
+                "path": dest_path,
+                "name": os.path.basename(dest_path),
+                "oldSizeBytes": old_size,
+                "newSizeBytes": new_size,
+                "savedBytes": 0,
+                "sizeDeltaBytes": new_size,
+                "saveMode": "copy",
+            }
+        if recycle_original:
+            send_to_recycle_bin(orig_path)
+        os.replace(tmp_path, orig_path)
+        return {
+            "ok": True,
+            "path": orig_path,
+            "name": os.path.basename(orig_path),
+            "oldSizeBytes": old_size,
+            "newSizeBytes": new_size,
+            "savedBytes": max(0, old_size - new_size),
+            "sizeDeltaBytes": new_size - old_size,
+            "saveMode": "overwrite",
+        }
+
+    def estimate_compression(
+        self,
+        path: str,
+        target_height: int = 0,
+        crf: int = 24,
+        codec: str = "h264",
+        audio_kbps: int = 128,
+        target_mb: float = 0.0,
+        sample_probe: bool = False,
+        quality: int = 82,
+    ) -> dict[str, Any]:
+        """Predict compressed output size (analytical, exact target MB, or fast 1.5s sample encode)."""
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        st = os.stat(path)
+        old_size = st.st_size
+        mtype = classify_media_type(path)
+
+        if mtype == "image":
+            from PIL import Image
+            with Image.open(path) as im:
+                ow, oh = im.size
+                scale = (target_height / oh) if (target_height > 0 and target_height < oh) else 1.0
+                nw = max(2, int(round(ow * scale)))
+                nh = max(2, int(round(oh * scale)))
+                if scale < 1.0:
+                    im_resized = im.resize((nw, nh), Image.Resampling.LANCZOS)
+                else:
+                    im_resized = im
+                buf = io.BytesIO()
+                ext_l = os.path.splitext(path)[1].lower()
+                fmt_name = "WEBP" if ext_l == ".webp" else "JPEG"
+                save_im = im_resized.convert("RGB") if fmt_name == "JPEG" else im_resized
+                save_im.save(buf, format=fmt_name, quality=max(30, min(98, int(quality))), optimize=True)
+                est_bytes = buf.tell()
+                return {
+                    "mediaType": "image",
+                    "oldSizeBytes": old_size,
+                    "estimatedBytes": est_bytes,
+                    "oldWidth": ow,
+                    "oldHeight": oh,
+                    "newWidth": nw,
+                    "newHeight": nh,
+                    "method": "exact_preview",
+                    "encoderUsed": fmt_name.lower(),
+                }
+
+        meta = self.probe_video(path, st)
+        dur_s = max(0.5, meta.get("durationMs", 0) / 1000.0)
+        ow = int(meta.get("width", 0) or 1920)
+        oh = int(meta.get("height", 0) or 1080)
+        scale = (target_height / oh) if (target_height > 0 and target_height < oh) else 1.0
+        nw = max(2, int(round(ow * scale)) // 2 * 2)
+        nh = max(2, int(round(oh * scale)) // 2 * 2)
+
+        use_hevc = (codec.lower() in ("h265", "hevc")) and self.has_encoder("libx265")
+        v_enc = "libx265" if use_hevc else "libx264"
+
+        if target_mb > 0:
+            est_bytes = max(32 * 1024, int(target_mb * 1024 * 1024))
+            return {
+                "mediaType": "video",
+                "oldSizeBytes": old_size,
+                "estimatedBytes": est_bytes,
+                "oldWidth": ow,
+                "oldHeight": oh,
+                "newWidth": nw,
+                "newHeight": nh,
+                "durationMs": meta.get("durationMs", 0),
+                "method": "target_size",
+                "encoderUsed": v_enc,
+            }
+
+        method = "analytical"
+        est_bytes: int | None = None
+        if sample_probe and self.ffmpeg and dur_s >= 2.0:
+            tmp_probe = os.path.join(
+                os.path.dirname(path), f".deckvault_probe_{uuid.uuid4().hex}.mp4"
+            )
+            try:
+                sample_dur = min(1.5, max(0.8, dur_s * 0.25))
+                sample_start = max(0.0, (dur_s - sample_dur) * 0.5)
+                cmd = [
+                    self.ffmpeg, "-y", "-ss", f"{sample_start:.2f}", "-i", path,
+                    "-t", f"{sample_dur:.2f}", "-map", "0:v:0",
+                ]
+                if audio_kbps > 0:
+                    cmd.extend(["-map", "0:a?"])
+                else:
+                    cmd.append("-an")
+                if target_height > 0 and target_height < oh:
+                    cmd.extend(["-vf", f"scale=-2:{target_height}"])
+                crf_clamped = max(16, min(36, int(crf)))
+                cmd.extend(["-c:v", v_enc, "-preset", "veryfast", "-crf", str(crf_clamped), "-pix_fmt", "yuv420p"])
+                if audio_kbps > 0:
+                    cmd.extend(["-c:a", "aac", "-b:a", f"{int(audio_kbps)}k"])
+                cmd.append(tmp_probe)
+                proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45, creationflags=SUBPROCESS_FLAGS)
+                if proc.returncode == 0 and os.path.isfile(tmp_probe) and os.path.getsize(tmp_probe) > 2048:
+                    sample_size = os.path.getsize(tmp_probe)
+                    est_bytes = max(32 * 1024, int((sample_size / sample_dur) * dur_s * 1.03))
+                    method = "sample_probe"
+            except Exception:
+                est_bytes = None
+            finally:
+                if os.path.exists(tmp_probe):
+                    try:
+                        os.remove(tmp_probe)
+                    except OSError:
+                        pass
+
+        if est_bytes is None:
+            pix_ratio = (nw * nh) / max(1, ow * oh)
+            # Baseline H.264 bitrate around 2.8 Mbps at 1080p CRF 23 scaled by resolution & CRF
+            crf_factor = 2.0 ** ((23.0 - float(crf)) / 6.0)
+            codec_factor = 0.66 if use_hevc else 1.0
+            src_bps = int(meta.get("bitrate", 0) or (old_size * 8 / dur_s))
+            base_v_bps = min(max(src_bps * 0.85, 400_000), max(3_500_000 * pix_ratio, src_bps * 0.92))
+            est_v_bps = max(160_000, base_v_bps * (pix_ratio ** 0.82) * crf_factor * codec_factor)
+            est_a_bps = max(0, int(audio_kbps)) * 1000
+            est_bytes = max(32 * 1024, int(((est_v_bps + est_a_bps) / 8.0) * dur_s))
+
+        return {
+            "mediaType": "video",
+            "oldSizeBytes": old_size,
+            "estimatedBytes": est_bytes,
+            "oldWidth": ow,
+            "oldHeight": oh,
+            "newWidth": nw,
+            "newHeight": nh,
+            "durationMs": meta.get("durationMs", 0),
+            "method": method,
+            "encoderUsed": v_enc,
+        }
+
+    def compress_media(
+        self,
+        path: str,
+        target_height: int = 0,
+        crf: int = 24,
+        codec: str = "h264",
+        audio_kbps: int = 128,
+        target_mb: float = 0.0,
+        save_mode: str = "copy",
+        recycle_original: bool = True,
+        quality: int = 82,
+    ) -> dict[str, Any]:
+        """Compress an image or video cleanly with optional target size MB or CRF quality."""
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        old_stat = os.stat(path)
+        old_size = old_stat.st_size
+        parent = os.path.dirname(path)
+        mtype = classify_media_type(path)
+        ext = os.path.splitext(path)[1].lower()
+
+        if mtype == "image":
+            from PIL import Image
+            out_ext = ext if ext in (".jpg", ".jpeg", ".webp", ".png") else ".jpg"
+            tmp_path = os.path.join(parent, f".deckvault_cmp_{uuid.uuid4().hex}{out_ext}")
+            try:
+                with Image.open(path) as im:
+                    ow, oh = im.size
+                    if target_height > 0 and target_height < oh:
+                        nw = max(2, int(round(ow * (target_height / oh))))
+                        im = im.resize((nw, int(target_height)), Image.Resampling.LANCZOS)
+                    q = max(30, min(98, int(quality)))
+                    if out_ext in (".jpg", ".jpeg"):
+                        im.convert("RGB").save(tmp_path, format="JPEG", quality=q, optimize=True)
+                    elif out_ext == ".webp":
+                        im.save(tmp_path, format="WEBP", quality=q, method=4)
+                    else:
+                        im.save(tmp_path, format="PNG", optimize=True)
+                res = self._atomic_finish_media(tmp_path, path, "_compressed", out_ext, save_mode, recycle_original, old_size)
+                self.invalidate_media_caches(path)
+                return res
+            except Exception:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                raise
+
+        if not self.ffmpeg or not self.ffprobe:
+            raise RuntimeError("FFmpeg is required for video compression")
+        meta = self.probe_video(path, old_stat)
+        dur_s = max(0.5, meta.get("durationMs", 0) / 1000.0)
+        oh = int(meta.get("height", 0) or 1080)
+        use_hevc = (codec.lower() in ("h265", "hevc")) and self.has_encoder("libx265")
+        v_enc = "libx265" if use_hevc else "libx264"
+        out_ext = ext if ext in (".mp4", ".mov", ".mkv", ".m4v") else ".mp4"
+        tmp_path = os.path.join(parent, f".deckvault_cmp_{uuid.uuid4().hex}{out_ext}")
+
+        try:
+            cmd = [self.ffmpeg, "-y", "-i", path, "-map", "0:v:0"]
+            if audio_kbps <= 0:
+                cmd.append("-an")
+            else:
+                cmd.extend(["-map", "0:a?"])
+            if target_height > 0 and target_height < oh:
+                cmd.extend(["-vf", f"scale=-2:{int(target_height)},setsar=1"])
+            cmd.extend(["-c:v", v_enc, "-preset", "medium", "-pix_fmt", "yuv420p"])
+            if use_hevc:
+                cmd.extend(["-tag:v", "hvc1"])
+            if target_mb > 0:
+                total_bps = (float(target_mb) * 1024 * 1024 * 8.0) / dur_s
+                a_bps = max(0, int(audio_kbps)) * 1000
+                v_bps = max(120_000, int((total_bps - a_bps) * 0.94))
+                v_kbps = max(120, v_bps // 1000)
+                cmd.extend(["-b:v", f"{v_kbps}k", "-maxrate", f"{int(v_kbps * 1.35)}k", "-bufsize", f"{v_kbps * 2}k"])
+            else:
+                cmd.extend(["-crf", str(max(16, min(36, int(crf))))])
+            if audio_kbps > 0:
+                cmd.extend(["-c:a", "aac", "-b:a", f"{int(audio_kbps)}k"])
+            cmd.extend(["-movflags", "+faststart", tmp_path])
+
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, creationflags=SUBPROCESS_FLAGS)
+            if proc.returncode != 0 or not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
+                raise RuntimeError(proc.stderr[-600:] or "FFmpeg compression failed")
+            res = self._atomic_finish_media(tmp_path, path, "_compressed", out_ext, save_mode, recycle_original, old_size)
+            self.invalidate_media_caches(path)
+            st_new = os.stat(res["path"])
+            self.cache.put(res["path"], st_new.st_mtime_ns, st_new.st_size, self.probe_video(res["path"], st_new))
+            return res
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
+
+    def upscale_media(
+        self,
+        path: str,
+        preset: str = "2x",
+        sharpen: float = 0.9,
+        denoise: bool = False,
+        fps60: bool = False,
+        crf: int = 19,
+        save_mode: str = "copy",
+        recycle_original: bool = True,
+    ) -> dict[str, Any]:
+        """Upscale and detail-enhance a video or image cleanly."""
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        old_stat = os.stat(path)
+        old_size = old_stat.st_size
+        parent = os.path.dirname(path)
+        mtype = classify_media_type(path)
+        ext = os.path.splitext(path)[1].lower()
+        sharp_v = max(0.0, min(2.0, float(sharpen)))
+
+        if mtype == "image":
+            from PIL import Image, ImageFilter
+            out_ext = ext if ext in (".png", ".jpg", ".jpeg", ".webp") else ".png"
+            tmp_path = os.path.join(parent, f".deckvault_up_{uuid.uuid4().hex}{out_ext}")
+            try:
+                with Image.open(path) as im:
+                    ow, oh = im.size
+                    target_map = {"4k": 3840, "1440p": 2560, "1080p": 1920}
+                    if preset in target_map:
+                        tw = target_map[preset]
+                        nw = max(ow, tw)
+                        nh = int(round(oh * (nw / max(1, ow))))
+                    else:
+                        nw, nh = ow * 2, oh * 2
+                    up = im.resize((nw, nh), Image.Resampling.LANCZOS)
+                    if sharp_v > 0.05:
+                        up = up.filter(ImageFilter.UnsharpMask(radius=2.0, percent=int(sharp_v * 120), threshold=2))
+                    if out_ext in (".jpg", ".jpeg"):
+                        up.convert("RGB").save(tmp_path, format="JPEG", quality=95, optimize=True)
+                    elif out_ext == ".webp":
+                        up.save(tmp_path, format="WEBP", quality=94, method=4)
+                    else:
+                        up.save(tmp_path, format="PNG", optimize=True)
+                res = self._atomic_finish_media(tmp_path, path, f"_upscaled_{preset}", out_ext, save_mode, recycle_original, old_size)
+                self.invalidate_media_caches(path)
+                return res
+            except Exception:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                raise
+
+        if not self.ffmpeg or not self.ffprobe:
+            raise RuntimeError("FFmpeg is required for video upscaling")
+        out_ext = ext if ext in (".mp4", ".mov", ".mkv", ".m4v") else ".mp4"
+        tmp_path = os.path.join(parent, f".deckvault_up_{uuid.uuid4().hex}{out_ext}")
+        try:
+            vf_parts: list[str] = []
+            if denoise:
+                vf_parts.append("hqdn3d=2.0:1.5:3.0:2.5")
+            if preset == "4k":
+                vf_parts.append("scale=3840:-2:flags=lanczos")
+            elif preset == "1440p":
+                vf_parts.append("scale=2560:-2:flags=lanczos")
+            elif preset == "1080p":
+                vf_parts.append("scale=1920:-2:flags=lanczos")
+            else:
+                vf_parts.append("scale=trunc(iw*2/2)*2:trunc(ih*2/2)*2:flags=lanczos")
+            if sharp_v > 0.05:
+                vf_parts.append(f"unsharp=5:5:{sharp_v:.2f}:5:5:0.0")
+            if fps60:
+                vf_parts.append("framerate=fps=60:interp_mode=mci:mc_mode=aobmc")
+            vf_parts.append("setsar=1")
+
+            cmd = [
+                self.ffmpeg, "-y", "-i", path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-vf", ",".join(vf_parts),
+                "-c:v", "libx264", "-preset", "fast",
+                "-crf", str(max(14, min(28, int(crf)))),
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart", tmp_path,
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, creationflags=SUBPROCESS_FLAGS)
+            if proc.returncode != 0 or not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
+                raise RuntimeError(proc.stderr[-600:] or "FFmpeg upscale failed")
+            res = self._atomic_finish_media(tmp_path, path, f"_upscaled_{preset}", out_ext, save_mode, recycle_original, old_size)
+            self.invalidate_media_caches(path)
+            st_new = os.stat(res["path"])
+            self.cache.put(res["path"], st_new.st_mtime_ns, st_new.st_size, self.probe_video(res["path"], st_new))
+            return res
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
+
 
 class FleetStore:
     """Persists remote paired devices (Laptop, Tablet, Fold, iPhone) for the PC Desktop App."""
@@ -1263,6 +1694,175 @@ def detect_gdrive_environment(config_data: dict[str, Any]) -> dict[str, Any]:
         "rcloneRemotes": rclone_remotes,
         "savedRemote": saved_remote,
     }
+
+
+def _stat_cloud_usage(path: str) -> tuple[int, int]:
+    try:
+        u = shutil.disk_usage(path)
+        return int(u.free), int(u.total)
+    except OSError:
+        return 0, 0
+
+
+def detect_cloud_storage_providers(config_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Detect Google Drive, OneDrive, Dropbox, iCloud, MEGA & custom cloud/network folders."""
+    providers: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+
+    def add_entry(pid: str, name: str, provider_type: str, raw_path: str, custom: bool = False) -> None:
+        if not raw_path:
+            return
+        norm = os.path.normpath(raw_path)
+        if len(norm) == 2 and norm[1] == ":":
+            norm += "\\"
+        if not os.path.isdir(norm):
+            return
+        key = norm.lower()
+        if key in seen_paths:
+            return
+        seen_paths.add(key)
+        free_b, total_b = _stat_cloud_usage(norm)
+        providers.append({
+            "id": pid,
+            "name": name,
+            "provider": provider_type,
+            "path": norm,
+            "freeBytes": free_b,
+            "totalBytes": total_b,
+            "custom": custom,
+            "online": True,
+        })
+
+    # 1. Google Drive (virtual mount X:\My Drive or Drive File Stream / Desktop)
+    gd_env = detect_gdrive_environment(config_data)
+    for idx, d in enumerate(gd_env.get("detectedDirs") or []):
+        add_entry(f"gdrive_{idx}", "Google Drive", "gdrive", d)
+    if os.name == "nt":
+        for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+            root = f"{letter}:\\"
+            if os.path.isdir(root) and "google" in get_drive_volume_label(root).lower():
+                my_d = os.path.join(root, "My Drive")
+                add_entry(f"gdrive_vol_{letter}", "Google Drive", "gdrive", my_d if os.path.isdir(my_d) else root)
+
+    # 2. OneDrive / OneDrive for Business
+    for env_k in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        val = os.environ.get(env_k, "")
+        if val:
+            lbl = "OneDrive" if env_k != "OneDriveCommercial" else "OneDrive Work"
+            add_entry(f"onedrive_{env_k}", lbl, "onedrive", val)
+    home = Path.home()
+    add_entry("onedrive_home", "OneDrive", "onedrive", str(home / "OneDrive"))
+
+    # 3. Dropbox (via info.json or ~\Dropbox)
+    for info_base in (os.environ.get("LOCALAPPDATA", ""), os.environ.get("APPDATA", "")):
+        if info_base:
+            info_file = os.path.join(info_base, "Dropbox", "info.json")
+            if os.path.isfile(info_file):
+                try:
+                    with open(info_file, "r", encoding="utf-8") as df:
+                        dinfo = json.load(df)
+                    for acct_k in ("personal", "business"):
+                        p = (dinfo.get(acct_k) or {}).get("path", "")
+                        if p:
+                            add_entry(f"dropbox_{acct_k}", "Dropbox" if acct_k == "personal" else "Dropbox Business", "dropbox", p)
+                except Exception:
+                    pass
+    add_entry("dropbox_home", "Dropbox", "dropbox", str(home / "Dropbox"))
+
+    # 4. iCloud Drive / MEGA / Box / Nextcloud
+    add_entry("icloud_home", "iCloud Drive", "icloud", str(home / "iCloudDrive"))
+    add_entry("mega_home", "MEGA", "mega", str(home / "MEGA"))
+    add_entry("box_home", "Box", "box", str(home / "Box"))
+    add_entry("nextcloud_home", "Nextcloud", "nextcloud", str(home / "Nextcloud"))
+
+    # 5. User-connected storage apps or custom network/cloud mounts
+    for item in (config_data.get("cloud_providers", []) or []):
+        if isinstance(item, dict) and item.get("path"):
+            add_entry(
+                str(item.get("id") or f"custom_{uuid.uuid4().hex[:8]}"),
+                str(item.get("name") or "Cloud Folder"),
+                str(item.get("provider") or "custom"),
+                str(item.get("path")),
+                custom=True,
+            )
+
+    return providers
+
+
+DRAG_STAGING_DIR = CONFIG_DIR / "drag_staging"
+
+
+def _prepare_local_drag_files(rt: CompanionRuntime, host_id: str, paths: list[str]) -> list[str]:
+    """Resolve local file paths or stage remote files locally so Explorer/Dropbox can accept drops."""
+    local_id = rt.config.data["host_id"]
+    out_paths: list[str] = []
+    if not host_id or host_id == local_id:
+        for raw_p in paths:
+            safe = rt.config.resolve_safe_path(str(raw_p))
+            if os.path.exists(safe):
+                out_paths.append(safe)
+        return out_paths
+
+    host = rt.fleet.get(host_id)
+    if not host:
+        raise ValueError("Source paired device is not available")
+    DRAG_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    for raw_p in paths:
+        src_p = str(raw_p)
+        fname = os.path.basename(src_p.rstrip("\\/")) or f"file_{int(time.time())}"
+        target = _resolve_unique_dest(str(DRAG_STAGING_DIR), fname, "overwrite")
+        assert target is not None
+        q = url_quote(src_p, safe="")
+        req = urllib.request.Request(
+            f"http://{host['ip']}:{host['port']}/api/stream?path={q}",
+            headers={"X-DeckVault-Token": host["token"]},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=180) as resp, open(target, "wb") as out:
+            shutil.copyfileobj(resp, out)
+        out_paths.append(target)
+    return out_paths
+
+
+def _set_windows_file_clipboard(local_paths: list[str]) -> None:
+    """Copy real Windows FileDrop paths (CF_HDROP) onto the system clipboard."""
+    if os.name != "nt" or not local_paths:
+        return
+    done = threading.Event()
+    err_holder: list[Exception] = []
+
+    def sta_worker() -> None:
+        try:
+            import clr
+            clr.AddReference("System.Windows.Forms")
+            import System
+            from System.Windows.Forms import Clipboard
+            from System.Collections.Specialized import StringCollection
+            from System.Threading import ApartmentState, Thread
+
+            def run_clip() -> None:
+                try:
+                    sc = StringCollection()
+                    for p in local_paths:
+                        sc.Add(os.path.abspath(p))
+                    Clipboard.SetFileDropList(sc)
+                except Exception as exc:
+                    err_holder.append(exc)
+                finally:
+                    done.set()
+
+            t = Thread(System.Threading.ThreadStart(run_clip))
+            t.SetApartmentState(ApartmentState.STA)
+            t.Start()
+            t.Join(4000)
+        except Exception as exc:
+            err_holder.append(exc)
+            done.set()
+
+    sta_worker()
+    done.wait(4.5)
+    if err_holder:
+        raise err_holder[0]
 
 
 def discover_all_lan_hosts(self_host_id: str, http_port: int = DEFAULT_HTTP_PORT, udp_port: int = DEFAULT_UDP_PORT) -> list[dict[str, Any]]:
@@ -1529,6 +2129,7 @@ def make_handler(rt: CompanionRuntime):
                     "fleetHosts": rt.fleet.public_list(),
                     "favorites": rt.favorites.list_all(),
                     "gdrive": detect_gdrive_environment(rt.config.data),
+                    "cloudProviders": detect_cloud_storage_providers(rt.config.data),
                 })
                 return
 
@@ -1620,6 +2221,8 @@ def make_handler(rt: CompanionRuntime):
                     self._send_json(HTTPStatus.OK, {"favorites": rt.favorites.list_all()})
                 elif route == "/api/gdrive/status":
                     self._send_json(HTTPStatus.OK, detect_gdrive_environment(rt.config.data))
+                elif route == "/api/cloud/list":
+                    self._send_json(HTTPStatus.OK, {"cloudProviders": detect_cloud_storage_providers(rt.config.data)})
                 elif route == "/api/stream/playable":
                     raw_path = (qs.get("path") or [""])[0]
                     start_s = float((qs.get("start") or ["0"])[0] or "0")
@@ -1685,6 +2288,20 @@ def make_handler(rt: CompanionRuntime):
                     setattr(self.server, "_last_window_spawn_ts", time.time())
                     subprocess.Popen(exe_dir_cmd, creationflags=SUBPROCESS_FLAGS)
                 self._send_json(HTTPStatus.OK, {"focused": focused, "launched": not focused})
+                return
+
+            if route == "/api/desktop/quit":
+                self._read_json_body()
+                if not self._is_loopback():
+                    self._send_json(HTTPStatus.FORBIDDEN, {"error": "Localhost only"})
+                    return
+                self._send_json(HTTPStatus.OK, {"quitting": True})
+                def _bye():
+                    time.sleep(0.15)
+                    _kill_zombie_window_processes(0)
+                    os._exit(0)
+                t = threading.Thread(target=_bye, daemon=True)
+                t.start()
                 return
 
             if not self._check_auth(qs):
@@ -1857,6 +2474,103 @@ def make_handler(rt: CompanionRuntime):
                     os.replace(safe, target)
                     rt.media.invalidate_media_caches(safe)
                     self._send_json(HTTPStatus.OK, {"ok": True, "oldPath": safe, "newPath": target, "name": new_name})
+                elif route == "/api/cloud/connect":
+                    raw_path = str(body.get("path", "")).strip()
+                    name = str(body.get("name", "")).strip()
+                    provider = str(body.get("provider", "custom")).strip() or "custom"
+                    if not raw_path:
+                        raise ValueError("Folder or drive path is required")
+                    norm = os.path.normpath(raw_path)
+                    if len(norm) == 2 and norm[1] == ":":
+                        norm += "\\"
+                    if not os.path.isdir(norm):
+                        raise NotADirectoryError(f"Folder not found: {norm}")
+                    if not name:
+                        name = os.path.basename(norm.rstrip("\\/")) or norm
+                    list_p = list(rt.config.data.get("cloud_providers", []) or [])
+                    list_p = [x for x in list_p if os.path.normpath(str(x.get("path", ""))).lower() != norm.lower()]
+                    list_p.insert(0, {
+                        "id": f"cloud_{uuid.uuid4().hex[:8]}",
+                        "name": name,
+                        "provider": provider,
+                        "path": norm,
+                    })
+                    rt.config.data["cloud_providers"] = list_p
+                    roots_cur = list(rt.config.data.get("roots", []) or [])
+                    if not any(os.path.normpath(r).lower() == norm.lower() for r in roots_cur):
+                        roots_cur.append(norm)
+                        rt.config.data["roots"] = roots_cur
+                    rt.config.save()
+                    self._send_json(HTTPStatus.OK, {"cloudProviders": detect_cloud_storage_providers(rt.config.data)})
+                elif route == "/api/cloud/remove":
+                    cid = str(body.get("id", ""))
+                    list_p = [x for x in (rt.config.data.get("cloud_providers", []) or []) if str(x.get("id", "")) != cid]
+                    rt.config.data["cloud_providers"] = list_p
+                    rt.config.save()
+                    self._send_json(HTTPStatus.OK, {"cloudProviders": detect_cloud_storage_providers(rt.config.data)})
+                elif route == "/api/media/compress-estimate":
+                    safe = rt.config.resolve_safe_path(str(body.get("path", "")))
+                    res = rt.media.estimate_compression(
+                        path=safe,
+                        target_height=int(body.get("targetHeight", 0) or 0),
+                        crf=int(body.get("crf", 24) or 24),
+                        codec=str(body.get("codec", "h264")),
+                        audio_kbps=int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128),
+                        target_mb=float(body.get("targetMb", 0.0) or 0.0),
+                        sample_probe=bool(body.get("sampleProbe", False)),
+                        quality=int(body.get("quality", 82) or 82),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                elif route == "/api/media/compress":
+                    safe = rt.config.resolve_safe_path(str(body.get("path", "")))
+                    res = rt.media.compress_media(
+                        path=safe,
+                        target_height=int(body.get("targetHeight", 0) or 0),
+                        crf=int(body.get("crf", 24) or 24),
+                        codec=str(body.get("codec", "h264")),
+                        audio_kbps=int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128),
+                        target_mb=float(body.get("targetMb", 0.0) or 0.0),
+                        save_mode=str(body.get("saveMode", "copy")),
+                        recycle_original=bool(body.get("recycleOriginal", True)),
+                        quality=int(body.get("quality", 82) or 82),
+                    )
+                    rt.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res["saveMode"] == "copy" else 0, 0)
+                    total_saved = rt.config.add_space_saved(res["savedBytes"])
+                    res["totalSpaceSavedBytes"] = total_saved
+                    rt.log(f"Compressed {os.path.basename(res['path'])} -> {res['newSizeBytes'] / (1024*1024):.1f} MB")
+                    self._send_json(HTTPStatus.OK, res)
+                elif route == "/api/media/upscale":
+                    safe = rt.config.resolve_safe_path(str(body.get("path", "")))
+                    res = rt.media.upscale_media(
+                        path=safe,
+                        preset=str(body.get("preset", "2x")),
+                        sharpen=float(body.get("sharpen", 0.9) if body.get("sharpen") is not None else 0.9),
+                        denoise=bool(body.get("denoise", False)),
+                        fps60=bool(body.get("fps60", False)),
+                        crf=int(body.get("crf", 19) or 19),
+                        save_mode=str(body.get("saveMode", "copy")),
+                        recycle_original=bool(body.get("recycleOriginal", True)),
+                    )
+                    rt.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res["saveMode"] == "copy" else 0, 0)
+                    rt.log(f"Upscaled {os.path.basename(res['path'])} ({body.get('preset', '2x')})")
+                    self._send_json(HTTPStatus.OK, res)
+                elif route == "/api/system/prepare-drag":
+                    if not self._is_loopback():
+                        raise PermissionError("Localhost only")
+                    host_id = str(body.get("hostId", rt.config.data["host_id"]))
+                    paths = [str(p) for p in (body.get("paths") or []) if str(p).strip()]
+                    local_paths = _prepare_local_drag_files(rt, host_id, paths)
+                    self._send_json(HTTPStatus.OK, {"ok": True, "localPaths": local_paths})
+                elif route == "/api/system/copy-files-clipboard":
+                    if not self._is_loopback():
+                        raise PermissionError("Localhost only")
+                    host_id = str(body.get("hostId", rt.config.data["host_id"]))
+                    paths = [str(p) for p in (body.get("paths") or []) if str(p).strip()]
+                    local_paths = _prepare_local_drag_files(rt, host_id, paths)
+                    if not local_paths:
+                        raise FileNotFoundError("No files found to copy")
+                    _set_windows_file_clipboard(local_paths)
+                    self._send_json(HTTPStatus.OK, {"ok": True, "count": len(local_paths), "localPaths": local_paths})
                 elif route == "/api/file/delete":
                     paths = body.get("paths") or []
                     recycle = bool(body.get("recycle", True))
@@ -1864,32 +2578,64 @@ def make_handler(rt: CompanionRuntime):
                     deleted = 0
                     errors: list[str] = []
                     for raw_p in paths:
+                        raw_str = str(raw_p or "").strip()
+                        if not raw_str:
+                            continue
                         try:
-                            safe = rt.config.resolve_safe_path(str(raw_p))
+                            safe = rt.config.resolve_safe_path(raw_str)
+                            if not os.path.exists(safe):
+                                errors.append(f"{os.path.basename(safe) or safe}: File no longer exists")
+                                continue
                             if os.path.isfile(safe):
                                 sz = os.path.getsize(safe)
                                 is_media = 1 if classify_media_type(safe) in ("video", "image") else 0
-                                if recycle:
-                                    send_to_recycle_bin(safe)
-                                else:
-                                    os.remove(safe)
                                 rt.media.invalidate_media_caches(safe)
+                                last_err: Exception | None = None
+                                for attempt in range(3):
+                                    try:
+                                        if recycle:
+                                            send_to_recycle_bin(safe)
+                                        else:
+                                            os.remove(safe)
+                                        last_err = None
+                                        break
+                                    except Exception as exc:
+                                        last_err = exc
+                                        if attempt < 2:
+                                            gc.collect()
+                                            time.sleep(0.15)
+                                if last_err is not None:
+                                    raise last_err
                                 rt.indexer.adjust_ancestors(safe, -sz, -1, -is_media)
                                 freed += sz
                                 deleted += 1
                             elif os.path.isdir(safe):
                                 dir_stats = rt.indexer.get_dir_stats(safe) or {"size": 0, "files": 0, "media": 0}
-                                if recycle:
-                                    send_to_recycle_bin(safe)
-                                else:
-                                    shutil.rmtree(safe)
+                                last_err = None
+                                for attempt in range(3):
+                                    try:
+                                        if recycle:
+                                            send_to_recycle_bin(safe)
+                                        else:
+                                            shutil.rmtree(safe)
+                                        last_err = None
+                                        break
+                                    except Exception as exc:
+                                        last_err = exc
+                                        if attempt < 2:
+                                            gc.collect()
+                                            time.sleep(0.15)
+                                if last_err is not None:
+                                    raise last_err
                                 rt.indexer.adjust_ancestors(
                                     safe, -dir_stats["size"], -dir_stats["files"], -dir_stats["media"]
                                 )
                                 freed += dir_stats["size"]
                                 deleted += 1
+                            else:
+                                errors.append(f"{safe}: Unsupported item type")
                         except Exception as item_exc:
-                            errors.append(f"{raw_p}: {item_exc}")
+                            errors.append(f"{os.path.basename(raw_str) or raw_str}: {item_exc}")
                     total_saved = rt.config.add_space_saved(freed)
                     self._send_json(HTTPStatus.OK, {
                         "deletedCount": deleted,
@@ -2376,6 +3122,7 @@ def make_handler(rt: CompanionRuntime):
                 "indexer": rt.indexer.status(),
                 "drives": roots_payload,
                 "quickFolders": quick_folders,
+                "cloudProviders": detect_cloud_storage_providers(rt.config.data),
             })
 
         def _handle_tree(self, qs: dict[str, list[str]]) -> None:
@@ -3221,6 +3968,32 @@ def _launch_desktop_webview(http_port: int, force_process_exit: bool = True) -> 
             nh = max(520, int(h))
             win.move(int(x), int(y))
             win.resize(nw, nh)
+
+        def start_native_drag(self, local_paths: list[str]) -> bool:
+            """Initiate a Windows OLE FileDrop drag out of DeckVault into external apps (Dropbox/Explorer)."""
+            if os.name != "nt" or not local_paths:
+                return False
+            valid = [os.path.abspath(str(p)) for p in local_paths if os.path.exists(str(p))]
+            if not valid:
+                return False
+            try:
+                import clr
+                clr.AddReference("System.Windows.Forms")
+                import System
+                from System.Windows.Forms import Application, DataObject, DataFormats, DragDropEffects
+                if Application.OpenForms.Count <= 0:
+                    return False
+                form = Application.OpenForms[0]
+
+                def invoke_drag() -> None:
+                    arr = System.Array[str](valid)
+                    data_obj = DataObject(DataFormats.FileDrop, arr)
+                    form.DoDragDrop(data_obj, DragDropEffects.Copy | DragDropEffects.Move)
+
+                form.BeginInvoke(System.Action(invoke_drag))
+                return True
+            except Exception:
+                return False
 
     api = DesktopWindowApi()
     win = webview.create_window(

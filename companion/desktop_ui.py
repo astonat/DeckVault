@@ -88,7 +88,11 @@ DESKTOP_APP_HTML = r"""<!doctype html>
   .chip.active .dot{background:var(--success)}
 
   .drive-strip{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:7px 9px;cursor:pointer;min-width:128px}
-  .drive-strip.active{border-color:var(--primary)}
+  .drive-strip.active,.drive-strip.drop-target{border-color:var(--primary)}
+  .cloud-box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:7px 8px;display:flex;flex-direction:column;gap:5px;flex-shrink:0}
+  .cloud-hdr{display:flex;align-items:center;justify-content:space-between;font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.4px}
+  .cloud-tab{background:var(--elev);border:1px solid var(--border);border-radius:10px;padding:5px 9px;font-size:11px;font-weight:600;color:var(--text);cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+  .cloud-tab:hover,.cloud-tab.active,.cloud-tab.drop-target{border-color:var(--primary);color:var(--primary);background:var(--primary-container)}
   .bar{height:5px;border-radius:99px;background:var(--elev);overflow:hidden;margin:4px 0 3px}
   .bar>div{height:100%;background:var(--primary);border-radius:99px}
 
@@ -116,18 +120,23 @@ DESKTOP_APP_HTML = r"""<!doctype html>
   .input{background:var(--card);border:1px solid var(--border);border-radius:11px;padding:7px 11px;outline:none;font-size:12px}
   .input:focus{border-color:var(--primary)}
 
-  .browser-scroll{flex:1;overflow-y:auto;padding-bottom:78px}
+  .browser-scroll{flex:1;overflow-y:auto;padding-bottom:84px;position:relative}
+  .browser-scroll.drop-target{outline:2px dashed var(--primary);outline-offset:-4px;background:rgba(142,184,255,.04)}
+  .marquee-rect{position:fixed;border:1.5px solid var(--primary);background:rgba(142,184,255,.16);border-radius:4px;pointer-events:none;z-index:45;display:none}
   .grid{display:grid;grid-template-columns:repeat(var(--grid-cols,4),minmax(0,1fr));gap:10px}
   .grid.auto{grid-template-columns:repeat(auto-fill,minmax(var(--card-min,195px),1fr))}
   .media-card{background:var(--card);border:1px solid var(--border);border-radius:15px;overflow:hidden;cursor:pointer;display:flex;flex-direction:column;position:relative;transition:border-color .14s,transform .1s}
   .media-card:hover{border-color:var(--high)}
   .media-card.focused{border-color:var(--secondary)}
-  .media-card.selected{border-color:var(--primary);box-shadow:0 0 0 1px var(--primary)}
+  .media-card.selected{border-color:var(--primary);box-shadow:0 0 0 1px var(--primary);background:var(--elev)}
+  .sel-check{position:absolute;top:7px;left:7px;width:21px;height:21px;border-radius:99px;border:2px solid rgba(255,255,255,.72);background:rgba(0,0,0,.62);color:#000;font-size:11px;font-weight:900;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .12s;z-index:4;cursor:pointer}
+  .media-card:hover .sel-check,.list-row:hover .sel-check,body.has-selection .sel-check,body.select-mode .sel-check,.selected .sel-check{opacity:1}
+  .selected .sel-check{background:var(--primary);border-color:var(--primary);color:var(--on-primary)}
   .thumb-wrap{position:relative;width:100%;aspect-ratio:var(--card-aspect,16/10);background:#07080b;overflow:hidden;display:flex;align-items:center;justify-content:center}
   .thumb-wrap img{width:100%;height:100%;object-fit:cover;display:block}
   .sb-hover{position:absolute;inset:0;background-repeat:no-repeat;display:none;pointer-events:none}
   .badge{position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.8);border:1px solid rgba(255,255,255,.12);padding:2px 6px;border-radius:6px;font-size:10px;font-weight:700}
-  .badge.tl{right:auto;left:6px}
+  .badge.tl{right:auto;left:6px;top:auto;bottom:6px}
   .card-body{padding:8px 10px;display:flex;flex-direction:column;gap:4px}
   .card-title{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .card-meta{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--muted)}
@@ -137,12 +146,20 @@ DESKTOP_APP_HTML = r"""<!doctype html>
 
   .list-col{display:flex;flex-direction:column;gap:5px}
   .list-col.compact{gap:3px}
-  .list-row{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:7px 11px;display:flex;align-items:center;gap:11px;cursor:pointer}
+  .list-row{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:7px 11px;display:flex;align-items:center;gap:11px;cursor:pointer;position:relative}
+  .list-row .sel-check{position:static;flex-shrink:0;width:18px;height:18px;opacity:.45}
   .list-col.compact .list-row{padding:5px 9px;border-radius:10px}
   .list-row:hover{border-color:var(--high)}
   .list-row.selected{border-color:var(--primary);background:var(--elev)}
   .list-thumb{width:64px;height:40px;border-radius:8px;background:#07080b;object-fit:cover;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--muted);font-weight:700}
   .list-col.compact .list-thumb{width:46px;height:30px}
+
+  /* Split Dual-Pane Browser */
+  .split-pane{flex:0 0 460px;min-width:290px;max-width:65vw;border-left:1px solid var(--border);background:var(--bg)}
+  .split-hdr{display:flex;align-items:center;gap:6px;padding:6px 8px;background:var(--panel);border:1px solid var(--border);border-radius:12px;flex-wrap:wrap}
+  .est-box{background:var(--elev);border:1px solid var(--border);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:8px}
+  .est-bar{height:8px;border-radius:99px;background:var(--high);overflow:hidden;position:relative}
+  .est-bar-fill{height:100%;background:var(--success);border-radius:99px;transition:width .2s}
 
   /* Adjustable Right Inspector Panel */
   .insp-pane{width:280px;min-width:210px;max-width:440px;background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column;padding:12px;gap:10px;overflow-y:auto;flex-shrink:0}
@@ -272,17 +289,19 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       <button class="rail-btn" onclick="togglePane()" title="Toggle Folder Panel">Folders</button>
       <button class="rail-btn active" id="railBrowse" onclick="showBrowseMode()">Browse</button>
       <button class="rail-btn" id="railDrives" onclick="openAllDrives()">Drives</button>
+      <button class="rail-btn" id="railCloud" onclick="openCloudModal()" title="Google Drive & Connected Cloud Storage">Cloud</button>
       <button class="rail-btn" id="railHogs" onclick="loadSpaceHogs()">Hogs</button>
       <div class="rail-sep"></div>
       <div id="railHosts" style="display:flex;flex-direction:column;gap:5px;width:100%;align-items:center"></div>
       <div class="rail-spacer"></div>
       <div class="saved-pill" id="savedPill" style="display:none"><b>SAVED</b><span id="savedText">0 B</span></div>
+      <button class="rail-btn" onclick="toggleSplitView()" title="Toggle Split View">Split</button>
       <button class="rail-btn" onclick="toggleInspector()" title="Toggle Details Inspector">Info</button>
       <button class="rail-btn" onclick="openDevicesModal()">Devices</button>
       <button class="rail-btn" onclick="openSettingsModal()">Settings</button>
     </nav>
 
-    <!-- Adjustable Left Panel: Devices, Drives, Quick Folders, Folder Tree -->
+    <!-- Adjustable Left Panel: Devices, Cloud Tabs, Drives, Quick Folders, Folder Tree -->
     <aside class="tree-pane" id="treePane">
       <div style="display:flex;align-items:center;gap:6px">
         <div class="host-box" onclick="openDevicesModal()">
@@ -298,6 +317,13 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       </div>
 
       <div class="chip-row" id="hostSwitchRow"></div>
+      <div class="cloud-box" id="cloudStripSection">
+        <div class="cloud-hdr">
+          <span>CLOUD & STORAGE APPS</span>
+          <button class="mini-btn" onclick="openCloudModal()">+ Connect</button>
+        </div>
+        <div class="chip-row" id="cloudStripRow"></div>
+      </div>
       <div class="chip-row" id="favStripRow" style="display:none"></div>
       <div class="chip-row" id="drivesStripRow"></div>
       <div class="chip-row" id="quickRow"></div>
@@ -316,12 +342,14 @@ DESKTOP_APP_HTML = r"""<!doctype html>
     <div class="resizer" id="leftResizer"></div>
 
     <!-- Center Main Media Browser -->
-    <main class="main-pane">
+    <main class="main-pane" id="mainPane">
       <div class="topbar">
         <button class="pill-btn" onclick="togglePane()">Folders</button>
         <button class="pill-btn" id="topUpBtn" onclick="goUp()" title="Go to Above Folder (Backspace)">&#8593; Above Folder</button>
         <button class="pill-btn" id="favCurBtn" onclick="toggleFavoriteCurrentFolder()" title="Pin folder to Cross-Device Favorites">☆ Favorite</button>
         <div class="crumbs" id="breadcrumbs"></div>
+        <button class="pill-btn" id="selectModeBtn" onclick="toggleSelectMode()" title="Multi-Select Checkboxes">☑ Select</button>
+        <button class="pill-btn" id="splitToggleBtn" onclick="toggleSplitView()" title="Open/Close Split View">◫ Split View</button>
         <button class="pill-btn" onclick="createFolderHere()" title="New Folder">+ Folder</button>
         <button class="pill-btn" onclick="toggleGridPopover()" title="Grid Columns & Card Size">Grid / Cards</button>
         <button class="pill-btn" id="viewBtn" onclick="toggleViewMode()">Grid</button>
@@ -372,17 +400,39 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       </div>
 
       <!-- Multi-Select Action Bar -->
-      <div class="sel-bar" id="selBar">
+      <div class="sel-bar" id="selBar" style="flex-wrap:wrap">
         <strong id="selCount" style="font-size:13px">0 selected</strong>
-        <div style="flex:1"></div>
-        <button class="pill-btn" onclick="selectAllFiles()">Select All</button>
+        <button class="mini-btn" onclick="selectAllFiles()">All</button>
+        <button class="mini-btn" onclick="invertSelection()">Invert</button>
+        <span style="flex:1"></span>
         <button class="pill-btn" onclick="openTransferModal(getSelectedFiles(), true)">Move To...</button>
         <button class="pill-btn" onclick="openTransferModal(getSelectedFiles(), false)">Copy To...</button>
+        <button class="pill-btn" onmousedown="startNativeExternalDrag(event, Array.from(state.selected))" onclick="copyFilesToWindowsClipboard(state.activeHostId, Array.from(state.selected))" title="Drag onto Dropbox/Explorer or click to Copy to Windows Clipboard (Ctrl+C)">⤢ Drag / Copy App</button>
+        <button class="pill-btn" onclick="openOptimizeSelected('compress')">Compress</button>
+        <button class="pill-btn" onclick="openOptimizeSelected('upscale')">Upscale</button>
         <button class="pill-btn" onclick="backupSelectionToGDrive()">Google Drive</button>
-        <button class="pill-btn danger" onclick="deletePaths(Array.from(state.selected))">Delete</button>
-        <button class="pill-btn" onclick="clearSelection()">Cancel</button>
+        <button class="pill-btn danger" onclick="deletePaths(Array.from(state.selected), false)">♻ Recycle</button>
+        <button class="pill-btn danger" onclick="deletePaths(Array.from(state.selected), true)">✕ Delete Forever</button>
+        <button class="pill-btn" onclick="clearSelection()">Clear</button>
       </div>
     </main>
+
+    <!-- Adjustable Split View Dual-Pane Browser -->
+    <div class="resizer" id="splitResizer" style="display:none"></div>
+    <section class="main-pane split-pane" id="splitPane" style="display:none">
+      <div class="split-hdr">
+        <strong style="font-size:12px;color:var(--primary)">◫ Split</strong>
+        <select class="input" id="splitHostSelect" onchange="openInSplitView(this.value)" style="padding:4px 7px;font-size:11px;max-width:130px"></select>
+        <button class="mini-btn" id="splitUpBtn" onclick="splitGoUp()">↑ Up</button>
+        <button class="mini-btn" onclick="createSplitFolderHere()">+ Folder</button>
+        <span style="flex:1"></span>
+        <button class="mini-btn" onclick="transferMainToSplit(false)" title="Copy main-pane selected items here">Copy Here</button>
+        <button class="mini-btn" onclick="transferMainToSplit(true)" title="Move main-pane selected items here">Move Here</button>
+        <button class="mini-btn" onclick="closeSplitView()">✕</button>
+      </div>
+      <div class="crumbs" id="splitCrumbs" style="flex:0 0 auto"></div>
+      <div class="browser-scroll" id="splitBrowserArea" style="padding-bottom:14px"></div>
+    </section>
 
     <!-- Adjustable Right Details / Inspector Panel -->
     <div class="resizer" id="rightResizer"></div>
@@ -406,11 +456,12 @@ DESKTOP_APP_HTML = r"""<!doctype html>
 <div class="overlay" id="allDrivesOverlay">
   <div class="dialog-hdr" style="background:var(--panel)">
     <div>
-      <strong style="font-size:18px">All Connected Devices & Drives</strong>
+      <strong style="font-size:18px">All Connected Devices, Cloud & Drives</strong>
       <div id="allDrivesSummary" style="font-size:12px;color:var(--muted)">Scanning devices...</div>
     </div>
     <div style="display:flex;gap:8px">
       <button class="pill-btn" onclick="refreshAllDrives()">Refresh</button>
+      <button class="pill-btn" onclick="openCloudModal()">+ Connect Cloud / Storage</button>
       <button class="pill-btn primary" onclick="openDevicesModal()">+ Pair Device</button>
       <button class="pill-btn" onclick="closeOverlay('allDrivesOverlay')">Close</button>
     </div>
@@ -431,9 +482,12 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       <button class="pill-btn" onclick="toggleCropOverlay(event)" id="cropTopBtn">Crop Box (C)</button>
       <button class="pill-btn" onclick="toggleCropPreview(event)" id="cropPreviewBtn" title="Preview cropped & cut area">Preview Crop (P)</button>
       <button class="pill-btn primary" onclick="toggleStudioDrawer()">Cut & Edit Studio</button>
+      <button class="pill-btn" onclick="openOptimizeModal([state.activeFile],'compress')">Compress</button>
+      <button class="pill-btn" onclick="openOptimizeModal([state.activeFile],'upscale')">Upscale</button>
       <button class="pill-btn" onclick="takeVideoSnapshot()" title="Save Frame PNG">Snapshot</button>
       <button class="pill-btn" onclick="openTransferModal([state.activeFile], true)">Move</button>
-      <button class="pill-btn danger" onclick="deleteSingleOverlayFile()">Delete</button>
+      <button class="pill-btn danger" onclick="deleteSingleOverlayFile(false)">♻ Recycle</button>
+      <button class="pill-btn danger" onclick="deleteSingleOverlayFile(true)">✕ Del Forever</button>
       <button class="pill-btn" onclick="closeVideoOverlay()">Close (Esc)</button>
     </div>
 
@@ -597,8 +651,11 @@ DESKTOP_APP_HTML = r"""<!doctype html>
     <div style="display:flex;gap:6px">
       <button class="pill-btn" onclick="stepImage(-1)">Prev</button>
       <button class="pill-btn" onclick="stepImage(1)">Next</button>
+      <button class="pill-btn" onclick="openOptimizeModal([state.activeFile],'compress')">Compress</button>
+      <button class="pill-btn" onclick="openOptimizeModal([state.activeFile],'upscale')">Upscale</button>
       <button class="pill-btn" onclick="openTransferModal([state.activeFile], true)">Move</button>
-      <button class="pill-btn danger" onclick="deleteSingleOverlayFile()">Delete</button>
+      <button class="pill-btn danger" onclick="deleteSingleOverlayFile(false)">♻ Recycle</button>
+      <button class="pill-btn danger" onclick="deleteSingleOverlayFile(true)">✕ Del Forever</button>
       <button class="pill-btn" onclick="closeOverlay('imageOverlay')">Close</button>
     </div>
   </div>
@@ -612,11 +669,38 @@ DESKTOP_APP_HTML = r"""<!doctype html>
     <div style="display:flex;gap:6px">
       <a id="docDl" download><button class="pill-btn">Download</button></a>
       <button class="pill-btn" onclick="openTransferModal([state.activeFile], true)">Move</button>
-      <button class="pill-btn danger" onclick="deleteSingleOverlayFile()">Delete</button>
+      <button class="pill-btn danger" onclick="deleteSingleOverlayFile(false)">♻ Recycle</button>
+      <button class="pill-btn danger" onclick="deleteSingleOverlayFile(true)">✕ Del Forever</button>
       <button class="pill-btn" onclick="closeDocOverlay()">Close</button>
     </div>
   </div>
   <div id="docBody" style="flex:1;overflow:auto;display:flex;align-items:center;justify-content:center;padding:16px"></div>
+</div>
+
+<!-- Cloud & Storage Apps Modal -->
+<div class="dialog-bg" id="cloudModal">
+  <div class="dialog">
+    <div class="dialog-hdr">
+      <div><strong>Cloud & Storage Apps</strong><div style="font-size:11px;color:var(--muted)">Browse Google Drive directly as a separate tab or connect Dropbox, OneDrive, iCloud, MEGA, or any sync/NAS folder</div></div>
+      <button class="pill-btn" onclick="closeDialog('cloudModal')">Close</button>
+    </div>
+    <div class="dialog-body" id="cloudModalBody"></div>
+  </div>
+</div>
+
+<!-- Built-In Compressor & Upscaler Studio Modal -->
+<div class="dialog-bg" id="optimizeModal">
+  <div class="dialog">
+    <div class="dialog-hdr">
+      <div><strong id="optTitle">Media Optimizer</strong><div id="optSub" style="font-size:11px;color:var(--muted)"></div></div>
+      <div style="display:flex;gap:6px">
+        <button class="chip active" id="optTabCmp" onclick="switchOptTab('compress')">Compressor</button>
+        <button class="chip" id="optTabUp" onclick="switchOptTab('upscale')">Upscaler & Enhancer</button>
+        <button class="pill-btn" onclick="closeDialog('optimizeModal')">Close</button>
+      </div>
+    </div>
+    <div class="dialog-body" id="optBody"></div>
+  </div>
 </div>
 
 <!-- Devices & PIN-Only Pairing Modal -->
@@ -678,6 +762,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
   </div>
 </div>
 
+<div class="marquee-rect" id="marqueeRect"></div>
 <div class="ctx-menu" id="ctxMenu"></div>
 <div class="drop-mask" id="dropMask">Drop files here to upload to current folder</div>
 <div class="toast" id="toast"></div>
@@ -742,6 +827,8 @@ const state = {
   folders: [],
   files: [],
   selected: new Set(),
+  selectMode: false,
+  lastSelectedIdx: -1,
   focusedFile: null,
   discovered: [],
   activeFile: null,
@@ -757,6 +844,9 @@ const state = {
   vidDurationSec: 0,
   favorites: [],
   gdrive: null,
+  cloudProviders: [],
+  opt: { items:[], hostId:"", tab:"compress", est:null },
+  split: { open:false, hostId:"", currentPath:"", parentPath:"", folders:[], files:[], widthPx:460 },
   audioCtx: null,
   gainNode: null,
   sbMetaMap: {},
@@ -870,7 +960,9 @@ async function initApp(){
       state.localIps = d.ips || [];
       state.favorites = d.favorites || [];
       state.gdrive = d.gdrive || null;
+      state.cloudProviders = d.cloudProviders || [];
       buildHostList(d.fleetHosts || []);
+      renderCloudSection();
       renderFavoritesStrip();
       await selectHost(state.hosts[0].hostId);
       return;
@@ -905,18 +997,208 @@ async function pairLanBrowser(){
   await selectHost(d.hostId);
 }
 
+function showTargetCtxMenu(ev, hostId, path, label, kind="folder", cloudId=""){
+  ev.preventDefault(); ev.stopPropagation();
+  const menu=document.getElementById("ctxMenu");
+  menu.style.left=Math.min(window.innerWidth-220, ev.clientX)+"px";
+  menu.style.top=Math.min(window.innerHeight-240, ev.clientY)+"px";
+  const openAction = path
+    ? (hostId===state.activeHostId ? `loadFolder(${JSON.stringify(path)})` : `selectHost(${JSON.stringify(hostId)},${JSON.stringify(path)})`)
+    : `selectHost(${JSON.stringify(hostId)})`;
+  let html = `<button class="ctx-item" onclick='hideCtx();${openAction}'>Open ${kind==="device"?"Device":(label||"Here")}</button>`;
+  html += `<button class="ctx-item" onclick='hideCtx();openInSplitView(${JSON.stringify(hostId)},${JSON.stringify(path)})'>◫ Open in Split View</button>`;
+  if(path){
+    html += `<button class="ctx-item" onclick='hideCtx();toggleFavoriteCurrentFolder(${JSON.stringify(path)},${JSON.stringify(label||path)},${JSON.stringify(hostId)})'>★ Pin / Unpin Favorite</button>`;
+  }
+  if(state.selected.size>0 && path){
+    html += `<button class="ctx-item" onclick='hideCtx();dropItemsInto(${JSON.stringify(hostId)},${JSON.stringify(path)},{hostId:state.activeHostId,paths:Array.from(state.selected)},false)'>Copy ${state.selected.size} Selected Here</button>`;
+    html += `<button class="ctx-item" onclick='hideCtx();dropItemsInto(${JSON.stringify(hostId)},${JSON.stringify(path)},{hostId:state.activeHostId,paths:Array.from(state.selected)},true)'>Move ${state.selected.size} Selected Here</button>`;
+  }
+  if(kind==="cloud"){
+    html += `<button class="ctx-item" onclick='hideCtx();openCloudModal()'>Manage Cloud Apps...</button>`;
+    if(cloudId && cloudId.startsWith("cloud_")){
+      html += `<button class="ctx-item danger" onclick='hideCtx();removeCloudProvider(${JSON.stringify(cloudId)})'>Disconnect Storage Tab</button>`;
+    }
+  }
+  menu.innerHTML = html;
+  menu.classList.add("open");
+}
+
+function wireDropTarget(el, destHostId, destPath){
+  el.ondragover=(ev)=>{
+    if(ev.dataTransfer?.types?.includes("application/x-deckvault-items")){
+      ev.preventDefault(); ev.stopPropagation();
+      el.classList.add("drop-target");
+    }
+  };
+  el.ondragleave=()=>el.classList.remove("drop-target");
+  el.ondrop=(ev)=>{
+    el.classList.remove("drop-target");
+    const raw=ev.dataTransfer?.getData("application/x-deckvault-items");
+    if(!raw) return;
+    ev.preventDefault(); ev.stopPropagation();
+    try{
+      const payload=JSON.parse(raw);
+      dropItemsInto(destHostId, destPath, payload, !!ev.shiftKey);
+    }catch{}
+  };
+}
+
+async function dropItemsInto(destHostId, destPath, payload, move){
+  const srcHostId=payload?.hostId || state.activeHostId;
+  const paths=(payload?.paths || []).filter(Boolean);
+  if(!paths.length || !destPath) return;
+  try{
+    if(srcHostId===destHostId){
+      await hostApi(destHostId,"/api/file/transfer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paths,destinationDir:destPath,mode:move?"move":"copy",conflict:"rename"})});
+    }else{
+      await sysFetch("/api/fleet/relay",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sourceHostId:srcHostId,targetHostId:destHostId,paths,destinationDir:destPath,move})});
+    }
+    showToast((move?"Moved ":"Copied ")+paths.length+" item(s) -> "+destPath);
+    clearSelection();
+    if(state.currentPath) await loadFolder(state.currentPath);
+    if(state.split.open && state.split.currentPath) await loadSplitFolder(state.split.currentPath);
+  }catch(e){showToast("Transfer failed: "+e.message)}
+}
+
+function renderCloudSection(){
+  const row=document.getElementById("cloudStripRow");
+  if(!row) return;
+  row.innerHTML="";
+  const list=state.cloudProviders || [];
+  const hasGdrive = list.some(c=>c.provider==="gdrive");
+  if(!hasGdrive){
+    const gd=document.createElement("button");
+    gd.className="cloud-tab";
+    gd.innerHTML=`<span>☁</span><span>Google Drive</span><span style="color:var(--muted);font-size:10px">Setup</span>`;
+    gd.onclick=()=>openCloudModal();
+    gd.oncontextmenu=(ev)=>showTargetCtxMenu(ev, state.localHostId, state.gdrive?.savedDir||"", "Google Drive", "cloud");
+    row.appendChild(gd);
+  }
+  const icons={gdrive:"☁ Google Drive",onedrive:"☁ OneDrive",dropbox:"📦 Dropbox",icloud:"☁ iCloud",mega:"M MEGA",box:"📁 Box",nextcloud:"☁ Nextcloud"};
+  list.forEach(c=>{
+    const b=document.createElement("button");
+    const active = state.activeHostId===state.localHostId && state.currentPath && c.path && state.currentPath.toLowerCase().startsWith(c.path.toLowerCase());
+    b.className="cloud-tab"+(active?" active":"");
+    const lbl=icons[c.provider] || ("☁ "+c.name);
+    const freeStr = c.freeBytes>0 ? `<span style="color:var(--muted);font-size:10px">${fmt(c.freeBytes)}</span>` : "";
+    b.innerHTML=`<span>${c.provider==="custom"?"🗂 "+c.name:lbl}</span>${freeStr}`;
+    b.title=c.path;
+    b.onclick=()=>{
+      if(state.activeHostId===state.localHostId) loadFolder(c.path);
+      else selectHost(state.localHostId, c.path);
+    };
+    b.oncontextmenu=(ev)=>showTargetCtxMenu(ev, state.localHostId, c.path, c.name, "cloud", c.id);
+    wireDropTarget(b, state.localHostId, c.path);
+    row.appendChild(b);
+  });
+}
+
+async function openCloudModal(){
+  try{
+    const [gd, cl] = await Promise.all([sysFetch("/api/gdrive/status"), sysFetch("/api/cloud/list")]);
+    state.gdrive = gd; state.cloudProviders = cl.cloudProviders || []; renderCloudSection();
+  }catch{}
+  const body=document.getElementById("cloudModalBody");
+  const curList=state.cloudProviders || [];
+  body.innerHTML=`
+    <div class="section-card">
+      <strong style="font-size:13px">Detected & Connected Cloud Drives</strong>
+      ${!curList.length ? `<div style="font-size:12px;color:var(--muted)">No synced cloud drive folders detected automatically yet.</div>` : curList.map(c=>`
+        <div class="list-row" style="cursor:default">
+          <strong style="font-size:12px;min-width:110px">${c.name}</strong>
+          <span style="font-size:11px;color:var(--muted);flex:1;word-break:break-all">${c.path} ${c.freeBytes>0?"("+fmt(c.freeBytes)+" free)":""}</span>
+          <button class="mini-btn" onclick="closeDialog('cloudModal');selectHost(state.localHostId,${JSON.stringify(c.path)})">Open</button>
+          <button class="mini-btn" onclick="closeDialog('cloudModal');openInSplitView(state.localHostId,${JSON.stringify(c.path)})">Split View</button>
+          ${c.custom?`<button class="mini-btn" onclick="removeCloudProvider(${JSON.stringify(c.id)})">Remove</button>`:""}
+        </div>
+      `).join("")}
+    </div>
+    <div class="section-card">
+      <strong style="font-size:13px">Connect Dropbox, OneDrive, Google Drive, iCloud, MEGA or Network/Storage Folder</strong>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <select class="input" id="cloudProvType" style="padding:6px 9px">
+          <option value="gdrive">Google Drive</option>
+          <option value="dropbox">Dropbox</option>
+          <option value="onedrive">OneDrive</option>
+          <option value="icloud">iCloud Drive</option>
+          <option value="mega">MEGA</option>
+          <option value="box">Box</option>
+          <option value="nextcloud">Nextcloud</option>
+          <option value="custom">Custom / NAS / External</option>
+        </select>
+        <input class="input" id="cloudNameIn" placeholder="Tab Name (e.g. Dropbox)" style="width:150px"/>
+        <input class="input" id="cloudPathIn" placeholder="Local or mounted path (e.g. C:\\Users\\...\\Dropbox or I:\\My Drive)" style="flex:1;min-width:220px"/>
+        <button class="pill-btn primary" onclick="connectCloudProvider()">+ Connect</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted)">
+        <a href="https://drive.google.com/drive/my-drive" target="_blank" style="color:var(--primary)">Open Google Drive Web</a>
+        <span>•</span>
+        <a href="https://www.dropbox.com/home" target="_blank" style="color:var(--primary)">Open Dropbox Web</a>
+        <span>•</span>
+        <a href="https://onedrive.live.com/" target="_blank" style="color:var(--primary)">Open OneDrive Web</a>
+        <span>•</span>
+        <a href="https://www.icloud.com/iclouddrive" target="_blank" style="color:var(--primary)">Open iCloud Web</a>
+      </div>
+    </div>
+    <div class="section-card">
+      <strong style="font-size:13px">Google Drive Quick Backup Target</strong>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input class="input" id="gdDirModalIn" placeholder="e.g. I:\\My Drive\\DeckVault Backup" value="${(state.gdrive?.savedDir||"").replace(/"/g,'&quot;')}" style="flex:1;min-width:200px"/>
+        <button class="pill-btn primary" onclick="saveGDriveFromCloud()">Save Backup Folder</button>
+      </div>
+    </div>
+  `;
+  document.getElementById("cloudModal").classList.add("open");
+}
+
+async function connectCloudProvider(){
+  const provider=document.getElementById("cloudProvType").value;
+  const name=document.getElementById("cloudNameIn").value.trim() || document.getElementById("cloudProvType").selectedOptions[0].text;
+  const path=document.getElementById("cloudPathIn").value.trim();
+  if(!path){ showToast("Enter a folder or drive path"); return; }
+  try{
+    const res=await sysFetch("/api/cloud/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider,name,path})});
+    state.cloudProviders=res.cloudProviders||[];
+    renderCloudSection();
+    await openCloudModal();
+    showToast("Connected "+name);
+  }catch(e){showToast("Could not connect: "+e.message)}
+}
+
+async function removeCloudProvider(id){
+  try{
+    const res=await sysFetch("/api/cloud/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});
+    state.cloudProviders=res.cloudProviders||[];
+    renderCloudSection();
+    if(document.getElementById("cloudModal").classList.contains("open")) await openCloudModal();
+    showToast("Disconnected storage tab");
+  }catch(e){showToast(e.message)}
+}
+
+async function saveGDriveFromCloud(){
+  const savedDir=document.getElementById("gdDirModalIn").value.trim();
+  state.gdrive=await sysFetch("/api/gdrive/configure",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({savedDir})});
+  showToast("Google Drive backup folder saved");
+}
+
 function renderHostBars(){
   const rail = document.getElementById("railHosts"), sw = document.getElementById("hostSwitchRow");
   rail.innerHTML=""; sw.innerHTML="";
   state.hosts.forEach(h=>{
     const active = h.hostId===state.activeHostId, lbl = h.label || h.name;
     const b=document.createElement("button");
-    b.className="rail-btn"+(active?" active":""); b.textContent=lbl.slice(0,8); b.title=lbl;
-    b.onclick=()=>selectHost(h.hostId); rail.appendChild(b);
+    b.className="rail-btn"+(active?" active":""); b.textContent=lbl.slice(0,8); b.title=lbl+" (Right-click for Split View)";
+    b.onclick=()=>selectHost(h.hostId);
+    b.oncontextmenu=(ev)=>showTargetCtxMenu(ev, h.hostId, "", lbl, "device");
+    rail.appendChild(b);
 
     const c=document.createElement("button");
     c.className="chip"+(active?" active":""); c.innerHTML=`<span class="dot"></span>${lbl}`;
-    c.onclick=()=>selectHost(h.hostId); sw.appendChild(c);
+    c.title="Left-click to open • Right-click for Split View";
+    c.onclick=()=>selectHost(h.hostId);
+    c.oncontextmenu=(ev)=>showTargetCtxMenu(ev, h.hostId, "", lbl, "device");
+    sw.appendChild(c);
   });
   const cur = state.hosts.find(h=>h.hostId===state.activeHostId) || state.hosts[0];
   if(cur){
@@ -932,6 +1214,7 @@ async function selectHost(hostId, targetPath=""){
   try{
     const r = await hostApi(hostId, "/api/roots");
     state.drives = r.drives || []; state.quickFolders = r.quickFolders || []; state.spaceSaved = r.spaceSavedBytes || 0;
+    if(hostId === state.localHostId && r.cloudProviders){ state.cloudProviders = r.cloudProviders; renderCloudSection(); }
     updateSavedBadge(); renderDriveAndQuickStrips();
     const first = targetPath || (state.quickFolders.find(q=>q.name==="Videos")?.path) || (state.quickFolders[0]?.path) || (state.drives[0]?.path) || "";
     if(first) await loadFolder(first);
@@ -952,16 +1235,24 @@ function renderDriveAndQuickStrips(){
     const el=document.createElement("div");
     el.className="drive-strip"+(state.currentPath.startsWith(d.path)?" active":"");
     el.innerHTML=`<div style="display:flex;justify-content:space-between;font-size:11px;font-weight:700"><span>${d.name}</span><span style="color:var(--primary)">${fmt(d.freeBytes)}</span></div><div class="bar"><div style="width:${pct}%"></div></div><div style="font-size:10px;color:var(--muted)">${fmt(total)} total</div>`;
-    el.onclick=()=>loadFolder(d.path); drRow.appendChild(el);
+    el.title="Click to open • Right-click for Split View";
+    el.onclick=()=>loadFolder(d.path);
+    el.oncontextmenu=(ev)=>showTargetCtxMenu(ev, state.activeHostId, d.path, d.name, "drive");
+    wireDropTarget(el, state.activeHostId, d.path);
+    drRow.appendChild(el);
   });
   const qRow=document.getElementById("quickRow"); qRow.innerHTML="";
   qRow.style.display = prefs.showQuickFolders ? "flex" : "none";
   if(prefs.showQuickFolders) state.quickFolders.forEach(q=>{
     const c=document.createElement("button");
     c.className="chip"+(state.currentPath===q.path?" active":""); c.textContent=q.name;
-    c.onclick=()=>loadFolder(q.path); qRow.appendChild(c);
+    c.onclick=()=>loadFolder(q.path);
+    c.oncontextmenu=(ev)=>showTargetCtxMenu(ev, state.activeHostId, q.path, q.name, "folder");
+    wireDropTarget(c, state.activeHostId, q.path);
+    qRow.appendChild(c);
   });
   renderFavoritesStrip();
+  renderCloudSection();
 }
 
 function renderFavoritesStrip(){
@@ -974,12 +1265,14 @@ function renderFavoritesStrip(){
     const b=document.createElement("button");
     const active = fav.hostId===state.activeHostId && fav.path===state.currentPath;
     b.className="chip"+(active?" active":"");
-    b.title=`${fav.hostName}: ${fav.path}`;
+    b.title=`${fav.hostName}: ${fav.path} (Right-click for Split View)`;
     b.textContent=`★ ${fav.name} (${fav.hostName.split(" ")[0]})`;
     b.onclick=()=>{
       if(fav.hostId===state.activeHostId) loadFolder(fav.path);
       else selectHost(fav.hostId, fav.path);
     };
+    b.oncontextmenu=(ev)=>showTargetCtxMenu(ev, fav.hostId, fav.path, fav.name, "folder");
+    wireDropTarget(b, fav.hostId, fav.path);
     row.appendChild(b);
   });
 }
@@ -992,10 +1285,11 @@ function updateFavButtonState(){
   btn.classList.toggle("primary", isFav);
 }
 
-async function toggleFavoriteCurrentFolder(pathOverride="", nameOverride=""){
+async function toggleFavoriteCurrentFolder(pathOverride="", nameOverride="", hostOverride=""){
   const targetPath = pathOverride || state.currentPath;
   if(!targetPath) return;
-  const curHost = state.hosts.find(h=>h.hostId===state.activeHostId) || {hostId:state.activeHostId, name:"Device", os:"Device"};
+  const hid = hostOverride || state.activeHostId;
+  const curHost = state.hosts.find(h=>h.hostId===hid) || {hostId:hid, name:"Device", os:"Device"};
   try{
     const res = await sysFetch("/api/favorites/toggle", {
       method:"POST", headers:{"Content-Type":"application/json"},
@@ -1064,7 +1358,10 @@ async function loadTree(path){
       const row=document.createElement("button"); row.className="tree-row";
       const pct=Math.max(2, Math.min(100, Math.round(ch.percentOfParent||0)));
       row.innerHTML=`<div class="tree-row-top"><span style="color:var(--primary)">📁</span><span class="tree-row-name">${ch.name}</span><span style="color:var(--muted);font-size:11px">${fmt(ch.sizeBytes)}</span></div><div class="bar" style="height:3px;margin:0"><div style="width:${pct}%"></div></div>`;
-      row.onclick=()=>loadFolder(ch.path); box.appendChild(row);
+      row.onclick=()=>loadFolder(ch.path);
+      row.oncontextmenu=(ev)=>showCtxMenu(ev, {name:ch.name, path:ch.path, isDir:true}, state.activeHostId);
+      wireDropTarget(row, state.activeHostId, ch.path);
+      box.appendChild(row);
     });
   }catch{}
 }
@@ -1082,12 +1379,15 @@ function renderFilters(){
 
 function renderBrowser(){
   const area=document.getElementById("browserArea"); area.innerHTML="";
+  document.body.classList.toggle("select-mode", !!state.selectMode);
+  document.body.classList.toggle("has-selection", state.selected.size>0);
   if(state.folders.length>0 && !state.spaceHogs){
     const fStrip=document.createElement("div"); fStrip.className="chip-row"; fStrip.style.marginBottom="9px";
     state.folders.forEach(f=>{
       const c=document.createElement("button"); c.className="chip"; c.textContent=`📁 ${f.name} (${fmt(f.sizeBytes)})`;
       c.onclick=()=>loadFolder(f.path);
-      c.oncontextmenu=(ev)=>showCtxMenu(ev, {name:f.name, path:f.path, isDir:true});
+      c.oncontextmenu=(ev)=>showCtxMenu(ev, {name:f.name, path:f.path, isDir:true}, state.activeHostId);
+      wireDropTarget(c, state.activeHostId, f.path);
       fStrip.appendChild(c);
     });
     area.appendChild(fStrip);
@@ -1103,7 +1403,7 @@ function renderBrowser(){
     wrap.className = prefs.compactList ? "list-col compact" : "list-col";
   }
 
-  state.files.forEach(f=>{
+  state.files.forEach((f, idx)=>{
     const sel = state.selected.has(f.path), foc = state.focusedFile?.path===f.path;
     const thumbUrl = f.mediaType==="video"
       ? hostMediaUrl(state.activeHostId, "/api/video/thumbnail", {path:f.path, w:480})
@@ -1113,20 +1413,22 @@ function renderBrowser(){
 
     const el=document.createElement("div");
     el.className=(prefs.viewMode==="gallery"?"media-card":"list-row")+(sel?" selected":"")+(foc?" focused":"");
+    el.dataset.path = f.path;
+    el.draggable = true;
 
     if(prefs.viewMode==="gallery"){
-      const thHtml = thumbUrl ? `<img loading="lazy" src="${thumbUrl}"/>` : `<span style="color:var(--primary);font-weight:700;font-size:13px">${(f.extension||f.mediaType||"FILE").toUpperCase()}</span>`;
+      const thHtml = thumbUrl ? `<img loading="lazy" src="${thumbUrl}" draggable="false"/>` : `<span style="color:var(--primary);font-weight:700;font-size:13px">${(f.extension||f.mediaType||"FILE").toUpperCase()}</span>`;
       const dur = (prefs.showDuration && f.meta?.durationMs) ? `<span class="badge">${fmtDur(f.meta.durationMs)}</span>` : "";
       const resTxt = prefs.showResolution ? fmtRes(f.meta?.width, f.meta?.height) : "";
       const resBadge = resTxt ? `<span class="badge tl">${resTxt}</span>` : "";
       const sbDiv = sbUrl ? `<div class="sb-hover"></div>` : "";
-      el.innerHTML=`<div class="thumb-wrap">${thHtml}${sbDiv}${resBadge}${dur}</div><div class="card-body">${prefs.showFilenames?`<div class="card-title" title="${f.name}">${f.name}</div>`:""}<div class="card-meta"><span>${prefs.showSizes?fmt(f.sizeBytes):""}</span><span>${(f.extension||"").toUpperCase()}</span></div><div class="card-actions"><button class="mini-btn" data-act="sel">${sel?"✓":"Select"}</button>${f.mediaType==="video"?`<button class="mini-btn" data-act="trim">Edit</button>`:""}<button class="mini-btn" data-act="move">Move</button><button class="mini-btn" data-act="more">•••</button></div></div>`;
+      el.innerHTML=`<div class="sel-check" data-act="sel">${sel?"✓":""}</div><div class="thumb-wrap">${thHtml}${sbDiv}${resBadge}${dur}</div><div class="card-body">${prefs.showFilenames?`<div class="card-title" title="${f.name}">${f.name}</div>`:""}<div class="card-meta"><span>${prefs.showSizes?fmt(f.sizeBytes):""}</span><span>${(f.extension||"").toUpperCase()}</span></div><div class="card-actions"><button class="mini-btn" data-act="sel">${sel?"✓":"Select"}</button>${f.mediaType==="video"?`<button class="mini-btn" data-act="trim">Edit</button>`:""}<button class="mini-btn" data-act="move">Move</button><button class="mini-btn" data-act="more">•••</button></div></div>`;
       if(sbUrl){
         const tw = el.querySelector(".thumb-wrap"), sbh = el.querySelector(".sb-hover");
         tw.onmousemove = (mv) => {
           const rect = tw.getBoundingClientRect();
           const frac = Math.max(0, Math.min(0.999, (mv.clientX - rect.left) / rect.width));
-          const idx = Math.floor(frac * 16), col = idx % 4, row = Math.floor(idx / 4);
+          const sidx = Math.floor(frac * 16), col = sidx % 4, row = Math.floor(sidx / 4);
           sbh.style.display = "block";
           sbh.style.backgroundImage = `url("${sbUrl}")`;
           sbh.style.backgroundSize = "400% 400%";
@@ -1135,25 +1437,78 @@ function renderBrowser(){
         tw.onmouseleave = () => { sbh.style.display = "none"; };
       }
     }else{
-      const thHtml = thumbUrl ? `<img class="list-thumb" loading="lazy" src="${thumbUrl}"/>` : `<div class="list-thumb">${(f.extension||"FILE").toUpperCase()}</div>`;
-      el.innerHTML=`${thHtml}<div style="flex:1;min-width:0"><div class="card-title">${f.name}</div><div style="font-size:11px;color:var(--muted)">${fmt(f.sizeBytes)} ${f.meta?.durationMs?"• "+fmtDur(f.meta.durationMs):""} ${f.meta?.height?"• "+fmtRes(f.meta.width,f.meta.height):""}</div></div><button class="mini-btn" data-act="sel">${sel?"✓ Selected":"Select"}</button>${f.mediaType==="video"?`<button class="mini-btn" data-act="trim">Edit</button>`:""}<button class="mini-btn" data-act="move">Move</button><button class="mini-btn" data-act="more">•••</button>`;
+      const thHtml = thumbUrl ? `<img class="list-thumb" loading="lazy" src="${thumbUrl}" draggable="false"/>` : `<div class="list-thumb">${(f.extension||"FILE").toUpperCase()}</div>`;
+      el.innerHTML=`<div class="sel-check" data-act="sel">${sel?"✓":""}</div>${thHtml}<div style="flex:1;min-width:0"><div class="card-title">${f.name}</div><div style="font-size:11px;color:var(--muted)">${fmt(f.sizeBytes)} ${f.meta?.durationMs?"• "+fmtDur(f.meta.durationMs):""} ${f.meta?.height?"• "+fmtRes(f.meta.width,f.meta.height):""}</div></div><button class="mini-btn" data-act="sel">${sel?"✓ Selected":"Select"}</button>${f.mediaType==="video"?`<button class="mini-btn" data-act="trim">Edit</button>`:""}<button class="mini-btn" data-act="move">Move</button><button class="mini-btn" data-act="more">•••</button>`;
     }
 
+    el.ondragstart=(ev)=>{
+      const dragPaths = state.selected.has(f.path) ? Array.from(state.selected) : [f.path];
+      if(ev.dataTransfer){
+        ev.dataTransfer.effectAllowed = "copyMove";
+        ev.dataTransfer.setData("application/x-deckvault-items", JSON.stringify({hostId:state.activeHostId, paths:dragPaths}));
+        const absUrl = new URL(hostMediaUrl(state.activeHostId,"/api/stream",{path:f.path}), window.location.origin).href;
+        ev.dataTransfer.setData("DownloadURL", `application/octet-stream:${f.name}:${absUrl}`);
+      }
+    };
     el.onclick=(ev)=>{
       setFocusedFile(f);
       const act = ev.target?.dataset?.act;
-      if(act==="sel"){ev.stopPropagation();toggleSelect(f.path);return}
+      if(act==="sel"){ev.stopPropagation();handleSelectClick(idx, f.path, ev.shiftKey);return}
       if(act==="trim"){ev.stopPropagation();openFileViewer(f, true);return}
       if(act==="move"){ev.stopPropagation();openTransferModal([f], true);return}
-      if(act==="more"){ev.stopPropagation();showCtxMenu(ev, f);return}
-      if(state.selected.size>0) toggleSelect(f.path);
+      if(act==="more"){ev.stopPropagation();showCtxMenu(ev, f, state.activeHostId);return}
+      if(ev.shiftKey){ handleSelectClick(idx, f.path, true); return; }
+      if(state.selectMode || state.selected.size>0 || ev.ctrlKey || ev.metaKey){
+        handleSelectClick(idx, f.path, false);
+      }
     };
-    el.ondblclick=(ev)=>{ if(!ev.target?.dataset?.act) openFileViewer(f, false); };
-    el.oncontextmenu=(ev)=>showCtxMenu(ev, f);
+    el.ondblclick=(ev)=>{ if(!ev.target?.dataset?.act && !state.selectMode) openFileViewer(f, false); };
+    el.oncontextmenu=(ev)=>showCtxMenu(ev, f, state.activeHostId);
     wrap.appendChild(el);
   });
   area.appendChild(wrap);
 }
+
+/* Marquee Rubber-Band Drag Selection on Empty Area */
+(()=>{
+  const area=document.getElementById("browserArea"), box=document.getElementById("marqueeRect");
+  if(!area || !box) return;
+  area.addEventListener("mousedown",(ev)=>{
+    if(ev.button!==0 || ev.target.closest(".media-card,.list-row,.chip,button")) return;
+    const sx=ev.clientX, sy=ev.clientY;
+    let moved=false;
+    const baseSel = (ev.ctrlKey||ev.shiftKey) ? new Set(state.selected) : new Set();
+    const mm=(m)=>{
+      const dx=m.clientX-sx, dy=m.clientY-sy;
+      if(!moved && Math.hypot(dx,dy)<6) return;
+      moved=true;
+      const l=Math.min(sx,m.clientX), t=Math.min(sy,m.clientY), w=Math.abs(dx), h=Math.abs(dy);
+      box.style.cssText=`display:block;left:${l}px;top:${t}px;width:${w}px;height:${h}px`;
+      const mr={left:l,top:t,right:l+w,bottom:t+h};
+      const next=new Set(baseSel);
+      area.querySelectorAll(".media-card[data-path],.list-row[data-path]").forEach(card=>{
+        const cr=card.getBoundingClientRect();
+        const hit = !(cr.right<mr.left || cr.left>mr.right || cr.bottom<mr.top || cr.top>mr.bottom);
+        if(hit) next.add(card.dataset.path);
+      });
+      state.selected = next;
+      area.querySelectorAll(".media-card[data-path],.list-row[data-path]").forEach(card=>{
+        const s=next.has(card.dataset.path);
+        card.classList.toggle("selected", s);
+        const ck=card.querySelector(".sel-check");
+        if(ck) ck.textContent = s ? "✓" : "";
+      });
+      updateSelBar();
+    };
+    const mu=()=>{
+      box.style.display="none";
+      window.removeEventListener("mousemove",mm);
+      window.removeEventListener("mouseup",mu);
+    };
+    window.addEventListener("mousemove",mm);
+    window.addEventListener("mouseup",mu);
+  });
+})();
 
 function setFocusedFile(f){
   state.focusedFile = f;
@@ -1162,21 +1517,27 @@ function setFocusedFile(f){
 function renderInspector(){
   const box=document.getElementById("inspBody");
   const f = state.focusedFile;
-  if(!f){ box.innerHTML=`<div style="color:var(--muted)">Single-click a file to inspect metadata, or double-click to play / edit.</div>`; return; }
+  if(!f){ box.innerHTML=`<div style="color:var(--muted)">Single-click a file to inspect metadata, drag out to another app, or double-click to play / edit.</div>`; return; }
   const m = f.meta || {};
   const th = f.mediaType==="video"
     ? `<img src="${hostMediaUrl(state.activeHostId,"/api/video/thumbnail",{path:f.path,w:420})}" style="width:100%;border-radius:11px;background:#000"/>`
     : (f.mediaType==="image" ? `<img src="${hostMediaUrl(state.activeHostId,"/api/image",{path:f.path,w:420})}" style="width:100%;border-radius:11px;background:#000"/>` : "");
+  const canOpt = f.mediaType==="video" || f.mediaType==="image";
   box.innerHTML = `
     ${th}
     <strong style="font-size:13px;word-break:break-word">${f.name}</strong>
     <div style="display:flex;gap:5px;flex-wrap:wrap">
       <button class="pill-btn primary" onclick='openFileViewer(state.focusedFile,false)'>Open / Play</button>
       ${f.mediaType==="video"?`<button class="pill-btn" onclick='openFileViewer(state.focusedFile,true)'>Cut / Crop</button>`:""}
+      ${canOpt?`<button class="mini-btn" onclick='openOptimizeModal([state.focusedFile],"compress")'>Compress</button>`:""}
+      ${canOpt?`<button class="mini-btn" onclick='openOptimizeModal([state.focusedFile],"upscale")'>Upscale</button>`:""}
       <button class="mini-btn" onclick='openTransferModal([state.focusedFile],true)'>Move</button>
       <button class="mini-btn" onclick='openTransferModal([state.focusedFile],false)'>Copy</button>
+      <button class="mini-btn" onmousedown='startNativeExternalDrag(event,[state.focusedFile.path])' onclick='copyFilesToWindowsClipboard(state.activeHostId,[state.focusedFile.path])'>⤢ Drag / App</button>
       <button class="mini-btn" onclick='backupPathsToGDrive([state.focusedFile.path])'>G-Drive</button>
       <button class="mini-btn" onclick='renamePrompt(state.focusedFile)'>Rename</button>
+      <button class="mini-btn" style="color:var(--danger)" onclick='deletePaths([state.focusedFile.path],false)'>♻ Recycle</button>
+      <button class="mini-btn" style="color:var(--danger)" onclick='deletePaths([state.focusedFile.path],true)'>✕ Del Forever</button>
     </div>
     <div>
       <div class="kv-row"><span>Size</span><b>${fmt(f.sizeBytes)}</b></div>
@@ -1195,26 +1556,44 @@ function renderInspector(){
 
 async function revealLocal(path){ await sysFetch("/api/system/reveal",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})}); }
 
-function showCtxMenu(ev, item){
-  ev.preventDefault();
+function showCtxMenu(ev, item, hostOverride=""){
+  ev.preventDefault(); ev.stopPropagation();
+  const hid = hostOverride || state.activeHostId;
+  const fromSplit = (hostOverride && hostOverride===state.split.hostId && state.split.open && ev.target?.closest("#splitPane"));
   const menu=document.getElementById("ctxMenu");
-  menu.style.left=Math.min(window.innerWidth-210, ev.clientX)+"px";
-  menu.style.top=Math.min(window.innerHeight-260, ev.clientY)+"px";
+  menu.style.left=Math.min(window.innerWidth-235, ev.clientX)+"px";
+  menu.style.top=Math.min(window.innerHeight-340, ev.clientY)+"px";
   if(item.isDir){
-    menu.innerHTML=`<button class="ctx-item" onclick='hideCtx();loadFolder(${JSON.stringify(item.path)})'>Open Folder</button><button class="ctx-item" onclick='hideCtx();toggleFavoriteCurrentFolder(${JSON.stringify(item.path)},${JSON.stringify(item.name)})'>★ Pin / Unpin Favorite</button><button class="ctx-item" onclick='hideCtx();openTransferModal([${JSON.stringify(item)}],true)'>Move Folder</button><button class="ctx-item" onclick='hideCtx();backupPathsToGDrive([${JSON.stringify(item.path)}])'>Back Up to Google Drive</button><button class="ctx-item danger" onclick='hideCtx();deletePaths([${JSON.stringify(item.path)}])'>Delete Folder</button>`;
-  }else{
     menu.innerHTML=`
-      <button class="ctx-item" onclick='hideCtx();openFileViewer(state.focusedFile,false)'>Open / Play</button>
-      ${item.mediaType==="video"?`<button class="ctx-item" onclick='hideCtx();openFileViewer(state.focusedFile,true)'>Cut, Rotate & Crop Studio</button>`:""}
-      <button class="ctx-item" onclick='hideCtx();openTransferModal([state.focusedFile],true)'>Move To Device / Folder...</button>
-      <button class="ctx-item" onclick='hideCtx();openTransferModal([state.focusedFile],false)'>Copy To Device / Folder...</button>
-      <button class="ctx-item" onclick='hideCtx();backupPathsToGDrive([${JSON.stringify(item.path)}])'>Back Up to Google Drive</button>
-      <button class="ctx-item" onclick='hideCtx();renamePrompt(state.focusedFile)'>Rename (F2)</button>
-      <button class="ctx-item" onclick='hideCtx();navigator.clipboard?.writeText(${JSON.stringify(item.path)});showToast("Path copied")'>Copy Path</button>
-      ${state.activeHostId===state.localHostId?`<button class="ctx-item" onclick='hideCtx();revealLocal(${JSON.stringify(item.path)})'>Show in Explorer</button>`:""}
-      <button class="ctx-item danger" onclick='hideCtx();deletePaths([${JSON.stringify(item.path)}])'>Delete (Del)</button>
+      <button class="ctx-item" onclick='hideCtx();${fromSplit?`loadSplitFolder(${JSON.stringify(item.path)})`:`loadFolder(${JSON.stringify(item.path)})`}'>Open Folder</button>
+      <button class="ctx-item" onclick='hideCtx();openInSplitView(${JSON.stringify(hid)},${JSON.stringify(item.path)})'>◫ Open in Split View</button>
+      <button class="ctx-item" onclick='hideCtx();toggleFavoriteCurrentFolder(${JSON.stringify(item.path)},${JSON.stringify(item.name)},${JSON.stringify(hid)})'>★ Pin / Unpin Favorite</button>
+      <button class="ctx-item" onclick='hideCtx();openTransferModal([${JSON.stringify(item)}],true,${JSON.stringify(hid)})'>Move Folder...</button>
+      <button class="ctx-item" onclick='hideCtx();openTransferModal([${JSON.stringify(item)}],false,${JSON.stringify(hid)})'>Copy Folder...</button>
+      <button class="ctx-item" onclick='hideCtx();backupPathsToGDrive([${JSON.stringify(item.path)}],${JSON.stringify(hid)})'>Back Up to Google Drive</button>
+      <button class="ctx-item danger" onclick='hideCtx();deletePaths([${JSON.stringify(item.path)}],false,${!!fromSplit},${JSON.stringify(hid)})'>♻ Move Folder to Recycle Bin</button>
+      <button class="ctx-item danger" onclick='hideCtx();deletePaths([${JSON.stringify(item.path)}],true,${!!fromSplit},${JSON.stringify(hid)})'>✕ Permanently Delete Folder</button>
     `;
-    state.focusedFile = item;
+  }else{
+    if(!fromSplit) state.focusedFile = item;
+    const canOpt = item.mediaType==="video" || item.mediaType==="image";
+    const ctxPaths = (!fromSplit && state.selected.has(item.path) && state.selected.size>1) ? Array.from(state.selected) : [item.path];
+    menu.innerHTML=`
+      <button class="ctx-item" onclick='hideCtx();openFileViewer(${JSON.stringify(item)},false,${JSON.stringify(hid)})'>Open / Play</button>
+      ${item.mediaType==="video"?`<button class="ctx-item" onclick='hideCtx();openFileViewer(${JSON.stringify(item)},true,${JSON.stringify(hid)})'>Cut, Rotate & Crop Studio</button>`:""}
+      ${canOpt?`<button class="ctx-item" onclick='hideCtx();openOptimizeModal([${JSON.stringify(item)}],"compress",${JSON.stringify(hid)})'>🗜 Compress & Estimate Size...</button>`:""}
+      ${canOpt?`<button class="ctx-item" onclick='hideCtx();openOptimizeModal([${JSON.stringify(item)}],"upscale",${JSON.stringify(hid)})'>✨ Upscale & Enhance...</button>`:""}
+      <button class="ctx-item" onclick='hideCtx();openTransferModal([${JSON.stringify(item)}],true,${JSON.stringify(hid)})'>Move To Device / Folder...</button>
+      <button class="ctx-item" onclick='hideCtx();openTransferModal([${JSON.stringify(item)}],false,${JSON.stringify(hid)})'>Copy To Device / Folder...</button>
+      <button class="ctx-item" onclick='hideCtx();copyFilesToWindowsClipboard(${JSON.stringify(hid)},${JSON.stringify(ctxPaths)})'>Copy File(s) to App Clipboard (Ctrl+C)</button>
+      <button class="ctx-item" onmousedown='startNativeExternalDrag(event,${JSON.stringify(ctxPaths)},${JSON.stringify(hid)})' onclick='hideCtx()'>⤢ Hold & Drag to External App</button>
+      <button class="ctx-item" onclick='hideCtx();backupPathsToGDrive(${JSON.stringify(ctxPaths)},${JSON.stringify(hid)})'>Back Up to Google Drive</button>
+      <button class="ctx-item" onclick='hideCtx();renamePrompt(${JSON.stringify(item)},${JSON.stringify(hid)})'>Rename (F2)</button>
+      <button class="ctx-item" onclick='hideCtx();navigator.clipboard?.writeText(${JSON.stringify(item.path)});showToast("Path copied")'>Copy Path</button>
+      ${hid===state.localHostId?`<button class="ctx-item" onclick='hideCtx();revealLocal(${JSON.stringify(item.path)})'>Show in Explorer</button>`:""}
+      <button class="ctx-item danger" onclick='hideCtx();deletePaths(${JSON.stringify(ctxPaths)},false,${!!fromSplit},${JSON.stringify(hid)})'>♻ Move to Recycle Bin (Del)</button>
+      <button class="ctx-item danger" onclick='hideCtx();deletePaths(${JSON.stringify(ctxPaths)},true,${!!fromSplit},${JSON.stringify(hid)})'>✕ Permanently Delete (Shift+Del)</button>
+    `;
   }
   menu.classList.add("open");
 }
@@ -1234,11 +1613,34 @@ function onSearchInput(){clearTimeout(window._st);window._st=setTimeout(()=>{if(
 function showBrowseMode(){closeOverlay("allDrivesOverlay");if(state.spaceHogs&&state.currentPath)loadFolder(state.currentPath)}
 async function createFolderHere(){if(!state.currentPath)return;const n=prompt("Create new folder inside current directory:");if(!n)return;await hostApi(state.activeHostId,"/api/folder/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({parentDir:state.currentPath,name:n})});await loadFolder(state.currentPath);}
 
+function toggleSelectMode(){
+  state.selectMode = !state.selectMode;
+  const btn = document.getElementById("selectModeBtn");
+  if(btn){ btn.classList.toggle("primary", state.selectMode); btn.textContent = state.selectMode ? "☑ Selecting" : "☑ Select"; }
+  renderBrowser();
+}
+function handleSelectClick(idx, path, shift){
+  if(shift && state.lastSelectedIdx>=0 && state.files.length){
+    const a=Math.min(state.lastSelectedIdx, idx), b=Math.max(state.lastSelectedIdx, idx);
+    for(let i=a;i<=b;i++) state.selected.add(state.files[i].path);
+  }else{
+    if(state.selected.has(path)) state.selected.delete(path);
+    else state.selected.add(path);
+    state.lastSelectedIdx = idx;
+  }
+  updateSelBar(); renderBrowser();
+}
 function toggleSelect(path){if(state.selected.has(path))state.selected.delete(path);else state.selected.add(path);updateSelBar();renderBrowser()}
 function selectAllFiles(){state.files.forEach(f=>state.selected.add(f.path));updateSelBar();renderBrowser()}
-function clearSelection(){state.selected.clear();updateSelBar();renderBrowser()}
+function invertSelection(){ const next=new Set(); state.files.forEach(f=>{ if(!state.selected.has(f.path)) next.add(f.path); }); state.selected=next; updateSelBar(); renderBrowser(); }
+function clearSelection(){state.selected.clear();state.lastSelectedIdx=-1;updateSelBar();renderBrowser()}
 function getSelectedFiles(){return state.files.filter(f=>state.selected.has(f.path))}
-function updateSelBar(){const bar=document.getElementById("selBar");if(state.selected.size>0){bar.classList.add("open");document.getElementById("selCount").textContent=`${state.selected.size} selected`}else bar.classList.remove("open")}
+function updateSelBar(){
+  const bar=document.getElementById("selBar");
+  document.body.classList.toggle("has-selection", state.selected.size>0);
+  if(state.selected.size>0){bar.classList.add("open");document.getElementById("selCount").textContent=`${state.selected.size} selected`}
+  else bar.classList.remove("open");
+}
 
 async function loadSpaceHogs(){
   if(!state.currentPath)return;
@@ -1249,31 +1651,37 @@ async function loadSpaceHogs(){
   renderBrowser();
 }
 
-/* All Devices & Drives Dashboard */
+/* All Devices, Cloud & Drives Dashboard */
 async function openAllDrives(){document.getElementById("allDrivesOverlay").classList.add("open");await refreshAllDrives()}
 async function refreshAllDrives(){
   const body=document.getElementById("allDrivesBody");
-  body.innerHTML=`<div style="padding:24px;color:var(--muted)">Querying all paired devices...</div>`;
+  body.innerHTML=`<div style="padding:24px;color:var(--muted)">Querying all paired devices & cloud drives...</div>`;
+  try{ const cl=await sysFetch("/api/cloud/list"); state.cloudProviders=cl.cloudProviders||[]; renderCloudSection(); }catch{}
   const snaps = await Promise.all(state.hosts.map(async h=>{
     try{const r=await hostApi(h.hostId,"/api/roots");return{host:h,online:true,os:r.os||h.os,drives:r.drives||[],quick:r.quickFolders||[]}}
     catch(e){return{host:h,online:false,os:h.os,drives:[],quick:[],err:e.message}}
   }));
   const allDrives = snaps.flatMap(s=>s.drives);
   const totalCap = allDrives.reduce((a,d)=>a+(d.totalBytes||0),0), totalFree = allDrives.reduce((a,d)=>a+(d.freeBytes||0),0);
-  document.getElementById("allDrivesSummary").textContent=`${snaps.filter(s=>s.online).length}/${snaps.length} devices online • ${allDrives.length} drives • ${fmt(totalFree)} free of ${fmt(totalCap)}`;
+  document.getElementById("allDrivesSummary").textContent=`${snaps.filter(s=>s.online).length}/${snaps.length} devices online • ${state.cloudProviders.length} cloud mount(s) • ${allDrives.length} drives • ${fmt(totalFree)} free of ${fmt(totalCap)}`;
   body.innerHTML="";
+  if(state.cloudProviders.length){
+    const cc=document.createElement("div"); cc.className="section-card";
+    cc.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between"><strong style="font-size:15px">Cloud & Storage Apps</strong><button class="mini-btn" onclick="openCloudModal()">Manage / Connect Apps</button></div><div class="drives-grid">${state.cloudProviders.map(c=>`<div class="drive-card" onclick='jumpToDrive(${JSON.stringify(state.localHostId)},${JSON.stringify(c.path)})' oncontextmenu='showTargetCtxMenu(event,${JSON.stringify(state.localHostId)},${JSON.stringify(c.path)},${JSON.stringify(c.name)},"cloud",${JSON.stringify(c.id)})'><div style="display:flex;justify-content:space-between;font-weight:700;font-size:13px"><span>☁ ${c.name}</span><span style="color:var(--primary)">${c.freeBytes>0?fmt(c.freeBytes)+" free":"Cloud"}</span></div><div style="font-size:11px;color:var(--muted);word-break:break-all">${c.path}</div><div style="font-size:10px;color:var(--muted)">Left-click Open • Right-click Split View</div></div>`).join("")}</div>`;
+    body.appendChild(cc);
+  }
   snaps.forEach(s=>{
     const card=document.createElement("div"); card.className="section-card";
     const status = s.online ? `<span style="color:var(--success)">● Online</span>` : `<span style="color:var(--danger)">● Offline</span>`;
-    let html=`<div style="display:flex;align-items:center;justify-content:space-between"><div><strong style="font-size:15px">${s.host.label||s.host.name}</strong> <span class="mini-btn">${devBadge(s.os,s.host.name)} • ${s.os}</span></div><div>${status}</div></div>`;
+    let html=`<div style="display:flex;align-items:center;justify-content:space-between;cursor:context-menu" oncontextmenu='showTargetCtxMenu(event,${JSON.stringify(s.host.hostId)},"",${JSON.stringify(s.host.label||s.host.name)},"device")'><div><strong style="font-size:15px">${s.host.label||s.host.name}</strong> <span class="mini-btn">${devBadge(s.os,s.host.name)} • ${s.os}</span></div><div style="display:flex;gap:8px;align-items:center"><button class="mini-btn" onclick='closeOverlay("allDrivesOverlay");openInSplitView(${JSON.stringify(s.host.hostId)})'>◫ Split View</button>${status}</div></div>`;
     if(s.online){
       html+=`<div class="drives-grid">`;
       s.drives.forEach(dr=>{
         const tot=Math.max(1,dr.totalBytes||1), used=Math.max(0,tot-(dr.freeBytes||0)), pct=Math.min(100,Math.round(used*100/tot));
-        html+=`<div class="drive-card" onclick='jumpToDrive(${JSON.stringify(s.host.hostId)},${JSON.stringify(dr.path)})'><div style="display:flex;justify-content:space-between;font-weight:700;font-size:13px"><span>${dr.name}</span><span style="color:var(--primary)">${fmt(dr.freeBytes)} free</span></div><div class="bar"><div style="width:${pct}%"></div></div><div style="font-size:11px;color:var(--muted)">${fmt(used)} used (${pct}%) • ${fmt(tot)} total</div></div>`;
+        html+=`<div class="drive-card" onclick='jumpToDrive(${JSON.stringify(s.host.hostId)},${JSON.stringify(dr.path)})' oncontextmenu='showTargetCtxMenu(event,${JSON.stringify(s.host.hostId)},${JSON.stringify(dr.path)},${JSON.stringify(dr.name)},"drive")'><div style="display:flex;justify-content:space-between;font-weight:700;font-size:13px"><span>${dr.name}</span><span style="color:var(--primary)">${fmt(dr.freeBytes)} free</span></div><div class="bar"><div style="width:${pct}%"></div></div><div style="font-size:11px;color:var(--muted)">${fmt(used)} used (${pct}%) • ${fmt(tot)} total</div></div>`;
       });
       html+=`</div>`;
-      if(s.quick.length){html+=`<div class="chip-row">`;s.quick.forEach(q=>{html+=`<button class="chip" onclick='jumpToDrive(${JSON.stringify(s.host.hostId)},${JSON.stringify(q.path)})'>📁 ${q.name}</button>`});html+=`</div>`;}
+      if(s.quick.length){html+=`<div class="chip-row">`;s.quick.forEach(q=>{html+=`<button class="chip" onclick='jumpToDrive(${JSON.stringify(s.host.hostId)},${JSON.stringify(q.path)})' oncontextmenu='showTargetCtxMenu(event,${JSON.stringify(s.host.hostId)},${JSON.stringify(q.path)},${JSON.stringify(q.name)},"folder")'>📁 ${q.name}</button>`});html+=`</div>`;}
     }else html+=`<div style="font-size:12px;color:var(--danger)">${s.err||"Unreachable on Wi-Fi"}</div>`;
     card.innerHTML=html; body.appendChild(card);
   });
@@ -1873,7 +2281,7 @@ async function executeStudioEdit(){
   finally{btn.disabled=false;btn.textContent="Render & Save Edit"}
 }
 
-function closeVideoOverlay(){const v=document.getElementById("vidEl");v.pause();v.removeAttribute("src");document.getElementById("videoOverlay").classList.remove("fullscreen-all");closeOverlay("videoOverlay")}
+function closeVideoOverlay(){const v=document.getElementById("vidEl");v.pause();v.removeAttribute("src");v.load();document.getElementById("videoOverlay").classList.remove("fullscreen-all");closeOverlay("videoOverlay")}
 function stepVideo(delta){const list=state.files.filter(f=>f.mediaType==="video"),i=list.findIndex(f=>f.path===state.activeFile?.path);if(i>=0&&list[i+delta])openVideoOverlay(list[i+delta],false)}
 
 function openImageOverlay(f){state.activeFile=f;document.getElementById("imgTitle").textContent=f.name;document.getElementById("imgEl").src=hostMediaUrl(state.activeHostId,"/api/image",{path:f.path});document.getElementById("imageOverlay").classList.add("open")}
@@ -1883,22 +2291,423 @@ function closeDocOverlay(){document.getElementById("docBody").innerHTML="";close
 function closeOverlay(id){document.getElementById(id).classList.remove("open")}
 function closeDialog(id){document.getElementById(id).classList.remove("open")}
 
-async function deletePaths(paths){
-  if(!paths.length||!confirm(`Delete ${paths.length} item(s)?`))return;
-  const r=await hostApi(state.activeHostId,"/api/file/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paths,recycle:prefs.recycleDefault})});
-  showToast("Deleted "+r.deletedCount+" item(s)"); clearSelection();
-  if(state.currentPath)await loadFolder(state.currentPath);
+async function deletePaths(paths, permanent=false, refreshSplit=false, hostOverride=""){
+  const cleanPaths = Array.from(new Set((paths||[]).filter(Boolean)));
+  if(!cleanPaths.length) return;
+  const hid = hostOverride || state.activeHostId;
+  const msg = permanent
+    ? `PERMANENTLY delete ${cleanPaths.length} item(s)?\n\nThis bypasses Recycle Bin and cannot be undone.`
+    : `Move ${cleanPaths.length} item(s) to Recycle Bin?`;
+  if(!confirm(msg)) return;
+
+  if(state.activeFile && cleanPaths.includes(state.activeFile.path)){
+    closeVideoOverlay();
+    await new Promise(r=>setTimeout(r, 120));
+  }else if(document.getElementById("videoOverlay").classList.contains("open")){
+    const v=document.getElementById("vidEl"); v.pause();
+  }
+
+  try{
+    const r=await hostApi(hid,"/api/file/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paths:cleanPaths,recycle:!permanent})});
+    if((r.deletedCount||0)===0 && r.errors?.length){
+      if(!permanent && confirm(`Recycle Bin failed (${r.errors[0]}).\n\nPERMANENTLY delete ${cleanPaths.length} item(s) instead?`)){
+        return await deletePaths(cleanPaths, true, refreshSplit, hid);
+      }
+      showToast("Delete failed: " + r.errors[0]);
+      return;
+    }
+    const errNote = r.errors?.length ? ` (${r.errors.length} skipped: ${r.errors[0]})` : "";
+    showToast((permanent ? "Permanently deleted " : "Recycled ") + (r.deletedCount||0) + " item(s)" + errNote);
+    clearSelection();
+    if(state.currentPath && hid===state.activeHostId) await loadFolder(state.currentPath);
+    if(state.split.open && state.split.currentPath && (refreshSplit || hid===state.split.hostId)) await loadSplitFolder(state.split.currentPath);
+  }catch(e){ showToast("Delete error: " + e.message); }
 }
-async function deleteSingleOverlayFile(){if(!state.activeFile)return;closeVideoOverlay();closeDocOverlay();closeOverlay("imageOverlay");await deletePaths([state.activeFile.path])}
-async function renamePrompt(f){if(!f)return;const n=prompt("Rename file:",f.name);if(!n||n===f.name)return;await hostApi(state.activeHostId,"/api/file/rename",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:f.path,newName:n})});await loadFolder(state.currentPath)}
+async function deleteSingleOverlayFile(permanent=false){if(!state.activeFile)return;const p=state.activeFile.path;closeVideoOverlay();closeDocOverlay();closeOverlay("imageOverlay");await deletePaths([p], permanent)}
+async function renamePrompt(f, hostOverride=""){
+  if(!f)return; const hid=hostOverride||state.activeHostId;
+  const n=prompt("Rename file:",f.name);if(!n||n===f.name)return;
+  await hostApi(hid,"/api/file/rename",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:f.path,newName:n})});
+  if(hid===state.activeHostId && state.currentPath) await loadFolder(state.currentPath);
+  if(state.split.open && hid===state.split.hostId && state.split.currentPath) await loadSplitFolder(state.split.currentPath);
+}
+
+/* External App Drag-Out (Dropbox/Explorer/Desktop) & Windows Clipboard (Ctrl+C) */
+async function startNativeExternalDrag(ev, paths, hostOverride=""){
+  if(ev){ ev.stopPropagation(); }
+  const clean=Array.from(new Set((paths||[]).filter(Boolean)));
+  const hid=hostOverride || state.activeHostId;
+  if(!clean.length) return;
+  try{
+    showToast(hid===state.localHostId ? "Drag onto Dropbox, Explorer, or Desktop..." : `Preparing ${clean.length} file(s) from device...`);
+    const prep = await sysFetch("/api/system/prepare-drag", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({hostId:hid, paths:clean})});
+    const localPaths = prep.localPaths || [];
+    if(window.pywebview?.api?.start_native_drag && localPaths.length){
+      const started = await window.pywebview.api.start_native_drag(localPaths);
+      if(started) return;
+    }
+    await copyFilesToWindowsClipboard(hid, clean);
+  }catch(e){ showToast("Drag failed: " + e.message); }
+}
+
+async function copyFilesToWindowsClipboard(hostId, paths){
+  const clean=Array.from(new Set((paths||[]).filter(Boolean)));
+  if(!clean.length) return;
+  try{
+    const res = await sysFetch("/api/system/copy-files-clipboard", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({hostId: hostId || state.activeHostId, paths: clean})
+    });
+    showToast(`Copied ${res.count} file(s) to Windows Clipboard — press Ctrl+V in Dropbox or Explorer`);
+  }catch(e){ showToast("Clipboard copy failed: " + e.message); }
+}
+
+/* Split Dual-Pane Browser */
+function toggleSplitView(){
+  if(state.split.open) closeSplitView();
+  else openInSplitView(state.activeHostId || state.localHostId, "");
+}
+function closeSplitView(){
+  state.split.open=false;
+  document.getElementById("splitPane").style.display="none";
+  document.getElementById("splitResizer").style.display="none";
+  const btn=document.getElementById("splitToggleBtn");
+  if(btn){ btn.classList.remove("primary"); btn.textContent="◫ Split View"; }
+}
+async function openInSplitView(hostId, path=""){
+  const hid = hostId || state.activeHostId || state.localHostId;
+  state.split.open = true;
+  state.split.hostId = hid;
+  const sp = document.getElementById("splitPane"), sr = document.getElementById("splitResizer");
+  sp.style.display="flex"; sp.style.flex=`0 0 ${state.split.widthPx}px`;
+  sr.style.display="flex";
+  const btn=document.getElementById("splitToggleBtn");
+  if(btn){ btn.classList.add("primary"); btn.textContent="◫ Close Split"; }
+  const sel=document.getElementById("splitHostSelect");
+  if(sel){
+    sel.innerHTML="";
+    state.hosts.forEach(h=>{
+      const o=document.createElement("option");
+      o.value=h.hostId; o.textContent=h.label||h.name; o.selected=(h.hostId===hid);
+      sel.appendChild(o);
+    });
+  }
+  try{
+    let target = path;
+    if(!target){
+      const r=await hostApi(hid,"/api/roots");
+      target=(r.drives&&r.drives[0]?.path)||(r.quickFolders&&r.quickFolders[0]?.path)||"";
+    }
+    if(target) await loadSplitFolder(target);
+  }catch(e){showToast("Split view error: "+e.message)}
+}
+async function loadSplitFolder(path){
+  state.split.currentPath = path;
+  const d = await hostApi(state.split.hostId, "/api/list?" + new URLSearchParams({path, sort:"name", order:"asc", filter:"all"}).toString());
+  state.split.folders = d.folders || [];
+  state.split.files = d.files || [];
+  state.split.parentPath = d.parentPath || "";
+  document.getElementById("splitUpBtn").disabled = !state.split.parentPath;
+
+  const cb=document.getElementById("splitCrumbs"); cb.innerHTML="";
+  const sep=path.includes("\\")?"\\":"/"; const segs=path.split(/[\\/]+/).filter(Boolean);
+  let acc=sep==="/"?"/":"";
+  segs.forEach((seg,idx)=>{
+    acc = sep==="\\" ? (idx===0?seg+"\\":acc+(acc.endsWith("\\")?"":"\\")+seg) : (acc==="/"?"/"+seg:acc+"/"+seg);
+    const tgt=acc;
+    const b=document.createElement("button"); b.className="crumb"+(idx===segs.length-1?" last":"");
+    b.textContent=seg; b.onclick=()=>loadSplitFolder(tgt); cb.appendChild(b);
+  });
+  renderSplitBrowser();
+}
+function splitGoUp(){ if(state.split.parentPath) loadSplitFolder(state.split.parentPath); }
+async function createSplitFolderHere(){
+  if(!state.split.currentPath) return;
+  const n=prompt("New folder inside Split View:"); if(!n) return;
+  await hostApi(state.split.hostId,"/api/folder/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({parentDir:state.split.currentPath,name:n})});
+  await loadSplitFolder(state.split.currentPath);
+}
+async function transferMainToSplit(move){
+  const paths = state.selected.size>0 ? Array.from(state.selected) : (state.focusedFile ? [state.focusedFile.path] : []);
+  if(!paths.length || !state.split.currentPath){ showToast("Select files in main pane first"); return; }
+  await dropItemsInto(state.split.hostId, state.split.currentPath, {hostId:state.activeHostId, paths}, move);
+}
+function renderSplitBrowser(){
+  const area=document.getElementById("splitBrowserArea"); area.innerHTML="";
+  wireDropTarget(area, state.split.hostId, state.split.currentPath);
+  if(state.split.folders.length){
+    const fs=document.createElement("div"); fs.className="chip-row"; fs.style.marginBottom="8px";
+    state.split.folders.forEach(f=>{
+      const c=document.createElement("button"); c.className="chip"; c.textContent=`📁 ${f.name} (${fmt(f.sizeBytes)})`;
+      c.onclick=()=>loadSplitFolder(f.path);
+      c.oncontextmenu=(ev)=>showCtxMenu(ev,{name:f.name,path:f.path,isDir:true},state.split.hostId);
+      wireDropTarget(c, state.split.hostId, f.path);
+      fs.appendChild(c);
+    });
+    area.appendChild(fs);
+  }
+  const list=document.createElement("div"); list.className="list-col compact";
+  state.split.files.forEach(f=>{
+    const r=document.createElement("div"); r.className="list-row"; r.draggable=true;
+    const th = f.mediaType==="video"
+      ? `<img class="list-thumb" loading="lazy" src="${hostMediaUrl(state.split.hostId,"/api/video/thumbnail",{path:f.path,w:320})}" draggable="false"/>`
+      : (f.mediaType==="image" ? `<img class="list-thumb" loading="lazy" src="${hostMediaUrl(state.split.hostId,"/api/image",{path:f.path,w:320})}" draggable="false"/>` : `<div class="list-thumb">${(f.extension||"FILE").toUpperCase()}</div>`);
+    r.innerHTML=`${th}<div style="flex:1;min-width:0"><div class="card-title">${f.name}</div><div style="font-size:10px;color:var(--muted)">${fmt(f.sizeBytes)}</div></div><button class="mini-btn" data-act="more">•••</button>`;
+    r.ondragstart=(ev)=>{
+      if(ev.dataTransfer){
+        ev.dataTransfer.effectAllowed="copyMove";
+        ev.dataTransfer.setData("application/x-deckvault-items", JSON.stringify({hostId:state.split.hostId, paths:[f.path]}));
+        const absUrl=new URL(hostMediaUrl(state.split.hostId,"/api/stream",{path:f.path}), window.location.origin).href;
+        ev.dataTransfer.setData("DownloadURL", `application/octet-stream:${f.name}:${absUrl}`);
+      }
+    };
+    r.onclick=(ev)=>{
+      if(ev.target?.dataset?.act==="more"){ ev.stopPropagation(); showCtxMenu(ev, f, state.split.hostId); }
+    };
+    r.ondblclick=()=>{ if(state.split.hostId===state.activeHostId) openFileViewer(f, false); };
+    r.oncontextmenu=(ev)=>showCtxMenu(ev, f, state.split.hostId);
+    list.appendChild(r);
+  });
+  if(!state.split.files.length && !state.split.folders.length){
+    list.innerHTML=`<div style="padding:36px;text-align:center;color:var(--muted)">Empty folder — drop files here to copy/move</div>`;
+  }
+  area.appendChild(list);
+}
+
+/* Built-In Compressor & Upscaler Studio */
+function openOptimizeSelected(tab="compress"){
+  const files=getSelectedFiles().filter(f=>f.mediaType==="video"||f.mediaType==="image");
+  if(!files.length){ showToast("Select video or image files to optimize"); return; }
+  openOptimizeModal(files, tab, state.activeHostId);
+}
+async function openOptimizeModal(items, tab="compress", hostOverride=""){
+  const valid=(items||[]).filter(Boolean);
+  if(!valid.length) return;
+  state.opt.items=valid;
+  state.opt.hostId=hostOverride || state.activeHostId;
+  state.opt.tab=tab;
+  const first=valid[0];
+  document.getElementById("optTitle").textContent = valid.length>1 ? `Optimize ${valid.length} Items` : `Optimize: ${first.name}`;
+  const totalBytes=valid.reduce((a,x)=>a+(x.sizeBytes||0),0);
+  const resTxt = first.meta?.width ? `${first.meta.width}×${first.meta.height}` : (first.mediaType||"media").toUpperCase();
+  document.getElementById("optSub").textContent = `${fmt(totalBytes)} • ${resTxt}${valid.length>1?" (batch)":""}`;
+  document.getElementById("optimizeModal").classList.add("open");
+  switchOptTab(tab);
+}
+function switchOptTab(tab){
+  state.opt.tab=tab;
+  document.getElementById("optTabCmp").classList.toggle("active", tab==="compress");
+  document.getElementById("optTabUp").classList.toggle("active", tab==="upscale");
+  renderOptimizeBody();
+}
+function renderOptimizeBody(){
+  const body=document.getElementById("optBody");
+  const first=state.opt.items[0];
+  if(!first) return;
+  const totalBefore=state.opt.items.reduce((a,x)=>a+(x.sizeBytes||0),0);
+  const ow=first.meta?.width || 1920, oh=first.meta?.height || 1080;
+
+  if(state.opt.tab==="compress"){
+    body.innerHTML=`
+      <div class="est-box" id="cmpEstBox">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px">
+          <span>Before: <b>${fmt(totalBefore)}</b></span>
+          <span>Estimated After: <b id="cmpEstAfter" style="color:var(--success);font-size:15px">Calculating...</b></span>
+          <span id="cmpEstPct" style="font-size:12px;color:var(--primary);font-weight:700"></span>
+        </div>
+        <div class="est-bar"><div class="est-bar-fill" id="cmpEstBar" style="width:55%"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)" id="cmpEstNote">Drag sliders or click Sample Probe for 1.5s real FFmpeg prediction</div>
+      </div>
+      <div class="section-card">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <label style="font-size:12px">Resolution
+            <select class="input" id="cmpHeight" onchange="refreshOptimizeEstimate(false)" style="width:100%;margin-top:4px">
+              <option value="0">Keep Original</option>
+              <option value="1080">1080p HD</option>
+              <option value="720">720p Compact</option>
+              <option value="480">480p Web/Mobile</option>
+            </select>
+          </label>
+          <label style="font-size:12px">Codec
+            <select class="input" id="cmpCodec" onchange="refreshOptimizeEstimate(false)" style="width:100%;margin-top:4px">
+              <option value="h264">H.264 (Maximum Compatibility)</option>
+              <option value="h265">H.265 / HEVC (~35% Smaller)</option>
+            </select>
+          </label>
+        </div>
+        <div>
+          <div style="display:flex;justify-content:space-between;font-size:12px"><span>Compression CRF (higher = smaller file)</span><b id="cmpCrfVal">24</b></div>
+          <input type="range" id="cmpCrf" min="18" max="34" value="24" oninput="document.getElementById('cmpCrfVal').textContent=this.value;refreshOptimizeEstimate(false)" style="width:100%"/>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <label style="font-size:12px">Audio Bitrate
+            <select class="input" id="cmpAudio" onchange="refreshOptimizeEstimate(false)" style="width:100%;margin-top:4px">
+              <option value="192">192 kbps High</option>
+              <option value="128" selected>128 kbps Standard</option>
+              <option value="64">64 kbps Voice/Compact</option>
+              <option value="0">Mute (Remove Audio)</option>
+            </select>
+          </label>
+          <label style="font-size:12px">Exact Target Size MB (0 = Use CRF)
+            <input type="number" class="input" id="cmpTargetMb" min="0" step="1" value="0" oninput="refreshOptimizeEstimate(false)" style="width:100%;margin-top:4px"/>
+          </label>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <select class="input" id="cmpSaveMode" style="padding:5px 9px">
+            <option value="copy">Save as Copy (_compressed)</option>
+            <option value="overwrite">Save Over Original (Recycle Old)</option>
+          </select>
+          <button class="pill-btn" onclick="refreshOptimizeEstimate(true)" title="Runs 1.5s test encode on PC to predict exact final MB">⚡ Sample Probe Exact Size</button>
+          <span style="flex:1"></span>
+          <button class="pill-btn primary" id="cmpRunBtn" onclick="executeCompress()">Compress ${state.opt.items.length} File(s)</button>
+        </div>
+      </div>
+    `;
+    refreshOptimizeEstimate(false);
+  }else{
+    body.innerHTML=`
+      <div class="est-box">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <span>Input: <b>${ow} × ${oh}</b> (${fmt(first.sizeBytes)})</span>
+          <span>Output: <b id="upOutDims" style="color:var(--primary);font-size:14px">${ow*2} × ${oh*2}</b></span>
+        </div>
+        <div style="font-size:11px;color:var(--muted)" id="upNote">Lanczos Detail-Preserving Resampling + Contrast-Adaptive Unsharp Filter</div>
+      </div>
+      <div class="section-card">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <label style="font-size:12px">Upscale Target
+            <select class="input" id="upPreset" onchange="updateUpscalePreviewInfo()" style="width:100%;margin-top:4px">
+              <option value="2x">2x Resolution Boost</option>
+              <option value="4k">4K UHD (3840 wide)</option>
+              <option value="1440p">1440p QHD (2560 wide)</option>
+              <option value="1080p">1080p FHD (1920 wide)</option>
+            </select>
+          </label>
+          <label style="font-size:12px">Detail Sharpening
+            <select class="input" id="upSharpen" style="width:100%;margin-top:4px">
+              <option value="0.4">Subtle (0.4)</option>
+              <option value="0.9" selected>Crisp Enhancement (0.9)</option>
+              <option value="1.4">Ultra Sharp (1.4)</option>
+            </select>
+          </label>
+        </div>
+        <label style="display:flex;justify-content:space-between;font-size:12px"><span>Temporal Denoise (Clean Compression Artifacts)</span><input type="checkbox" id="upDenoise"/></label>
+        <label style="display:flex;justify-content:space-between;font-size:12px"><span>Smooth 60 FPS Motion Interpolation (Video Only)</span><input type="checkbox" id="upFps60"/></label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <select class="input" id="upSaveMode" style="padding:5px 9px">
+            <option value="copy">Save as Copy (_upscaled)</option>
+            <option value="overwrite">Save Over Original</option>
+          </select>
+          <span style="flex:1"></span>
+          <button class="pill-btn primary" id="upRunBtn" onclick="executeUpscale()">Upscale ${state.opt.items.length} File(s)</button>
+        </div>
+      </div>
+    `;
+    updateUpscalePreviewInfo();
+  }
+}
+function updateUpscalePreviewInfo(){
+  const first=state.opt.items[0]; if(!first) return;
+  const ow=first.meta?.width||1280, oh=first.meta?.height||720;
+  const p=document.getElementById("upPreset")?.value||"2x";
+  let nw=ow*2, nh=oh*2;
+  if(p==="4k"){ nw=3840; nh=Math.round(oh*(3840/Math.max(1,ow))); }
+  else if(p==="1440p"){ nw=2560; nh=Math.round(oh*(2560/Math.max(1,ow))); }
+  else if(p==="1080p"){ nw=1920; nh=Math.round(oh*(1920/Math.max(1,ow))); }
+  const lbl=document.getElementById("upOutDims");
+  if(lbl) lbl.textContent=`${nw} × ${nh} (${p.toUpperCase()})`;
+}
+async function refreshOptimizeEstimate(sampleProbe){
+  const first=state.opt.items[0]; if(!first) return;
+  const afterEl=document.getElementById("cmpEstAfter"), pctEl=document.getElementById("cmpEstPct"), barEl=document.getElementById("cmpEstBar"), noteEl=document.getElementById("cmpEstNote");
+  if(!afterEl) return;
+  if(sampleProbe) afterEl.textContent="Sampling 1.5s encode...";
+  try{
+    const est = await hostApi(state.opt.hostId, "/api/media/compress-estimate", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        path: first.path,
+        targetHeight: Number(document.getElementById("cmpHeight").value)||0,
+        crf: Number(document.getElementById("cmpCrf").value)||24,
+        codec: document.getElementById("cmpCodec").value,
+        audioKbps: Number(document.getElementById("cmpAudio").value),
+        targetMb: Number(document.getElementById("cmpTargetMb").value)||0,
+        sampleProbe: !!sampleProbe,
+      })
+    });
+    const ratio = est.estimatedBytes / Math.max(1, first.sizeBytes);
+    const totalBefore = state.opt.items.reduce((a,x)=>a+(x.sizeBytes||0),0);
+    const totalEst = state.opt.items.length>1 ? Math.round(totalBefore*ratio) : est.estimatedBytes;
+    const savedPct = Math.round((1 - (totalEst / Math.max(1, totalBefore))) * 100);
+    afterEl.textContent = "~" + fmt(totalEst);
+    afterEl.style.color = savedPct >= 0 ? "var(--success)" : "var(--warn)";
+    pctEl.textContent = savedPct >= 0 ? `Saves ~${savedPct}%` : `Larger (+${Math.abs(savedPct)}%)`;
+    barEl.style.width = Math.max(4, Math.min(100, Math.round((totalEst / Math.max(1, totalBefore))*100))) + "%";
+    noteEl.textContent = `Out: ${est.newWidth}×${est.newHeight} • ${est.encoderUsed} (${est.method==="sample_probe"?"1.5s Sample Probe Verified":est.method})`;
+  }catch(e){ afterEl.textContent="Estimate unavailable"; }
+}
+async function executeCompress(){
+  const btn=document.getElementById("cmpRunBtn"); btn.disabled=true; btn.textContent="Compressing...";
+  let done=0, saved=0;
+  try{
+    for(const item of state.opt.items){
+      const res=await hostApi(state.opt.hostId,"/api/media/compress",{
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          path:item.path,
+          targetHeight:Number(document.getElementById("cmpHeight").value)||0,
+          crf:Number(document.getElementById("cmpCrf").value)||24,
+          codec:document.getElementById("cmpCodec").value,
+          audioKbps:Number(document.getElementById("cmpAudio").value),
+          targetMb:Number(document.getElementById("cmpTargetMb").value)||0,
+          saveMode:document.getElementById("cmpSaveMode").value,
+          recycleOriginal:true,
+        })
+      });
+      done++; saved += (res.savedBytes||0);
+    }
+    showToast(`Compressed ${done} file(s)! ${saved>0?"Reclaimed "+fmt(saved):""}`);
+    closeDialog("optimizeModal");
+    if(state.currentPath) await loadFolder(state.currentPath);
+    if(state.split.open && state.split.currentPath) await loadSplitFolder(state.split.currentPath);
+  }catch(e){showToast("Compression failed: "+e.message)}
+  finally{ btn.disabled=false; btn.textContent=`Compress ${state.opt.items.length} File(s)`; }
+}
+async function executeUpscale(){
+  const btn=document.getElementById("upRunBtn"); btn.disabled=true; btn.textContent="Upscaling...";
+  let done=0;
+  try{
+    for(const item of state.opt.items){
+      await hostApi(state.opt.hostId,"/api/media/upscale",{
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          path:item.path,
+          preset:document.getElementById("upPreset").value,
+          sharpen:Number(document.getElementById("upSharpen").value),
+          denoise:document.getElementById("upDenoise").checked,
+          fps60:document.getElementById("upFps60").checked,
+          crf:19,
+          saveMode:document.getElementById("upSaveMode").value,
+          recycleOriginal:true,
+        })
+      });
+      done++;
+    }
+    showToast(`Upscaled & enhanced ${done} file(s)!`);
+    closeDialog("optimizeModal");
+    if(state.currentPath) await loadFolder(state.currentPath);
+    if(state.split.open && state.split.currentPath) await loadSplitFolder(state.split.currentPath);
+  }catch(e){showToast("Upscale failed: "+e.message)}
+  finally{ btn.disabled=false; btn.textContent=`Upscale ${state.opt.items.length} File(s)`; }
+}
 
 /* Cross-Device Move & Copy */
-async function openTransferModal(items, move){
-  state.transferItems=items; state.transferMove=move; state.transferHostId=state.activeHostId;
+async function openTransferModal(items, move, sourceHostOverride=""){
+  state.transferItems=items; state.transferMove=move; state.transferSourceHostId=sourceHostOverride||state.activeHostId; state.transferHostId=state.transferSourceHostId;
   document.getElementById("transferTitle").textContent=`${move?"Move":"Copy"} ${items.length} item(s)`;
   document.getElementById("transferModal").classList.add("open");
   setTransferMove(move);
-  await pickTransferHost(state.activeHostId);
+  await pickTransferHost(state.transferHostId);
 }
 function setTransferMove(m){state.transferMove=m;document.getElementById("modeMoveChip").classList.toggle("active",m);document.getElementById("modeCopyChip").classList.toggle("active",!m)}
 async function pickTransferHost(hid){
@@ -1920,15 +2729,17 @@ function transferUp(){if(state.transferParent)loadTransferDir(state.transferPare
 async function createTransferSubfolder(){const n=prompt("New folder name:");if(!n)return;await hostApi(state.transferHostId,"/api/folder/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({parentDir:state.transferPath,name:n})});loadTransferDir(state.transferPath)}
 async function executeTransfer(){
   const paths=state.transferItems.map(i=>i.path);
+  const srcHid=state.transferSourceHostId||state.activeHostId;
   try{
-    if(state.transferHostId===state.activeHostId){
-      await hostApi(state.activeHostId,"/api/file/transfer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paths,destinationDir:state.transferPath,move:state.transferMove,conflict:"rename"})});
+    if(state.transferHostId===srcHid){
+      await hostApi(srcHid,"/api/file/transfer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paths,destinationDir:state.transferPath,move:state.transferMove,conflict:"rename"})});
     }else{
-      await sysFetch("/api/fleet/relay",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sourceHostId:state.activeHostId,targetHostId:state.transferHostId,paths,destinationDir:state.transferPath,move:state.transferMove})});
+      await sysFetch("/api/fleet/relay",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sourceHostId:srcHid,targetHostId:state.transferHostId,paths,destinationDir:state.transferPath,move:state.transferMove})});
     }
     showToast((state.transferMove?"Moved ":"Copied ")+paths.length+" item(s)");
     closeDialog("transferModal"); clearSelection();
     if(state.currentPath)await loadFolder(state.currentPath);
+    if(state.split.open && state.split.currentPath)await loadSplitFolder(state.split.currentPath);
   }catch(e){showToast("Transfer failed: "+e.message)}
 }
 
@@ -2019,32 +2830,34 @@ function backupSelectionToGDrive(){
   if(paths.length) backupPathsToGDrive(paths);
 }
 
-async function backupPathsToGDrive(paths){
+async function backupPathsToGDrive(paths, hostOverride=""){
   if(!paths || !paths.length) return;
   try{
     state.gdrive = await sysFetch("/api/gdrive/status");
     const hasTarget = (state.gdrive.savedDir || state.gdrive.savedRemote);
     if(!hasTarget){
       showToast("Set your Google Drive folder (e.g. G:\\My Drive\\DeckVault Backup) or rclone remote first");
-      openSettingsModal();
+      openCloudModal();
       return;
     }
     showToast(`Backing up ${paths.length} item(s) to Google Drive...`);
     const res = await sysFetch("/api/gdrive/backup", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({sourceHostId:state.activeHostId, paths})
+      body:JSON.stringify({sourceHostId:hostOverride||state.activeHostId, paths})
     });
     showToast(`Backed up ${res.backedUpCount} item(s) -> ${res.destination}`);
     clearSelection();
   }catch(e){showToast("Google Drive backup: "+e.message)}
 }
 
-/* Adjustable Left & Right Panel Resizers */
+/* Adjustable Left, Split & Right Panel Resizers */
 (()=>{
   const lr=document.getElementById("leftResizer"), tp=document.getElementById("treePane");
+  const sr=document.getElementById("splitResizer"), sp=document.getElementById("splitPane");
   const rr=document.getElementById("rightResizer"), ip=document.getElementById("inspPane");
   let mode=null;
   lr.onmousedown=()=>{mode="left"};
+  if(sr) sr.onmousedown=()=>{mode="split"};
   rr.onmousedown=()=>{mode="right"};
   window.addEventListener("mouseup",()=>{if(mode){savePrefs();mode=null}});
   window.addEventListener("mousemove",(e)=>{
@@ -2052,6 +2865,10 @@ async function backupPathsToGDrive(paths){
       const railW=prefs.showRail?66:0;
       prefs.folderWidthPx=Math.max(200,Math.min(540,e.clientX-railW));
       tp.style.width=prefs.folderWidthPx+"px";
+    }else if(mode==="split" && state.split.open){
+      const rEdge=sp.getBoundingClientRect().right;
+      state.split.widthPx=Math.max(290,Math.min(window.innerWidth*0.62, rEdge-e.clientX));
+      sp.style.flex=`0 0 ${state.split.widthPx}px`;
     }else if(mode==="right"){
       prefs.inspectorWidthPx=Math.max(210,Math.min(440,window.innerWidth-e.clientX));
       ip.style.width=prefs.inspectorWidthPx+"px";
@@ -2081,17 +2898,22 @@ window.addEventListener("keydown",(e)=>{
   }
   if(!typing){
     if(e.ctrlKey && e.key.toLowerCase()==="a"){e.preventDefault();selectAllFiles();}
+    else if(e.ctrlKey && e.key.toLowerCase()==="c" && (state.selected.size>0 || state.focusedFile)){
+      e.preventDefault();
+      const paths=state.selected.size>0 ? Array.from(state.selected) : [state.focusedFile.path];
+      copyFilesToWindowsClipboard(state.activeHostId, paths);
+    }
     else if(e.ctrlKey && e.key.toLowerCase()==="f"){e.preventDefault();document.getElementById("searchBox").focus();}
     else if(e.key==="Backspace"){e.preventDefault();goUp();}
     else if(e.key==="F2" && state.focusedFile){e.preventDefault();renamePrompt(state.focusedFile);}
     else if(e.key==="Delete" && (state.selected.size>0 || state.focusedFile)){
       e.preventDefault();
-      deletePaths(state.selected.size>0 ? Array.from(state.selected) : [state.focusedFile.path]);
+      deletePaths(state.selected.size>0 ? Array.from(state.selected) : [state.focusedFile.path], !!e.shiftKey);
     }
     else if(e.key==="Escape"){
       clearSelection();
       ["allDrivesOverlay","imageOverlay","docOverlay"].forEach(closeOverlay);
-      ["devicesModal","transferModal","settingsModal"].forEach(closeDialog);
+      ["devicesModal","transferModal","settingsModal","cloudModal","optimizeModal"].forEach(closeDialog);
     }
   }
 });
