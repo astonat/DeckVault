@@ -1,0 +1,32 @@
+# Build & packaged outputs
+/app/
+/tmp_dist/
+/tmp_build/
+/dist/
+/build/
+*.spec
+*.zip
+*.lnk
+
+# Android build artifacts, signing keys & local machine paths
+*.apk
+*.aab
+*.jks
+*.keystore
+android/.gradle/
+android/.kotlin/
+android/app/build/
+android/local.properties
+
+# Python & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# IDE & OS metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
