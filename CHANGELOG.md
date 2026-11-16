@@ -2,6 +2,19 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.4.0] - 2026-11-16
+
+### Windows Desktop Studio (`DeckVault.exe` v1.4.0)
+- **Window-Wide Loading & Upload Progress Bars**: Added a top-level progress bar strip beneath the title bar (`#globalLoadBar`), video player stream buffering bar (`#vidBufferBar`), and byte-accurate `XMLHttpRequest` upload progress tracking across every loading, transfer, edit, compress, upscale, and merge action.
+- **Info Tab Render Queue Drawer (`#queueDock`)**:
+  - Added a persistent sequential background `JobManager` (`GET /api/jobs`, `POST /api/jobs/enqueue`, `/api/jobs/cancel`, `/api/jobs/clear`) pinned cleanly at the bottom of the right **Info & Queue** panel.
+  - Added **`+ Add to Queue`** AND **`Run Now`** actions to **Cut & Edit Studio**, **Compressor**, **Upscaler & Enhancer**, **Extract Audio**, **Export GIF**, and **Merge Videos** — every task automatically tracks real-time FFmpeg `%`, speed (`x`), and ETA (`s left`) with instant **Cancel**.
+  - Added direct post-completion shortcuts right on completed queue cards: **`▶ Play / Open`**, **`✂ Edit / Cut`**, **`🗜 Compress`**, **`✨ Upscale`**, and **`📂 Folder`** (jumps directly to the finished file's folder and focuses it).
+- **Upgraded Upscaler & New Video Editing Tools**:
+  - Added Upscaler Engine Modes: **Crisp CAS** (`lanczos` + Contrast Adaptive Sharpen `cas`), **Anime / Line-Art**, and **Restore & Clean** (`deband` + `nlmeans` / `hqdn3d` denoise), plus optional **Camera Stabilization (`deshake`)**, **De-banding**, and **60 FPS** output.
+  - Expanded **Cut & Edit Studio** with live **Brightness / Contrast / Saturation** sliders (`eq`), **CAS Sharpen**, **Deband**, **Stabilize**, **Fade In/Out**, **Loudness Normalization (`loudnorm`)**, and **Export Speed (`0.5x–2.0x`)**.
+  - Added **Extract Audio (`M4A`/`MP3`)**, **Export Animated GIF** (`palettegen`/`paletteuse`), and multi-select **Merge Videos** (automatically normalizing aspect ratio, frame rate, and audio across clips).
+
 ## [v1.3.0] - 2026-11-15
 
 ### Windows Desktop Studio (`DeckVault.exe` v1.3.0)

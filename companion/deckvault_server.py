@@ -38,7 +38,7 @@ import uuid
 from desktop_ui import DESKTOP_APP_HTML
 
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
 DISCOVERY_MAGIC = b"DECKVAULT_DISCOVER_V1"
@@ -832,6 +832,117 @@ class MediaService:
         os.replace(tmp_out, out_path)
         return out_path
 
+    @staticmethod
+    def _parse_ffmpeg_time_s(key: str, val: str) -> float | None:
+        if key == "out_time_us":
+            try:
+                v = float(val)
+                return v / 1_000_000.0 if v >= 0 else None
+            except ValueError:
+                return None
+        if key == "out_time":
+            parts = val.strip().split(":")
+            if len(parts) == 3:
+                try:
+                    return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                except ValueError:
+                    return None
+        return None
+
+    def _run_ffmpeg_with_progress(
+        self,
+        cmd: list[str],
+        total_dur_s: float = 0.0,
+        on_progress: Any = None,
+        proc_holder: dict[str, Any] | None = None,
+        fail_label: str = "FFmpeg failed",
+    ) -> None:
+        """Run an FFmpeg command while streaming real-time progress % and supporting user cancel."""
+        if proc_holder is not None and proc_holder.get("cancel"):
+            raise InterruptedError("Cancelled by user")
+        full_cmd = list(cmd[:-1]) + ["-progress", "pipe:1", "-nostats", cmd[-1]]
+        proc = subprocess.Popen(
+            full_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=SUBPROCESS_FLAGS,
+        )
+        if proc_holder is not None:
+            proc_holder["proc"] = proc
+
+        stderr_chunks: list[str] = []
+
+        def _drain_stderr() -> None:
+            try:
+                assert proc.stderr is not None
+                for chunk in iter(lambda: proc.stderr.read(2048), ""):
+                    stderr_chunks.append(chunk)
+                    if sum(len(x) for x in stderr_chunks) > 8192:
+                        stderr_chunks[:] = ["".join(stderr_chunks)[-4096:]]
+            except Exception:
+                pass
+
+        err_t = threading.Thread(target=_drain_stderr, daemon=True)
+        err_t.start()
+
+        out_s = 0.0
+        speed_txt = ""
+        speed_num = 1.0
+        last_emit = 0.0
+        try:
+            assert proc.stdout is not None
+            for raw_line in proc.stdout:
+                if proc_holder is not None and proc_holder.get("cancel"):
+                    proc.terminate()
+                    break
+                line = raw_line.strip()
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                t_s = self._parse_ffmpeg_time_s(k, v)
+                if t_s is not None:
+                    out_s = t_s
+                elif k == "speed":
+                    speed_txt = v.strip()
+                    if speed_txt.endswith("x"):
+                        try:
+                            speed_num = max(0.05, float(speed_txt[:-1]))
+                        except ValueError:
+                            pass
+                elif k == "progress" and on_progress is not None:
+                    now = time.monotonic()
+                    if v == "end" or (now - last_emit) >= 0.25:
+                        last_emit = now
+                        if v == "end":
+                            pct = 99.0
+                        elif total_dur_s > 0.05:
+                            pct = max(1.0, min(98.5, (out_s / total_dur_s) * 100.0))
+                        else:
+                            pct = 50.0
+                        rem_s = max(0.0, (total_dur_s - out_s) / speed_num) if total_dur_s > 0.05 else None
+                        on_progress({
+                            "progressPct": round(pct, 1),
+                            "outSec": round(out_s, 1),
+                            "totalSec": round(total_dur_s, 1),
+                            "speed": speed_txt,
+                            "remainingSec": round(rem_s, 1) if rem_s is not None else None,
+                        })
+            rc = proc.wait(timeout=3600)
+        finally:
+            err_t.join(timeout=2)
+            if proc_holder is not None and proc_holder.get("proc") is proc:
+                proc_holder["proc"] = None
+
+        if proc_holder is not None and proc_holder.get("cancel"):
+            raise InterruptedError("Cancelled by user")
+        if rc != 0:
+            err_txt = "".join(stderr_chunks)
+            raise RuntimeError(err_txt[-600:] or fail_label)
+
     def trim_and_replace(
         self,
         path: str,
@@ -840,6 +951,8 @@ class MediaService:
         mode: str = "lossless",
         crf: int = 23,
         recycle_original: bool = True,
+        on_progress: Any = None,
+        proc_holder: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.ffmpeg or not self.ffprobe:
             raise RuntimeError("ffmpeg and ffprobe are required for trimming")
@@ -875,11 +988,8 @@ class MediaService:
                     "-movflags", "+faststart",
                     tmp_path,
                 ]
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, creationflags=SUBPROCESS_FLAGS)
-                if proc.returncode != 0:
-                    raise RuntimeError(proc.stderr[-600:] or "ffmpeg compress trim failed")
+                self._run_ffmpeg_with_progress(cmd, dur_s, on_progress, proc_holder, "ffmpeg compress trim failed")
             else:
-                # Lossless fast stream copy; try full stream map first, fallback to v+a+s if data/timecode track fails
                 cmd_full = [
                     self.ffmpeg, "-y",
                     "-ss", f"{start_s:.3f}",
@@ -889,8 +999,11 @@ class MediaService:
                     "-avoid_negative_ts", "make_zero",
                     tmp_path,
                 ]
-                proc = subprocess.run(cmd_full, capture_output=True, text=True, timeout=1800, creationflags=SUBPROCESS_FLAGS)
-                if proc.returncode != 0:
+                try:
+                    self._run_ffmpeg_with_progress(cmd_full, dur_s, on_progress, proc_holder, "ffmpeg lossless trim failed")
+                except InterruptedError:
+                    raise
+                except Exception:
                     cmd_safe = [
                         self.ffmpeg, "-y",
                         "-ss", f"{start_s:.3f}",
@@ -901,9 +1014,7 @@ class MediaService:
                         "-avoid_negative_ts", "make_zero",
                         tmp_path,
                     ]
-                    proc2 = subprocess.run(cmd_safe, capture_output=True, text=True, timeout=1800, creationflags=SUBPROCESS_FLAGS)
-                    if proc2.returncode != 0:
-                        raise RuntimeError(proc2.stderr[-600:] or "ffmpeg lossless trim failed")
+                    self._run_ffmpeg_with_progress(cmd_safe, dur_s, on_progress, proc_holder, "ffmpeg lossless trim failed")
 
             if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
                 raise RuntimeError("Trim output was empty or invalid")
@@ -957,8 +1068,18 @@ class MediaService:
         crf: int = 22,
         save_mode: str = "overwrite",
         recycle_original: bool = True,
+        brightness: float = 0.0,
+        contrast: float = 1.0,
+        saturation: float = 1.0,
+        sharpen: float = 0.0,
+        deband: bool = False,
+        stabilize: bool = False,
+        fade_sec: float = 0.0,
+        normalize_audio: bool = False,
+        on_progress: Any = None,
+        proc_holder: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Full video studio pipeline: cut/trim, visual crop, rotate/flip, speed, mute, save over or save copy."""
+        """Full video studio pipeline: cut, crop, rotate/flip, speed, color, deband, stabilize, fade, normalize audio."""
         if not self.ffmpeg or not self.ffprobe:
             raise RuntimeError("ffmpeg and ffprobe are required for editing")
         if not os.path.isfile(path):
@@ -967,6 +1088,7 @@ class MediaService:
         old_stat = os.stat(path)
         old_size = old_stat.st_size
         meta = self.probe_video(path, old_stat)
+        has_audio = bool(meta.get("audioCodec"))
         total_ms = meta.get("durationMs", 0)
         if total_ms > 0:
             end_ms = min(end_ms, total_ms) if end_ms > 0 else total_ms
@@ -982,7 +1104,6 @@ class MediaService:
             h_f = max(0.05, min(1.0 - y_f, float(crop.get("h", 1.0))))
             if x_f > 0.005 or y_f > 0.005 or w_f < 0.995 or h_f < 0.995:
                 has_crop = True
-                # Keep crop dimensions even-aligned and >= 2px for H.264 compatibility
                 crop_filter = (
                     f"crop=max(2\\,trunc(iw*{w_f:.5f}/2)*2):max(2\\,trunc(ih*{h_f:.5f}/2)*2):"
                     f"min(iw-2\\,trunc(iw*{x_f:.5f}/2)*2):min(ih-2\\,trunc(ih*{y_f:.5f}/2)*2)"
@@ -990,6 +1111,13 @@ class MediaService:
 
         rot = int(rotate) % 360
         spd = max(0.25, min(4.0, float(speed)))
+        bri = max(-0.5, min(0.5, float(brightness)))
+        con = max(0.5, min(2.0, float(contrast)))
+        sat = max(0.0, min(2.5, float(saturation)))
+        shrp = max(0.0, min(1.0, float(sharpen)))
+        f_sec = max(0.0, min(5.0, float(fade_sec)))
+        has_color = abs(bri) > 0.01 or abs(con - 1.0) > 0.02 or abs(sat - 1.0) > 0.02
+
         needs_reencode = (
             mode == "compress"
             or has_crop
@@ -998,16 +1126,22 @@ class MediaService:
             or bool(flip_v)
             or abs(spd - 1.0) > 0.02
             or bool(mute_audio)
+            or has_color
+            or shrp > 0.05
+            or bool(deband)
+            or bool(stabilize)
+            or f_sec > 0.05
+            or bool(normalize_audio)
         )
 
-        # If pure trim without transforms, delegate to lossless/compress trimmer when overwriting cleanly
         if not needs_reencode and save_mode == "overwrite":
-            return self.trim_and_replace(path, start_ms, end_ms, mode, crf, recycle_original)
+            return self.trim_and_replace(path, start_ms, end_ms, mode, crf, recycle_original, on_progress, proc_holder)
 
         start_s = start_ms / 1000.0
         dur_s = (end_ms - start_ms) / 1000.0
+        out_dur_s = dur_s / spd
         parent = os.path.dirname(path)
-        stem, ext = os.path.splitext(os.path.basename(path))
+        ext = os.path.splitext(os.path.basename(path))[1]
         out_ext = ext if ext.lower() in (".mp4", ".mov", ".mkv", ".m4v") else ".mp4"
         tmp_path = os.path.join(parent, f".deckvault_edit_{uuid.uuid4().hex}{out_ext}")
 
@@ -1023,8 +1157,8 @@ class MediaService:
                     "-avoid_negative_ts", "make_zero",
                     tmp_path,
                 ]
+                self._run_ffmpeg_with_progress(cmd, dur_s, on_progress, proc_holder, "ffmpeg edit failed")
             else:
-                # Apply rotate + flip first so crop coordinates match the oriented preview box 1:1
                 vf_parts: list[str] = []
                 if rot == 90:
                     vf_parts.append("transpose=1")
@@ -1040,19 +1174,37 @@ class MediaService:
                     vf_parts.append(crop_filter)
                 if has_crop or rot != 0:
                     vf_parts.append("setsar=1")
+                if stabilize:
+                    vf_parts.append("deshake")
+                if deband:
+                    vf_parts.append("deband")
+                if has_color:
+                    vf_parts.append(f"eq=brightness={bri:.3f}:contrast={con:.3f}:saturation={sat:.3f}")
+                if shrp > 0.05:
+                    vf_parts.append(f"cas=strength={shrp:.2f}")
+                if f_sec > 0.05 and dur_s > f_sec * 2.1:
+                    vf_parts.append(f"fade=t=in:st=0:d={f_sec:.2f}")
+                    vf_parts.append(f"fade=t=out:st={max(0.0, dur_s - f_sec):.3f}:d={f_sec:.2f}")
+                vf_parts.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
                 if abs(spd - 1.0) > 0.02:
                     vf_parts.append(f"setpts={1.0 / spd:.5f}*PTS")
 
                 af_parts: list[str] = []
-                if not mute_audio and abs(spd - 1.0) > 0.02:
-                    rem = spd
-                    while rem > 2.0:
-                        af_parts.append("atempo=2.0")
-                        rem /= 2.0
-                    while rem < 0.5:
-                        af_parts.append("atempo=0.5")
-                        rem /= 0.5
-                    af_parts.append(f"atempo={rem:.4f}")
+                if has_audio and not mute_audio:
+                    if normalize_audio:
+                        af_parts.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+                    if f_sec > 0.05 and dur_s > f_sec * 2.1:
+                        af_parts.append(f"afade=t=in:st=0:d={f_sec:.2f}")
+                        af_parts.append(f"afade=t=out:st={max(0.0, dur_s - f_sec):.3f}:d={f_sec:.2f}")
+                    if abs(spd - 1.0) > 0.02:
+                        rem = spd
+                        while rem > 2.0:
+                            af_parts.append("atempo=2.0")
+                            rem /= 2.0
+                        while rem < 0.5:
+                            af_parts.append("atempo=0.5")
+                            rem /= 0.5
+                        af_parts.append(f"atempo={rem:.4f}")
 
                 crf = max(16, min(32, int(crf)))
                 cmd = [
@@ -1062,59 +1214,35 @@ class MediaService:
                     "-t", f"{dur_s:.3f}",
                     "-map", "0:v:0",
                 ]
-                if mute_audio:
+                if mute_audio or not has_audio:
                     cmd.append("-an")
                 else:
                     cmd.extend(["-map", "0:a?"])
                 if vf_parts:
                     cmd.extend(["-vf", ",".join(vf_parts)])
-                if af_parts and not mute_audio:
+                if af_parts and has_audio and not mute_audio:
                     cmd.extend(["-af", ",".join(af_parts)])
                 cmd.extend([
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
                     "-pix_fmt", "yuv420p",
                 ])
-                if not mute_audio:
+                if has_audio and not mute_audio:
                     cmd.extend(["-c:a", "aac", "-b:a", "192k"])
-                cmd.extend(["-movflags", "+faststart", tmp_path])
+                if out_ext.lower() != ".mkv":
+                    cmd.extend(["-movflags", "+faststart"])
+                cmd.append(tmp_path)
+                self._run_ffmpeg_with_progress(cmd, out_dur_s, on_progress, proc_holder, "ffmpeg edit failed")
 
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, creationflags=SUBPROCESS_FLAGS)
-            if proc.returncode != 0:
-                raise RuntimeError(proc.stderr[-600:] or "ffmpeg edit failed")
             if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
                 raise RuntimeError("Edited output was empty or invalid")
 
-            new_stat = os.stat(tmp_path)
-            new_size = new_stat.st_size
-            new_meta = self.probe_video(tmp_path, new_stat)
-
-            if save_mode == "copy":
-                dest_path = _resolve_unique_dest(parent, f"{stem}_edited{out_ext}", "rename") or path
-                os.replace(tmp_path, dest_path)
-                size_delta = new_size
-                saved_bytes = 0
-                out_path = dest_path
-            else:
-                if recycle_original:
-                    send_to_recycle_bin(path)
-                os.replace(tmp_path, path)
-                self.invalidate_media_caches(path)
-                size_delta = new_size - old_size
-                saved_bytes = max(0, old_size - new_size)
-                out_path = path
-
-            final_stat = os.stat(out_path)
-            self.cache.put(out_path, final_stat.st_mtime_ns, final_stat.st_size, new_meta)
-            return {
-                "ok": True,
-                "path": out_path,
-                "oldSizeBytes": old_size,
-                "newSizeBytes": new_size,
-                "savedBytes": saved_bytes,
-                "sizeDeltaBytes": size_delta,
-                "newDurationMs": new_meta.get("durationMs", 0),
-                "saveMode": save_mode,
-            }
+            new_meta = self.probe_video(tmp_path)
+            res = self._atomic_finish_media(tmp_path, path, "_edited", out_ext, save_mode, recycle_original, old_size)
+            self.invalidate_media_caches(res["path"])
+            final_stat = os.stat(res["path"])
+            self.cache.put(res["path"], final_stat.st_mtime_ns, final_stat.st_size, new_meta)
+            res["newDurationMs"] = new_meta.get("durationMs", 0)
+            return res
         except Exception:
             if os.path.exists(tmp_path):
                 try:
@@ -1367,6 +1495,8 @@ class MediaService:
         save_mode: str = "copy",
         recycle_original: bool = True,
         quality: int = 82,
+        on_progress: Any = None,
+        proc_holder: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Compress an image or video cleanly with optional target size MB or CRF quality."""
         if not os.path.isfile(path):
@@ -1379,6 +1509,8 @@ class MediaService:
 
         if mtype == "image":
             from PIL import Image
+            if on_progress:
+                on_progress({"progressPct": 25.0, "speed": "", "remainingSec": None})
             out_ext = ext if ext in (".jpg", ".jpeg", ".webp", ".png") else ".jpg"
             tmp_path = os.path.join(parent, f".deckvault_cmp_{uuid.uuid4().hex}{out_ext}")
             try:
@@ -1410,6 +1542,7 @@ class MediaService:
         meta = self.probe_video(path, old_stat)
         dur_s = max(0.5, meta.get("durationMs", 0) / 1000.0)
         oh = int(meta.get("height", 0) or 1080)
+        has_audio = bool(meta.get("audioCodec"))
         use_hevc = (codec.lower() in ("h265", "hevc")) and self.has_encoder("libx265")
         v_enc = "libx265" if use_hevc else "libx264"
         out_ext = ".mp4" if save_mode == "copy" else (ext if ext in (".mp4", ".mov", ".mkv", ".m4v") else ".mp4")
@@ -1417,7 +1550,7 @@ class MediaService:
 
         try:
             cmd = [self.ffmpeg, "-y", "-i", path, "-map", "0:v:0"]
-            if audio_kbps <= 0:
+            if audio_kbps <= 0 or not has_audio:
                 cmd.append("-an")
             else:
                 cmd.extend(["-map", "0:a?"])
@@ -1430,21 +1563,21 @@ class MediaService:
                 cmd.extend(["-tag:v", "hvc1"])
             if target_mb > 0:
                 total_bps = (float(target_mb) * 1024 * 1024 * 8.0) / dur_s
-                a_bps = max(0, int(audio_kbps)) * 1000
+                a_bps = max(0, int(audio_kbps)) * 1000 if has_audio else 0
                 v_bps = max(120_000, int((total_bps - a_bps) * 0.94))
                 v_kbps = max(120, v_bps // 1000)
                 cmd.extend(["-b:v", f"{v_kbps}k", "-maxrate", f"{int(v_kbps * 1.35)}k", "-bufsize", f"{v_kbps * 2}k"])
             else:
                 cmd.extend(["-crf", str(max(16, min(36, int(crf))))])
-            if audio_kbps > 0:
+            if audio_kbps > 0 and has_audio:
                 cmd.extend(["-c:a", "aac", "-b:a", f"{int(audio_kbps)}k"])
             if out_ext != ".mkv":
                 cmd.extend(["-movflags", "+faststart"])
             cmd.append(tmp_path)
 
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, creationflags=SUBPROCESS_FLAGS)
-            if proc.returncode != 0 or not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
-                raise RuntimeError(proc.stderr[-600:] or "FFmpeg compression failed")
+            self._run_ffmpeg_with_progress(cmd, dur_s, on_progress, proc_holder, "FFmpeg compression failed")
+            if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
+                raise RuntimeError("Compression output was empty or invalid")
             res = self._atomic_finish_media(tmp_path, path, "_compressed", out_ext, save_mode, recycle_original, old_size)
             self.invalidate_media_caches(path)
             st_new = os.stat(res["path"])
@@ -1468,8 +1601,14 @@ class MediaService:
         crf: int = 19,
         save_mode: str = "copy",
         recycle_original: bool = True,
+        mode: str = "cas",
+        denoise_mode: str = "off",
+        deband: bool = False,
+        stabilize: bool = False,
+        on_progress: Any = None,
+        proc_holder: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Upscale and detail-enhance a video or image cleanly."""
+        """Upscale and detail-enhance a video or image cleanly (CAS, Anime, Restore + Optional 60 FPS / Stabilize)."""
         if not os.path.isfile(path):
             raise FileNotFoundError(path)
         old_stat = os.stat(path)
@@ -1478,14 +1617,23 @@ class MediaService:
         mtype = classify_media_type(path)
         ext = os.path.splitext(path)[1].lower()
         sharp_v = max(0.0, min(2.0, float(sharpen)))
+        up_mode = str(mode or "cas").lower()
+        dn_mode = str(denoise_mode or ("fast" if denoise else "off")).lower()
+        if denoise and dn_mode == "off":
+            dn_mode = "fast"
 
         if mtype == "image":
             from PIL import Image, ImageFilter
+            if on_progress:
+                on_progress({"progressPct": 25.0, "speed": "", "remainingSec": None})
             out_ext = ext if ext in (".png", ".jpg", ".jpeg", ".webp") else ".png"
             tmp_path = os.path.join(parent, f".deckvault_up_{uuid.uuid4().hex}{out_ext}")
             try:
                 with Image.open(path) as im:
-                    ow, oh = im.size
+                    work = im
+                    if dn_mode != "off" or up_mode == "restore":
+                        work = work.filter(ImageFilter.MedianFilter(size=3))
+                    ow, oh = work.size
                     target_map = {"4k": 3840, "1440p": 2560, "1080p": 1920}
                     if preset in target_map:
                         tw = target_map[preset]
@@ -1493,7 +1641,7 @@ class MediaService:
                         nh = int(round(oh * (nw / max(1, ow))))
                     else:
                         nw, nh = ow * 2, oh * 2
-                    up = im.resize((nw, nh), Image.Resampling.LANCZOS)
+                    up = work.resize((nw, nh), Image.Resampling.LANCZOS)
                     if sharp_v > 0.05:
                         up = up.filter(ImageFilter.UnsharpMask(radius=2.0, percent=int(sharp_v * 120), threshold=2))
                     if out_ext in (".jpg", ".jpeg"):
@@ -1516,6 +1664,8 @@ class MediaService:
         if not self.ffmpeg or not self.ffprobe:
             raise RuntimeError("FFmpeg is required for video upscaling")
         meta = self.probe_video(path, old_stat)
+        dur_s = max(0.5, meta.get("durationMs", 0) / 1000.0)
+        has_audio = bool(meta.get("audioCodec"))
         ow = int(meta.get("width", 0) or 1280)
         oh = int(meta.get("height", 0) or 720)
         target_long = {"4k": 3840, "1440p": 2560, "1080p": 1920}.get(preset, 0)
@@ -1537,35 +1687,330 @@ class MediaService:
         tmp_path = os.path.join(parent, f".deckvault_up_{uuid.uuid4().hex}{out_ext}")
         try:
             vf_parts: list[str] = []
-            if denoise:
-                vf_parts.append("hqdn3d=2.0:1.5:3.0:2.5")
+            if stabilize:
+                vf_parts.append("deshake")
+            if deband or up_mode == "restore":
+                vf_parts.append("deband")
+            if dn_mode == "hq":
+                vf_parts.append("nlmeans=s=3.5:p=5:r=9")
+            elif dn_mode == "fast" or (up_mode in ("anime", "restore") and dn_mode == "off"):
+                vf_parts.append("hqdn3d=2.0:1.5:3.0:2.5" if up_mode == "restore" else "hqdn3d=1.6:1.2:2.4:1.8")
+
             vf_parts.append(f"scale={nw}:{nh}:flags=lanczos")
+
             if sharp_v > 0.05:
-                vf_parts.append(f"unsharp=5:5:{sharp_v:.2f}:5:5:0.0")
+                cas_s = max(0.05, min(1.0, sharp_v * 0.72))
+                vf_parts.append(f"cas=strength={cas_s:.2f}")
             if fps60:
                 vf_parts.append("framerate=fps=60")
             vf_parts.append("setsar=1")
 
-            cmd = [
-                self.ffmpeg, "-y", "-i", path,
-                "-map", "0:v:0", "-map", "0:a?",
+            cmd = [self.ffmpeg, "-y", "-i", path, "-map", "0:v:0"]
+            if has_audio:
+                cmd.extend(["-map", "0:a?"])
+            else:
+                cmd.append("-an")
+            cmd.extend([
                 "-vf", ",".join(vf_parts),
                 "-c:v", "libx264", "-preset", "fast",
                 "-crf", str(max(14, min(28, int(crf)))),
                 "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
-            ]
+            ])
+            if has_audio:
+                cmd.extend(["-c:a", "aac", "-b:a", "192k"])
             if out_ext != ".mkv":
                 cmd.extend(["-movflags", "+faststart"])
             cmd.append(tmp_path)
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, creationflags=SUBPROCESS_FLAGS)
-            if proc.returncode != 0 or not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
-                raise RuntimeError(proc.stderr[-600:] or "FFmpeg upscale failed")
+
+            self._run_ffmpeg_with_progress(cmd, dur_s, on_progress, proc_holder, "FFmpeg upscale failed")
+            if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
+                raise RuntimeError("Upscale output was empty or invalid")
             res = self._atomic_finish_media(tmp_path, path, f"_upscaled_{preset}", out_ext, save_mode, recycle_original, old_size)
             self.invalidate_media_caches(path)
             st_new = os.stat(res["path"])
             self.cache.put(res["path"], st_new.st_mtime_ns, st_new.st_size, self.probe_video(res["path"], st_new))
             return res
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
+
+    def extract_audio(
+        self,
+        path: str,
+        fmt: str = "m4a",
+        bitrate_kbps: int = 192,
+        normalize: bool = False,
+        start_ms: int = 0,
+        end_ms: int = 0,
+        on_progress: Any = None,
+        proc_holder: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Extract audio track (MP3 or M4A) with optional trim range and loudness normalization."""
+        if not self.ffmpeg or not self.ffprobe:
+            raise RuntimeError("FFmpeg is required for audio extraction")
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        old_stat = os.stat(path)
+        meta = self.probe_video(path, old_stat)
+        if not meta.get("audioCodec"):
+            raise ValueError("Source video has no audio stream")
+        total_ms = int(meta.get("durationMs", 0) or 0)
+        s_ms = max(0, int(start_ms))
+        e_ms = int(end_ms) if int(end_ms) > s_ms + 200 else total_ms
+        if total_ms > 0 and e_ms > 0:
+            e_ms = min(e_ms, total_ms)
+        dur_s = max(0.5, ((e_ms - s_ms) / 1000.0) if e_ms > s_ms else (total_ms / 1000.0))
+
+        fmt_clean = str(fmt or "m4a").lower()
+        if fmt_clean == "mp3" and self.has_encoder("libmp3lame"):
+            out_ext, codec_name = ".mp3", "libmp3lame"
+        else:
+            out_ext, codec_name = ".m4a", "aac"
+
+        parent = os.path.dirname(path)
+        stem = os.path.splitext(os.path.basename(path))[0]
+        tmp_path = os.path.join(parent, f".deckvault_aud_{uuid.uuid4().hex}{out_ext}")
+        try:
+            cmd = [self.ffmpeg, "-y"]
+            if s_ms > 0:
+                cmd.extend(["-ss", f"{s_ms / 1000.0:.3f}"])
+            cmd.extend(["-i", path])
+            if e_ms > s_ms and (s_ms > 0 or (total_ms > 0 and e_ms < total_ms - 100)):
+                cmd.extend(["-t", f"{(e_ms - s_ms) / 1000.0:.3f}"])
+            cmd.extend(["-vn", "-map", "0:a:0"])
+            if normalize:
+                cmd.extend(["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"])
+            cmd.extend(["-c:a", codec_name, "-b:a", f"{max(64, min(320, int(bitrate_kbps)))}k"])
+            if out_ext == ".m4a":
+                cmd.extend(["-movflags", "+faststart"])
+            cmd.append(tmp_path)
+
+            self._run_ffmpeg_with_progress(cmd, dur_s, on_progress, proc_holder, "Audio extraction failed")
+            if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 512:
+                raise RuntimeError("Extracted audio file was empty")
+            dest_path = _resolve_unique_dest(parent, f"{stem}_audio{out_ext}", "rename") or tmp_path
+            os.replace(tmp_path, dest_path)
+            sz = os.path.getsize(dest_path)
+            return {
+                "ok": True,
+                "path": dest_path,
+                "name": os.path.basename(dest_path),
+                "oldSizeBytes": old_stat.st_size,
+                "newSizeBytes": sz,
+                "savedBytes": 0,
+                "sizeDeltaBytes": sz,
+                "saveMode": "copy",
+            }
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
+
+    def export_gif(
+        self,
+        path: str,
+        start_ms: int = 0,
+        end_ms: int = 0,
+        fps: int = 15,
+        width: int = 640,
+        crop: dict[str, Any] | None = None,
+        rotate: int = 0,
+        flip_h: bool = False,
+        flip_v: bool = False,
+        speed: float = 1.0,
+        on_progress: Any = None,
+        proc_holder: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Export a high-quality palette-optimized animated GIF from a video clip."""
+        if not self.ffmpeg or not self.ffprobe:
+            raise RuntimeError("FFmpeg is required for GIF export")
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        old_stat = os.stat(path)
+        meta = self.probe_video(path, old_stat)
+        total_ms = int(meta.get("durationMs", 0) or 0)
+        s_ms = max(0, int(start_ms))
+        e_ms = int(end_ms) if int(end_ms) > s_ms + 200 else min(total_ms, s_ms + 15000)
+        if total_ms > 0:
+            e_ms = min(e_ms, total_ms)
+        if e_ms <= s_ms + 200:
+            raise ValueError("GIF clip must be at least 200ms")
+        # Cap accidental huge GIF renders to 45s
+        if e_ms - s_ms > 45000:
+            e_ms = s_ms + 45000
+
+        spd = max(0.25, min(4.0, float(speed)))
+        dur_s = (e_ms - s_ms) / 1000.0
+        out_dur_s = dur_s / spd
+        fps_v = max(5, min(30, int(fps)))
+        w_v = max(160, min(1280, int(width)))
+        rot = int(rotate) % 360
+
+        vf_parts: list[str] = []
+        if rot == 90:
+            vf_parts.append("transpose=1")
+        elif rot == 180:
+            vf_parts.append("transpose=1,transpose=1")
+        elif rot == 270:
+            vf_parts.append("transpose=2")
+        if flip_h:
+            vf_parts.append("hflip")
+        if flip_v:
+            vf_parts.append("vflip")
+        if crop and isinstance(crop, dict):
+            x_f = max(0.0, min(0.95, float(crop.get("x", 0.0))))
+            y_f = max(0.0, min(0.95, float(crop.get("y", 0.0))))
+            w_f = max(0.05, min(1.0 - x_f, float(crop.get("w", 1.0))))
+            h_f = max(0.05, min(1.0 - y_f, float(crop.get("h", 1.0))))
+            if x_f > 0.005 or y_f > 0.005 or w_f < 0.995 or h_f < 0.995:
+                vf_parts.append(
+                    f"crop=max(2\\,trunc(iw*{w_f:.5f}/2)*2):max(2\\,trunc(ih*{h_f:.5f}/2)*2):"
+                    f"min(iw-2\\,trunc(iw*{x_f:.5f}/2)*2):min(ih-2\\,trunc(ih*{y_f:.5f}/2)*2)"
+                )
+        if abs(spd - 1.0) > 0.02:
+            vf_parts.append(f"setpts={1.0 / spd:.5f}*PTS")
+        vf_parts.append(f"fps={fps_v},scale='min({w_v},iw)':-1:flags=lanczos")
+        pre_chain = ",".join(vf_parts)
+        vf_full = f"{pre_chain},split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3"
+
+        parent = os.path.dirname(path)
+        stem = os.path.splitext(os.path.basename(path))[0]
+        tmp_path = os.path.join(parent, f".deckvault_gif_{uuid.uuid4().hex}.gif")
+        try:
+            cmd = [
+                self.ffmpeg, "-y",
+                "-ss", f"{s_ms / 1000.0:.3f}",
+                "-i", path,
+                "-t", f"{dur_s:.3f}",
+                "-vf", vf_full,
+                "-loop", "0",
+                tmp_path,
+            ]
+            self._run_ffmpeg_with_progress(cmd, out_dur_s, on_progress, proc_holder, "GIF export failed")
+            if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 512:
+                raise RuntimeError("GIF output was empty")
+            dest_path = _resolve_unique_dest(parent, f"{stem}_clip.gif", "rename") or tmp_path
+            os.replace(tmp_path, dest_path)
+            sz = os.path.getsize(dest_path)
+            return {
+                "ok": True,
+                "path": dest_path,
+                "name": os.path.basename(dest_path),
+                "oldSizeBytes": old_stat.st_size,
+                "newSizeBytes": sz,
+                "savedBytes": 0,
+                "sizeDeltaBytes": sz,
+                "saveMode": "copy",
+            }
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
+
+    def merge_videos(
+        self,
+        paths: list[str],
+        out_dir: str = "",
+        output_name: str = "Merged_Video.mp4",
+        crf: int = 20,
+        on_progress: Any = None,
+        proc_holder: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Join 2+ videos into a single MP4, normalizing aspect ratio, FPS, and audio streams."""
+        if not self.ffmpeg or not self.ffprobe:
+            raise RuntimeError("FFmpeg is required for merging videos")
+        clean_paths = [p for p in paths if p and os.path.isfile(p)]
+        if len(clean_paths) < 2:
+            raise ValueError("Select at least 2 videos to merge")
+
+        metas: list[dict[str, Any]] = []
+        total_dur_s = 0.0
+        max_w, max_h, max_fps = 0, 0, 30.0
+        any_audio = False
+        for p in clean_paths:
+            m = self.probe_video(p)
+            metas.append(m)
+            total_dur_s += max(0.2, float(m.get("durationMs", 0) or 0) / 1000.0)
+            w = int(m.get("width", 0) or 1280)
+            h = int(m.get("height", 0) or 720)
+            if w * h > max_w * max_h:
+                max_w, max_h = w, h
+            if m.get("fps"):
+                max_fps = max(max_fps, min(60.0, float(m["fps"])))
+            if m.get("audioCodec"):
+                any_audio = True
+
+        tw = max(2, min(1920, (max_w // 2) * 2 or 1280))
+        th = max(2, min(1920, (max_h // 2) * 2 or 720))
+        tfps = max(24, min(60, int(round(max_fps))))
+
+        dest_dir = out_dir if (out_dir and os.path.isdir(out_dir)) else os.path.dirname(clean_paths[0])
+        base_name = os.path.basename(str(output_name or "Merged_Video.mp4").strip())
+        if not base_name.lower().endswith(".mp4"):
+            base_name = os.path.splitext(base_name)[0] + ".mp4"
+        tmp_path = os.path.join(dest_dir, f".deckvault_merge_{uuid.uuid4().hex}.mp4")
+
+        try:
+            cmd = [self.ffmpeg, "-y"]
+            for p in clean_paths:
+                cmd.extend(["-i", p])
+
+            fc_parts: list[str] = []
+            concat_inputs: list[str] = []
+            for idx, m in enumerate(metas):
+                fc_parts.append(
+                    f"[{idx}:v]scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+                    f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps={tfps},format=yuv420p[v{idx}]"
+                )
+                concat_inputs.append(f"[v{idx}]")
+                if any_audio:
+                    if m.get("audioCodec"):
+                        fc_parts.append(f"[{idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,aresample=async=1[a{idx}]")
+                    else:
+                        d_clip = max(0.1, float(m.get("durationMs", 1000) or 1000) / 1000.0)
+                        fc_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration={d_clip:.3f}[a{idx}]")
+                    concat_inputs.append(f"[a{idx}]")
+
+            fc_parts.append(f"{''.join(concat_inputs)}concat=n={len(clean_paths)}:v=1:a={1 if any_audio else 0}[vout]{'[aout]' if any_audio else ''}")
+            cmd.extend(["-filter_complex", ";".join(fc_parts), "-map", "[vout]"])
+            if any_audio:
+                cmd.extend(["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"])
+            else:
+                cmd.append("-an")
+            cmd.extend([
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", str(max(16, min(28, int(crf)))),
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", tmp_path,
+            ])
+
+            self._run_ffmpeg_with_progress(cmd, total_dur_s, on_progress, proc_holder, "Video merge failed")
+            if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) < 1024:
+                raise RuntimeError("Merged video output was empty")
+            dest_path = _resolve_unique_dest(dest_dir, base_name, "rename") or tmp_path
+            os.replace(tmp_path, dest_path)
+            st_new = os.stat(dest_path)
+            new_meta = self.probe_video(dest_path, st_new)
+            self.cache.put(dest_path, st_new.st_mtime_ns, st_new.st_size, new_meta)
+            return {
+                "ok": True,
+                "path": dest_path,
+                "name": os.path.basename(dest_path),
+                "oldSizeBytes": sum(os.path.getsize(p) for p in clean_paths if os.path.isfile(p)),
+                "newSizeBytes": st_new.st_size,
+                "savedBytes": 0,
+                "sizeDeltaBytes": st_new.st_size,
+                "newDurationMs": new_meta.get("durationMs", 0),
+                "saveMode": "copy",
+            }
         except Exception:
             if os.path.exists(tmp_path):
                 try:
@@ -1995,6 +2440,210 @@ def discover_all_lan_hosts(self_host_id: str, http_port: int = DEFAULT_HTTP_PORT
     return sorted(found.values(), key=lambda d: (0 if d.get("os") == "Windows" else 1, d.get("deviceName", "").lower()))
 
 
+class JobManager:
+    """Sequential background job queue with live FFmpeg progress and cancellation."""
+
+    ROUTE_BY_TYPE = {
+        "edit": "/api/video/edit",
+        "compress": "/api/media/compress",
+        "upscale": "/api/media/upscale",
+        "extract_audio": "/api/media/extract-audio",
+        "gif": "/api/media/gif",
+        "merge": "/api/media/merge",
+    }
+
+    def __init__(self, rt: "CompanionRuntime") -> None:
+        self.rt = rt
+        self._lock = threading.Lock()
+        self._jobs: dict[str, dict[str, Any]] = {}
+        self._order: list[str] = []
+        self._proc_holders: dict[str, dict[str, Any]] = {}
+        self._q: queue.Queue[tuple[str, str, dict[str, Any]]] = queue.Queue()
+        self._worker = threading.Thread(target=self._run_worker, name="DeckVaultJobWorker", daemon=True)
+        self._worker.start()
+
+    @staticmethod
+    def _build_title(job_type: str, payload: dict[str, Any]) -> str:
+        name = os.path.basename(str(payload.get("path", "")).rstrip("\\/"))
+        if job_type == "upscale":
+            return f"Upscale ({str(payload.get('preset', '2x')).upper()}): {name}"
+        if job_type == "compress":
+            return f"Compress: {name}"
+        if job_type == "edit":
+            return f"Edit Studio: {name}"
+        if job_type == "extract_audio":
+            return f"Extract Audio ({str(payload.get('format', 'm4a')).upper()}): {name}"
+        if job_type == "gif":
+            return f"GIF Clip: {name}"
+        if job_type == "merge":
+            cnt = len(payload.get("paths") or [])
+            return f"Merge {cnt} Videos"
+        return f"{job_type}: {name}"
+
+    def enqueue(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        route = self.ROUTE_BY_TYPE.get(job_type)
+        if not route:
+            raise ValueError(f"Unsupported job type: {job_type}")
+        job_id = f"job_{uuid.uuid4().hex[:10]}"
+        src_path = str(payload.get("path") or ((payload.get("paths") or [""])[0]))
+        host_id = str(payload.get("hostId") or self.rt.config.data["host_id"])
+        rec = {
+            "id": job_id,
+            "type": job_type,
+            "route": route,
+            "title": str(payload.get("title") or self._build_title(job_type, payload)),
+            "hostId": host_id,
+            "sourcePath": src_path,
+            "sourceName": os.path.basename(src_path.rstrip("\\/")) or "Media",
+            "status": "queued",
+            "progressPct": 0.0,
+            "speed": "",
+            "remainingSec": None,
+            "message": "Queued",
+            "createdAt": time.time(),
+            "startedAt": None,
+            "finishedAt": None,
+            "outputPath": "",
+            "outputDir": "",
+            "outputName": "",
+            "outputMediaType": "",
+            "newSizeBytes": 0,
+            "savedBytes": 0,
+            "error": "",
+        }
+        with self._lock:
+            self._jobs[job_id] = rec
+            self._order.insert(0, job_id)
+            self._proc_holders[job_id] = {"proc": None, "cancel": False}
+            if len(self._order) > 60:
+                for old_id in list(self._order[60:]):
+                    old_j = self._jobs.get(old_id)
+                    if old_j and old_j["status"] in ("done", "error", "cancelled"):
+                        self._jobs.pop(old_id, None)
+                        self._proc_holders.pop(old_id, None)
+                        self._order.remove(old_id)
+        self._q.put((job_id, route, dict(payload)))
+        return dict(rec)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            jobs = [dict(self._jobs[jid]) for jid in self._order if jid in self._jobs]
+        active = [j for j in jobs if j["status"] == "running"]
+        queued = [j for j in jobs if j["status"] == "queued"]
+        overall = round(active[0]["progressPct"], 1) if active else (0.0 if queued else 100.0)
+        return {
+            "jobs": jobs,
+            "runningCount": len(active),
+            "queuedCount": len(queued),
+            "activeCount": len(active) + len(queued),
+            "overallPct": overall,
+        }
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            rec = self._jobs.get(job_id)
+            holder = self._proc_holders.get(job_id)
+            if not rec or not holder:
+                raise KeyError("Job not found")
+            if rec["status"] in ("done", "error", "cancelled"):
+                return dict(rec)
+            holder["cancel"] = True
+            proc = holder.get("proc")
+            if rec["status"] == "queued":
+                rec["status"] = "cancelled"
+                rec["finishedAt"] = time.time()
+                rec["message"] = "Cancelled"
+            else:
+                rec["message"] = "Cancelling..."
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        return self.get(job_id) or {}
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            j = self._jobs.get(job_id)
+            return dict(j) if j else None
+
+    def clear_finished(self) -> int:
+        removed = 0
+        with self._lock:
+            keep: list[str] = []
+            for jid in self._order:
+                j = self._jobs.get(jid)
+                if j and j["status"] in ("done", "error", "cancelled"):
+                    self._jobs.pop(jid, None)
+                    self._proc_holders.pop(jid, None)
+                    removed += 1
+                else:
+                    keep.append(jid)
+            self._order = keep
+        return removed
+
+    def _run_worker(self) -> None:
+        while True:
+            job_id, route, payload = self._q.get()
+            try:
+                with self._lock:
+                    rec = self._jobs.get(job_id)
+                    holder = self._proc_holders.get(job_id)
+                    if not rec or not holder or holder.get("cancel") or rec["status"] == "cancelled":
+                        continue
+                    rec["status"] = "running"
+                    rec["startedAt"] = time.time()
+                    rec["progressPct"] = 2.0
+                    rec["message"] = "Processing..."
+
+                def _on_prog(info: dict[str, Any]) -> None:
+                    with self._lock:
+                        r = self._jobs.get(job_id)
+                        if not r or r["status"] != "running":
+                            return
+                        r["progressPct"] = float(info.get("progressPct", r["progressPct"]))
+                        r["speed"] = str(info.get("speed", "") or "")
+                        r["remainingSec"] = info.get("remainingSec")
+                        spd_bit = f" • {r['speed']}" if r["speed"] else ""
+                        eta_bit = f" • {int(round(r['remainingSec']))}s left" if r["remainingSec"] is not None else ""
+                        r["message"] = f"{r['progressPct']:.0f}%{spd_bit}{eta_bit}"
+
+                res = self.rt.run_or_relay_media_op(route, payload, on_progress=_on_prog, proc_holder=holder)
+                out_p = str(res.get("path", "") or "")
+                with self._lock:
+                    r = self._jobs.get(job_id)
+                    if r:
+                        r["status"] = "done"
+                        r["progressPct"] = 100.0
+                        r["remainingSec"] = 0
+                        r["finishedAt"] = time.time()
+                        r["outputPath"] = out_p
+                        r["outputDir"] = os.path.dirname(out_p) if out_p else ""
+                        r["outputName"] = str(res.get("name") or (os.path.basename(out_p) if out_p else ""))
+                        r["outputMediaType"] = classify_media_type(out_p) if out_p else ""
+                        r["newSizeBytes"] = int(res.get("newSizeBytes", 0) or 0)
+                        r["savedBytes"] = int(res.get("savedBytes", 0) or 0)
+                        r["message"] = "Completed"
+            except InterruptedError:
+                with self._lock:
+                    r = self._jobs.get(job_id)
+                    if r:
+                        r["status"] = "cancelled"
+                        r["finishedAt"] = time.time()
+                        r["message"] = "Cancelled"
+            except Exception as exc:
+                self.rt.log(f"Queued job {job_id} error: {exc}")
+                with self._lock:
+                    r = self._jobs.get(job_id)
+                    if r:
+                        r["status"] = "error"
+                        r["finishedAt"] = time.time()
+                        r["error"] = str(exc)
+                        r["message"] = "Failed"
+            finally:
+                self._q.task_done()
+
+
 class CompanionRuntime:
     """Shared application state accessed by HTTP handlers and optional GUI."""
 
@@ -2006,9 +2655,298 @@ class CompanionRuntime:
         self.cache = MetadataCache(CACHE_DB_PATH)
         self.indexer = DiskIndexer(self.config.get_roots)
         self.media = MediaService(self.cache)
+        self.jobs = JobManager(self)
         self.active_clients: dict[str, float] = {}
         self._clients_lock = threading.Lock()
         self.events: queue.Queue[str] = queue.Queue(maxsize=200)
+
+    def exec_local_media_op(
+        self,
+        route: str,
+        path_str: str,
+        body: dict[str, Any],
+        force_copy: bool = False,
+        on_progress: Any = None,
+        proc_holder: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if route == "/api/media/compress-estimate":
+            return self.media.estimate_compression(
+                path=path_str,
+                target_height=int(body.get("targetHeight", 0) or 0),
+                crf=int(body.get("crf", 24) or 24),
+                codec=str(body.get("codec", "h264")),
+                audio_kbps=int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128),
+                target_mb=float(body.get("targetMb", 0.0) or 0.0),
+                sample_probe=bool(body.get("sampleProbe", False)),
+                quality=int(body.get("quality", 82) or 82),
+            )
+        save_mode = "copy" if force_copy else str(body.get("saveMode", "copy"))
+        recycle = bool(body.get("recycleOriginal", True))
+
+        if route == "/api/video/edit":
+            res = self.media.edit_video(
+                path=path_str,
+                start_ms=int(body.get("startMs", 0) or 0),
+                end_ms=int(body.get("endMs", 0) or 0),
+                crop=body.get("crop"),
+                rotate=int(body.get("rotate", 0) or 0),
+                flip_h=bool(body.get("flipH", False)),
+                flip_v=bool(body.get("flipV", False)),
+                speed=float(body.get("speed", 1.0) or 1.0),
+                mute_audio=bool(body.get("muteAudio", False)),
+                mode=str(body.get("mode", "lossless")),
+                crf=int(body.get("crf", 22) or 22),
+                save_mode=str(body.get("saveMode", "overwrite")) if not force_copy else "copy",
+                recycle_original=recycle,
+                brightness=float(body.get("brightness", 0.0) or 0.0),
+                contrast=float(body.get("contrast", 1.0) if body.get("contrast") is not None else 1.0),
+                saturation=float(body.get("saturation", 1.0) if body.get("saturation") is not None else 1.0),
+                sharpen=float(body.get("sharpen", 0.0) or 0.0),
+                deband=bool(body.get("deband", False)),
+                stabilize=bool(body.get("stabilize", False)),
+                fade_sec=float(body.get("fadeSec", 0.0) or 0.0),
+                normalize_audio=bool(body.get("normalizeAudio", False)),
+                on_progress=on_progress,
+                proc_holder=proc_holder,
+            )
+            if not force_copy:
+                self.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res.get("saveMode") == "copy" else 0, 0)
+                res["totalSpaceSavedBytes"] = self.config.add_space_saved(res["savedBytes"])
+            return res
+
+        if route == "/api/media/compress":
+            res = self.media.compress_media(
+                path=path_str,
+                target_height=int(body.get("targetHeight", 0) or 0),
+                crf=int(body.get("crf", 24) or 24),
+                codec=str(body.get("codec", "h264")),
+                audio_kbps=int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128),
+                target_mb=float(body.get("targetMb", 0.0) or 0.0),
+                save_mode=save_mode,
+                recycle_original=recycle,
+                quality=int(body.get("quality", 82) or 82),
+                on_progress=on_progress,
+                proc_holder=proc_holder,
+            )
+            if not force_copy:
+                self.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res["saveMode"] == "copy" else 0, 0)
+                res["totalSpaceSavedBytes"] = self.config.add_space_saved(res["savedBytes"])
+            return res
+
+        if route == "/api/media/extract-audio":
+            res = self.media.extract_audio(
+                path=path_str,
+                fmt=str(body.get("format", "m4a")),
+                bitrate_kbps=int(body.get("bitrateKbps", 192) or 192),
+                normalize=bool(body.get("normalize", False)),
+                start_ms=int(body.get("startMs", 0) or 0),
+                end_ms=int(body.get("endMs", 0) or 0),
+                on_progress=on_progress,
+                proc_holder=proc_holder,
+            )
+            if not force_copy:
+                self.indexer.adjust_ancestors(res["path"], res["newSizeBytes"], 1, 0)
+            return res
+
+        if route == "/api/media/gif":
+            res = self.media.export_gif(
+                path=path_str,
+                start_ms=int(body.get("startMs", 0) or 0),
+                end_ms=int(body.get("endMs", 0) or 0),
+                fps=int(body.get("fps", 15) or 15),
+                width=int(body.get("width", 640) or 640),
+                crop=body.get("crop"),
+                rotate=int(body.get("rotate", 0) or 0),
+                flip_h=bool(body.get("flipH", False)),
+                flip_v=bool(body.get("flipV", False)),
+                speed=float(body.get("speed", 1.0) or 1.0),
+                on_progress=on_progress,
+                proc_holder=proc_holder,
+            )
+            if not force_copy:
+                self.indexer.adjust_ancestors(res["path"], res["newSizeBytes"], 1, 1)
+            return res
+
+        res = self.media.upscale_media(
+            path=path_str,
+            preset=str(body.get("preset", "2x")),
+            sharpen=float(body.get("sharpen", 0.9) if body.get("sharpen") is not None else 0.9),
+            denoise=bool(body.get("denoise", False)),
+            fps60=bool(body.get("fps60", False)),
+            crf=int(body.get("crf", 19) or 19),
+            save_mode=save_mode,
+            recycle_original=recycle,
+            mode=str(body.get("mode", "cas")),
+            denoise_mode=str(body.get("denoiseMode", "off")),
+            deband=bool(body.get("deband", False)),
+            stabilize=bool(body.get("stabilize", False)),
+            on_progress=on_progress,
+            proc_holder=proc_holder,
+        )
+        if not force_copy:
+            self.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res["saveMode"] == "copy" else 0, 0)
+        return res
+
+    def run_or_relay_media_op(
+        self,
+        route: str,
+        body: dict[str, Any],
+        on_progress: Any = None,
+        proc_holder: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        local_id = self.config.data["host_id"]
+        host_id = str(body.get("hostId") or local_id)
+
+        if route == "/api/media/merge":
+            raw_paths = [str(p) for p in (body.get("paths") or []) if str(p).strip()]
+            out_dir_raw = str(body.get("outDir", "") or "")
+            out_name = str(body.get("outputName", "Merged_Video.mp4") or "Merged_Video.mp4")
+            crf = int(body.get("crf", 20) or 20)
+            if host_id == local_id:
+                safe_paths = [self.config.resolve_safe_path(p) for p in raw_paths]
+                safe_dir = self.config.resolve_safe_path(out_dir_raw) if out_dir_raw else ""
+                res = self.media.merge_videos(safe_paths, safe_dir, out_name, crf, on_progress, proc_holder)
+                self.indexer.adjust_ancestors(res["path"], res["newSizeBytes"], 1, 1)
+                self.log(f"Merged {len(safe_paths)} videos -> {os.path.basename(res['path'])}")
+                return res
+
+        raw_path = str(body.get("path", ""))
+        if host_id == local_id:
+            safe = self.config.resolve_safe_path(raw_path)
+            res = self.exec_local_media_op(route, safe, body, force_copy=False, on_progress=on_progress, proc_holder=proc_holder)
+            if route != "/api/media/compress-estimate":
+                self.log(f"{route.rsplit('/', 1)[-1].title()} {os.path.basename(res['path'])}")
+            return res
+
+        host = self.fleet.get(host_id)
+        if not host:
+            raise ValueError("Paired device not found")
+
+        try:
+            req = urllib.request.Request(
+                f"http://{host['ip']}:{host['port']}{route}",
+                data=json.dumps(body).encode("utf-8"),
+                headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=3600) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            err_txt = exc.read().decode("utf-8", errors="replace")
+            if exc.code != 404 and "Unknown route" not in err_txt:
+                raise RuntimeError(err_txt or f"HTTP {exc.code}")
+
+        if route == "/api/media/compress-estimate" and not bool(body.get("sampleProbe", False)):
+            old_sz = int(body.get("sizeBytes") or 0)
+            ow = int(body.get("width") or 1920)
+            oh = int(body.get("height") or 1080)
+            dur_ms = int(body.get("durationMs") or 10000)
+            dur_s = max(0.5, dur_ms / 1000.0)
+            th = int(body.get("targetHeight", 0) or 0)
+            crf = int(body.get("crf", 24) or 24)
+            codec = str(body.get("codec", "h264"))
+            audio_kbps = int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128)
+            target_mb = float(body.get("targetMb", 0.0) or 0.0)
+            use_hevc = (codec.lower() in ("h265", "hevc")) and self.media.has_encoder("libx265")
+            scale = (th / oh) if (th > 0 and th < oh) else 1.0
+            nw = max(2, int(round(ow * scale)) // 2 * 2)
+            nh = max(2, int(round(oh * scale)) // 2 * 2)
+            if target_mb > 0:
+                est_bytes = max(32 * 1024, int(target_mb * 1024 * 1024))
+                method = "target_size"
+            else:
+                pix_ratio = (nw * nh) / max(1, ow * oh)
+                crf_factor = 2.0 ** ((23.0 - float(crf)) / 6.0)
+                codec_factor = 0.66 if use_hevc else 1.0
+                src_bps = int((old_sz * 8) / dur_s) if old_sz > 0 else 4_000_000
+                base_v_bps = min(max(src_bps * 0.85, 400_000), max(3_500_000 * pix_ratio, src_bps * 0.92))
+                est_v_bps = max(160_000, base_v_bps * (pix_ratio ** 0.82) * crf_factor * codec_factor)
+                est_bytes = max(32 * 1024, int(((est_v_bps + max(0, audio_kbps) * 1000) / 8.0) * dur_s))
+                method = "analytical"
+            return {
+                "mediaType": classify_media_type(raw_path),
+                "oldSizeBytes": old_sz,
+                "estimatedBytes": est_bytes,
+                "oldWidth": ow,
+                "oldHeight": oh,
+                "newWidth": nw,
+                "newHeight": nh,
+                "durationMs": dur_ms,
+                "method": method,
+                "encoderUsed": "libx265" if use_hevc else "libx264",
+            }
+
+        stage_dir = DRAG_STAGING_DIR / uuid.uuid4().hex
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            def _dl_remote(rpath: str) -> str:
+                base = rpath.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] or f"media_{uuid.uuid4().hex[:6]}.mp4"
+                dest = str(stage_dir / base)
+                q = url_quote(rpath, safe="")
+                sreq = urllib.request.Request(
+                    f"http://{host['ip']}:{host['port']}/api/stream?path={q}",
+                    headers={"X-DeckVault-Token": host["token"]},
+                    method="GET",
+                )
+                with urllib.request.urlopen(sreq, timeout=600) as resp, open(dest, "wb") as out:
+                    shutil.copyfileobj(resp, out)
+                return dest
+
+            if route == "/api/media/merge":
+                raw_paths = [str(p) for p in (body.get("paths") or []) if str(p).strip()]
+                local_paths = [_dl_remote(rp) for rp in raw_paths]
+                first_rp = raw_paths[0]
+                sep = "\\" if "\\" in first_rp else "/"
+                remote_dir = first_rp.rsplit(sep, 1)[0] if sep in first_rp else ""
+                res = self.media.merge_videos(
+                    local_paths, str(stage_dir), str(body.get("outputName", "Merged_Video.mp4")),
+                    int(body.get("crf", 20) or 20), on_progress, proc_holder,
+                )
+            else:
+                sep = "\\" if "\\" in raw_path else "/"
+                remote_dir = raw_path.rsplit(sep, 1)[0] if sep in raw_path else ""
+                local_src = _dl_remote(raw_path)
+                res = self.exec_local_media_op(
+                    route, local_src, body,
+                    force_copy=(route != "/api/media/compress-estimate"),
+                    on_progress=on_progress, proc_holder=proc_holder,
+                )
+                if route == "/api/media/compress-estimate":
+                    return res
+
+            out_local = res["path"]
+            out_name = os.path.basename(out_local)
+            up_url = (
+                f"http://{host['ip']}:{host['port']}/api/file/upload"
+                f"?dir={url_quote(remote_dir, safe='')}&name={url_quote(out_name, safe='')}&conflict=rename"
+            )
+            with open(out_local, "rb") as uf:
+                up_data = uf.read()
+            ureq = urllib.request.Request(
+                up_url, data=up_data,
+                headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/octet-stream"},
+                method="POST",
+            )
+            with urllib.request.urlopen(ureq, timeout=600) as uresp:
+                if uresp.status >= 400:
+                    raise OSError(f"Remote upload failed: HTTP {uresp.status}")
+
+            want_overwrite = str(body.get("saveMode", "copy")) == "overwrite" and route != "/api/media/merge"
+            if want_overwrite:
+                dreq = urllib.request.Request(
+                    f"http://{host['ip']}:{host['port']}/api/file/delete",
+                    data=json.dumps({"paths": [raw_path], "recycle": bool(body.get("recycleOriginal", True))}).encode("utf-8"),
+                    headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(dreq, timeout=30).close()
+
+            res["path"] = f"{remote_dir}{sep}{out_name}" if remote_dir else out_name
+            res["savedBytes"] = max(0, res["oldSizeBytes"] - res["newSizeBytes"]) if want_overwrite else 0
+            res["relayedViaLocal"] = True
+            return res
+        finally:
+            shutil.rmtree(stage_dir, ignore_errors=True)
 
     def record_client_activity(self, ip: str) -> None:
         with self._clients_lock:
@@ -2161,6 +3099,7 @@ def make_handler(rt: CompanionRuntime):
                     "favorites": rt.favorites.list_all(),
                     "gdrive": detect_gdrive_environment(rt.config.data),
                     "cloudProviders": detect_cloud_storage_providers(rt.config.data),
+                    "jobs": rt.jobs.snapshot(),
                 })
                 return
 
@@ -2254,6 +3193,8 @@ def make_handler(rt: CompanionRuntime):
                     self._send_json(HTTPStatus.OK, detect_gdrive_environment(rt.config.data))
                 elif route == "/api/cloud/list":
                     self._send_json(HTTPStatus.OK, {"cloudProviders": detect_cloud_storage_providers(rt.config.data)})
+                elif route == "/api/jobs":
+                    self._send_json(HTTPStatus.OK, rt.jobs.snapshot())
                 elif route == "/api/stream/playable":
                     raw_path = (qs.get("path") or [""])[0]
                     start_s = float((qs.get("start") or ["0"])[0] or "0")
@@ -2425,26 +3366,7 @@ def make_handler(rt: CompanionRuntime):
                     )
                     self._send_json(HTTPStatus.OK, result)
                 elif route == "/api/video/edit":
-                    safe = rt.config.resolve_safe_path(str(body.get("path", "")))
-                    result = rt.media.edit_video(
-                        path=safe,
-                        start_ms=int(body.get("startMs", 0)),
-                        end_ms=int(body.get("endMs", 0)),
-                        crop=body.get("crop"),
-                        rotate=int(body.get("rotate", 0)),
-                        flip_h=bool(body.get("flipH", False)),
-                        flip_v=bool(body.get("flipV", False)),
-                        speed=float(body.get("speed", 1.0)),
-                        mute_audio=bool(body.get("muteAudio", False)),
-                        mode=str(body.get("mode", "lossless")),
-                        crf=int(body.get("crf", 22)),
-                        save_mode=str(body.get("saveMode", "overwrite")),
-                        recycle_original=bool(body.get("recycleOriginal", True)),
-                    )
-                    rt.indexer.adjust_ancestors(result["path"], result["sizeDeltaBytes"], 0, 0)
-                    total_saved = rt.config.add_space_saved(result["savedBytes"])
-                    result["totalSpaceSavedBytes"] = total_saved
-                    rt.log(f"Edited video {os.path.basename(result['path'])} ({result['saveMode']})")
+                    result = rt.run_or_relay_media_op("/api/video/edit", body)
                     self._send_json(HTTPStatus.OK, result)
                 elif route == "/api/video/snapshot":
                     safe = rt.config.resolve_safe_path(str(body.get("path", "")))
@@ -2539,9 +3461,32 @@ def make_handler(rt: CompanionRuntime):
                     rt.config.data["cloud_providers"] = list_p
                     rt.config.save()
                     self._send_json(HTTPStatus.OK, {"cloudProviders": detect_cloud_storage_providers(rt.config.data)})
-                elif route in ("/api/media/compress-estimate", "/api/media/compress", "/api/media/upscale"):
-                    res = self._run_or_relay_media_op(route, body)
+                elif route in (
+                    "/api/media/compress-estimate",
+                    "/api/media/compress",
+                    "/api/media/upscale",
+                    "/api/media/extract-audio",
+                    "/api/media/gif",
+                    "/api/media/merge",
+                ):
+                    res = rt.run_or_relay_media_op(route, body)
                     self._send_json(HTTPStatus.OK, res)
+                elif route == "/api/jobs/enqueue":
+                    job_type = str(body.get("type", "")).strip()
+                    batch = body.get("batch")
+                    if isinstance(batch, list) and batch:
+                        created = [rt.jobs.enqueue(job_type, item) for item in batch]
+                        self._send_json(HTTPStatus.OK, {"ok": True, "jobs": created, "snapshot": rt.jobs.snapshot()})
+                    else:
+                        job = rt.jobs.enqueue(job_type, dict(body.get("payload") or body))
+                        self._send_json(HTTPStatus.OK, {"ok": True, "job": job, "snapshot": rt.jobs.snapshot()})
+                elif route == "/api/jobs/cancel":
+                    job_id = str(body.get("id", "")).strip()
+                    job = rt.jobs.cancel(job_id)
+                    self._send_json(HTTPStatus.OK, {"ok": True, "job": job, "snapshot": rt.jobs.snapshot()})
+                elif route == "/api/jobs/clear":
+                    removed = rt.jobs.clear_finished()
+                    self._send_json(HTTPStatus.OK, {"ok": True, "removed": removed, "snapshot": rt.jobs.snapshot()})
                 elif route == "/api/system/prepare-drag":
                     if not self._is_loopback():
                         raise PermissionError("Localhost only")
@@ -2758,175 +3703,6 @@ def make_handler(rt: CompanionRuntime):
                 transferred += 1
 
             self._send_json(HTTPStatus.OK, {"transferredCount": transferred})
-
-        def _exec_local_media_op(self, route: str, path_str: str, body: dict[str, Any], force_copy: bool = False) -> dict[str, Any]:
-            if route == "/api/media/compress-estimate":
-                return rt.media.estimate_compression(
-                    path=path_str,
-                    target_height=int(body.get("targetHeight", 0) or 0),
-                    crf=int(body.get("crf", 24) or 24),
-                    codec=str(body.get("codec", "h264")),
-                    audio_kbps=int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128),
-                    target_mb=float(body.get("targetMb", 0.0) or 0.0),
-                    sample_probe=bool(body.get("sampleProbe", False)),
-                    quality=int(body.get("quality", 82) or 82),
-                )
-            save_mode = "copy" if force_copy else str(body.get("saveMode", "copy"))
-            recycle = bool(body.get("recycleOriginal", True))
-            if route == "/api/media/compress":
-                res = rt.media.compress_media(
-                    path=path_str,
-                    target_height=int(body.get("targetHeight", 0) or 0),
-                    crf=int(body.get("crf", 24) or 24),
-                    codec=str(body.get("codec", "h264")),
-                    audio_kbps=int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128),
-                    target_mb=float(body.get("targetMb", 0.0) or 0.0),
-                    save_mode=save_mode,
-                    recycle_original=recycle,
-                    quality=int(body.get("quality", 82) or 82),
-                )
-                if not force_copy:
-                    rt.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res["saveMode"] == "copy" else 0, 0)
-                    res["totalSpaceSavedBytes"] = rt.config.add_space_saved(res["savedBytes"])
-                return res
-            res = rt.media.upscale_media(
-                path=path_str,
-                preset=str(body.get("preset", "2x")),
-                sharpen=float(body.get("sharpen", 0.9) if body.get("sharpen") is not None else 0.9),
-                denoise=bool(body.get("denoise", False)),
-                fps60=bool(body.get("fps60", False)),
-                crf=int(body.get("crf", 19) or 19),
-                save_mode=save_mode,
-                recycle_original=recycle,
-            )
-            if not force_copy:
-                rt.indexer.adjust_ancestors(res["path"], res["sizeDeltaBytes"], 1 if res["saveMode"] == "copy" else 0, 0)
-            return res
-
-        def _run_or_relay_media_op(self, route: str, body: dict[str, Any]) -> dict[str, Any]:
-            local_id = rt.config.data["host_id"]
-            host_id = str(body.get("hostId") or local_id)
-            raw_path = str(body.get("path", ""))
-
-            if host_id == local_id:
-                safe = rt.config.resolve_safe_path(raw_path)
-                res = self._exec_local_media_op(route, safe, body, force_copy=False)
-                if route != "/api/media/compress-estimate":
-                    rt.log(f"{route.rsplit('/', 1)[-1].title()} {os.path.basename(res['path'])}")
-                return res
-
-            host = rt.fleet.get(host_id)
-            if not host:
-                raise ValueError("Paired device not found")
-
-            try:
-                req = urllib.request.Request(
-                    f"http://{host['ip']}:{host['port']}{route}",
-                    data=json.dumps(body).encode("utf-8"),
-                    headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=3600) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
-            except urllib.error.HTTPError as exc:
-                err_txt = exc.read().decode("utf-8", errors="replace")
-                if exc.code != 404 and "Unknown route" not in err_txt:
-                    raise RuntimeError(err_txt or f"HTTP {exc.code}")
-
-            # Remote device runs older companion or mobile peer server -> process cleanly on this PC and upload result back.
-            if route == "/api/media/compress-estimate" and not bool(body.get("sampleProbe", False)):
-                old_sz = int(body.get("sizeBytes") or 0)
-                ow = int(body.get("width") or 1920)
-                oh = int(body.get("height") or 1080)
-                dur_ms = int(body.get("durationMs") or 10000)
-                dur_s = max(0.5, dur_ms / 1000.0)
-                th = int(body.get("targetHeight", 0) or 0)
-                crf = int(body.get("crf", 24) or 24)
-                codec = str(body.get("codec", "h264"))
-                audio_kbps = int(body.get("audioKbps", 128) if body.get("audioKbps") is not None else 128)
-                target_mb = float(body.get("targetMb", 0.0) or 0.0)
-                use_hevc = (codec.lower() in ("h265", "hevc")) and rt.media.has_encoder("libx265")
-                scale = (th / oh) if (th > 0 and th < oh) else 1.0
-                nw = max(2, int(round(ow * scale)) // 2 * 2)
-                nh = max(2, int(round(oh * scale)) // 2 * 2)
-                if target_mb > 0:
-                    est_bytes = max(32 * 1024, int(target_mb * 1024 * 1024))
-                    method = "target_size"
-                else:
-                    pix_ratio = (nw * nh) / max(1, ow * oh)
-                    crf_factor = 2.0 ** ((23.0 - float(crf)) / 6.0)
-                    codec_factor = 0.66 if use_hevc else 1.0
-                    src_bps = int((old_sz * 8) / dur_s) if old_sz > 0 else 4_000_000
-                    base_v_bps = min(max(src_bps * 0.85, 400_000), max(3_500_000 * pix_ratio, src_bps * 0.92))
-                    est_v_bps = max(160_000, base_v_bps * (pix_ratio ** 0.82) * crf_factor * codec_factor)
-                    est_bytes = max(32 * 1024, int(((est_v_bps + max(0, audio_kbps) * 1000) / 8.0) * dur_s))
-                    method = "analytical"
-                return {
-                    "mediaType": classify_media_type(raw_path),
-                    "oldSizeBytes": old_sz,
-                    "estimatedBytes": est_bytes,
-                    "oldWidth": ow,
-                    "oldHeight": oh,
-                    "newWidth": nw,
-                    "newHeight": nh,
-                    "durationMs": dur_ms,
-                    "method": method,
-                    "encoderUsed": "libx265" if use_hevc else "libx264",
-                }
-
-            sep = "\\" if "\\" in raw_path else "/"
-            remote_dir = raw_path.rsplit(sep, 1)[0] if sep in raw_path else ""
-            orig_base = raw_path.rsplit(sep, 1)[-1] or f"media_{uuid.uuid4().hex[:6]}.mp4"
-            stage_dir = DRAG_STAGING_DIR / uuid.uuid4().hex
-            stage_dir.mkdir(parents=True, exist_ok=True)
-            local_src = str(stage_dir / orig_base)
-            try:
-                q = url_quote(raw_path, safe="")
-                sreq = urllib.request.Request(
-                    f"http://{host['ip']}:{host['port']}/api/stream?path={q}",
-                    headers={"X-DeckVault-Token": host["token"]},
-                    method="GET",
-                )
-                with urllib.request.urlopen(sreq, timeout=600) as resp, open(local_src, "wb") as out:
-                    shutil.copyfileobj(resp, out)
-
-                res = self._exec_local_media_op(route, local_src, body, force_copy=(route != "/api/media/compress-estimate"))
-                if route == "/api/media/compress-estimate":
-                    return res
-
-                out_local = res["path"]
-                out_name = os.path.basename(out_local)
-                up_url = (
-                    f"http://{host['ip']}:{host['port']}/api/file/upload"
-                    f"?dir={url_quote(remote_dir, safe='')}&name={url_quote(out_name, safe='')}&conflict=rename"
-                )
-                with open(out_local, "rb") as uf:
-                    up_data = uf.read()
-                ureq = urllib.request.Request(
-                    up_url, data=up_data,
-                    headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/octet-stream"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(ureq, timeout=600) as uresp:
-                    if uresp.status >= 400:
-                        raise OSError(f"Remote upload failed: HTTP {uresp.status}")
-
-                want_overwrite = str(body.get("saveMode", "copy")) == "overwrite"
-                if want_overwrite:
-                    dreq = urllib.request.Request(
-                        f"http://{host['ip']}:{host['port']}/api/file/delete",
-                        data=json.dumps({"paths": [raw_path], "recycle": bool(body.get("recycleOriginal", True))}).encode("utf-8"),
-                        headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/json"},
-                        method="POST",
-                    )
-                    urllib.request.urlopen(dreq, timeout=30).close()
-
-                res["path"] = f"{remote_dir}{sep}{out_name}" if remote_dir else out_name
-                res["savedBytes"] = max(0, res["oldSizeBytes"] - res["newSizeBytes"]) if want_overwrite else 0
-                res["relayedViaLocal"] = True
-                return res
-            finally:
-                shutil.rmtree(stage_dir, ignore_errors=True)
 
         def _stream_transcoded_playable(self, file_path: str, start_s: float = 0.0) -> None:
             if not rt.media.ffmpeg:

@@ -161,15 +161,42 @@ DESKTOP_APP_HTML = r"""<!doctype html>
   .est-bar{height:8px;border-radius:99px;background:var(--high);overflow:hidden;position:relative}
   .est-bar-fill{height:100%;background:var(--success);border-radius:99px;transition:width .2s}
 
-  /* Adjustable Right Inspector Panel */
-  .insp-pane{width:280px;min-width:210px;max-width:440px;background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column;padding:12px;gap:10px;overflow-y:auto;flex-shrink:0}
+  /* Adjustable Right Inspector Panel & Bottom Job Queue Drawer */
+  .insp-pane{width:295px;min-width:220px;max-width:460px;background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column;padding:0;overflow:hidden;flex-shrink:0}
   .insp-pane.hidden{display:none}
+  .insp-hdr{padding:11px 12px 9px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;flex-shrink:0}
+  .insp-scroll{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:9px;min-height:110px}
+  .queue-dock{border-top:1px solid var(--border);background:#07080b;display:flex;flex-direction:column;max-height:46%;min-height:40px;flex-shrink:0}
+  .queue-dock-hdr{padding:8px 11px;display:flex;align-items:center;gap:6px;background:var(--card);border-bottom:1px solid var(--border);cursor:pointer;flex-shrink:0}
+  .queue-list{overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:7px;flex:1}
+  .queue-dock.collapsed .queue-list{display:none}
+  .job-card{background:var(--card);border:1px solid var(--border);border-radius:11px;padding:8px 9px;display:flex;flex-direction:column;gap:5px;font-size:11px}
+  .job-card.running{border-color:var(--primary)}
+  .job-card.done{border-color:#264636}
+  .job-card.error{border-color:#57282e}
+  .job-prog-track{height:6px;border-radius:99px;background:var(--high);overflow:hidden}
+  .job-prog-fill{height:100%;background:var(--primary);border-radius:99px;transition:width .25s ease}
+  .job-card.done .job-prog-fill{background:var(--success)}
+  .job-card.error .job-prog-fill{background:var(--danger)}
+  .job-badge{font-size:9px;font-weight:700;padding:2px 6px;border-radius:99px;background:var(--elev);color:var(--muted);text-transform:uppercase}
+  .job-card.running .job-badge{background:var(--primary-container);color:var(--primary)}
+  .job-card.done .job-badge{background:#183424;color:var(--success)}
+  .job-card.error .job-badge{background:#3a191d;color:var(--danger)}
+
+  /* Window-Wide Activity & Loading Progress Strip */
+  .win-progress{height:3px;width:100%;background:transparent;position:relative;overflow:hidden;flex-shrink:0;z-index:120}
+  .win-progress.active{background:rgba(142,184,255,.14)}
+  .win-progress-fill{height:100%;width:0%;background:var(--primary);transition:width .2s ease;opacity:0}
+  .win-progress.active .win-progress-fill{opacity:1}
+  .win-progress.indeterminate .win-progress-fill{width:34%;position:absolute;animation:dvSlide 1.15s infinite ease-in-out}
+  @keyframes dvSlide{0%{left:-36%}100%{left:102%}}
+
   .kv-row{display:flex;justify-content:space-between;gap:8px;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04)}
   .kv-row span{color:var(--muted)}
   .kv-row b{text-align:right;word-break:break-all;font-weight:600}
 
   /* Bottom Status Footer */
-  .footer-bar{height:28px;background:var(--panel);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 14px;font-size:11px;color:var(--muted);flex-shrink:0}
+  .footer-bar{height:28px;background:var(--panel);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 14px;font-size:11px;color:var(--muted);flex-shrink:0;gap:10px}
 
   .sel-bar{position:absolute;bottom:14px;left:14px;right:14px;background:var(--high);border:1px solid var(--primary);border-radius:16px;padding:9px 14px;display:none;align-items:center;gap:8px;z-index:20;box-shadow:0 12px 30px rgba(0,0,0,.65)}
   .sel-bar.open{display:flex}
@@ -282,6 +309,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       <button class="wbtn close" onclick="winAction('close')" title="Close">&#10005;</button>
     </div>
   </header>
+  <div class="win-progress" id="globalLoadBar"><div class="win-progress-fill" id="globalLoadFill"></div></div>
 
   <div class="shell">
     <!-- Slim Navigation Rail -->
@@ -410,6 +438,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
         <button class="pill-btn" onmousedown="startNativeExternalDrag(event, Array.from(state.selected))" onclick="copyFilesToWindowsClipboard(state.activeHostId, Array.from(state.selected))" title="Drag onto Dropbox/Explorer or click to Copy to Windows Clipboard (Ctrl+C)">⤢ Drag / Copy App</button>
         <button class="pill-btn" onclick="openOptimizeSelected('compress')">Compress</button>
         <button class="pill-btn" onclick="openOptimizeSelected('upscale')">Upscale</button>
+        <button class="pill-btn" id="mergeSelBtn" style="display:none" onclick="mergeSelectedVideos()">🎞 Merge Videos</button>
         <button class="pill-btn" onclick="backupSelectionToGDrive()">Google Drive</button>
         <button class="pill-btn danger" onclick="deletePaths(Array.from(state.selected), false)">♻ Recycle</button>
         <button class="pill-btn danger" onclick="deletePaths(Array.from(state.selected), true)">✕ Delete Forever</button>
@@ -434,21 +463,36 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       <div class="browser-scroll" id="splitBrowserArea" style="padding-bottom:14px"></div>
     </section>
 
-    <!-- Adjustable Right Details / Inspector Panel -->
+    <!-- Adjustable Right Details / Info + Bottom Job Queue Panel -->
     <div class="resizer" id="rightResizer"></div>
     <aside class="insp-pane" id="inspPane">
-      <div style="display:flex;align-items:center;justify-content:space-between">
-        <strong style="font-size:13px">Inspector</strong>
+      <div class="insp-hdr">
+        <strong style="font-size:13px">Info & Queue</strong>
+        <span class="mini-btn" id="inspQueueBadge" style="display:none;border-color:var(--primary);color:var(--primary)" onclick="toggleQueueDock(false)">0 Active</span>
+        <span style="flex:1"></span>
         <button class="mini-btn" onclick="toggleInspector(false)">Hide</button>
       </div>
-      <div id="inspBody" style="font-size:12px;color:var(--muted)">Click or select a file to inspect codec, resolution, size, and quick edit tools.</div>
+      <div class="insp-scroll" id="inspBody" style="font-size:12px;color:var(--muted)">Click or select a file to inspect codec, resolution, size, and quick edit tools.</div>
+      <div class="queue-dock" id="queueDock">
+        <div class="queue-dock-hdr" onclick="toggleQueueDock()">
+          <strong style="font-size:11px;letter-spacing:.2px" id="queueDockTitle">Render Queue (0)</strong>
+          <span id="queueDockPct" style="font-size:11px;color:var(--primary);font-weight:700"></span>
+          <span style="flex:1"></span>
+          <button class="mini-btn" onclick="event.stopPropagation();clearDoneJobs()" title="Clear finished items">Clear</button>
+          <span id="queueFoldArrow" style="font-size:10px;color:var(--muted)">▾</span>
+        </div>
+        <div class="queue-list" id="queueList">
+          <div style="font-size:11px;color:var(--muted);padding:4px">No queued tasks yet. Edits, compressions, and upscales automatically appear here with live progress.</div>
+        </div>
+      </div>
     </aside>
   </div>
 
   <!-- Subtle Status Footer -->
   <footer class="footer-bar">
-    <span id="footerLeft">Ready</span>
-    <span id="footerRight" style="cursor:pointer" onclick="openSettingsModal()">Wi-Fi Companion</span>
+    <span id="footerLeft" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Ready</span>
+    <span id="footerJobChip" style="display:none;cursor:pointer;color:var(--primary);font-weight:700" onclick="openQueueInspector()"></span>
+    <span id="footerRight" style="cursor:pointer;white-space:nowrap" onclick="openSettingsModal()">Wi-Fi Companion</span>
   </footer>
 </div>
 
@@ -495,6 +539,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       <span>Previewing Cropped Output</span>
       <span style="text-decoration:underline">Edit Handles</span>
     </div>
+    <div class="win-progress" id="vidBufferBar" style="position:absolute;top:48px;left:0;right:0;z-index:12"><div class="win-progress-fill" id="vidBufferFill"></div></div>
 
     <div class="video-box" id="videoBox">
       <div class="video-stage" id="videoStage">
@@ -628,18 +673,52 @@ DESKTOP_APP_HTML = r"""<!doctype html>
     </div>
 
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding-top:4px;border-top:1px solid var(--border)">
+      <strong style="font-size:11px;color:var(--primary)">Color & Restore:</strong>
+      <label style="font-size:11px;color:var(--muted);display:inline-flex;align-items:center;gap:4px">Bright <input type="range" id="editBrightness" min="-0.3" max="0.3" step="0.02" value="0" style="width:68px" oninput="applyLiveColorPreview()"/></label>
+      <label style="font-size:11px;color:var(--muted);display:inline-flex;align-items:center;gap:4px">Contrast <input type="range" id="editContrast" min="0.6" max="1.6" step="0.05" value="1" style="width:68px" oninput="applyLiveColorPreview()"/></label>
+      <label style="font-size:11px;color:var(--muted);display:inline-flex;align-items:center;gap:4px">Sat <input type="range" id="editSaturation" min="0" max="2" step="0.05" value="1" style="width:68px" oninput="applyLiveColorPreview()"/></label>
+      <label style="font-size:11px;color:var(--muted);display:inline-flex;align-items:center;gap:4px">CAS <input type="range" id="editSharpen" min="0" max="1" step="0.1" value="0" style="width:58px"/></label>
+      <button class="mini-btn" onclick="resetColorStudio()">Reset Color</button>
+      <label style="font-size:11px;color:var(--muted)"><input type="checkbox" id="editDeband"/> Deband</label>
+      <label style="font-size:11px;color:var(--muted)"><input type="checkbox" id="editStabilize"/> Stabilize</label>
+      <label style="font-size:11px;color:var(--muted)"><input type="checkbox" id="editNormAudio"/> Loudnorm</label>
+      <select class="input" id="editFadeSec" style="padding:3px 6px;font-size:11px" title="Fade In / Fade Out">
+        <option value="0">Fade: Off</option>
+        <option value="0.5">Fade: 0.5s</option>
+        <option value="1.0">Fade: 1.0s</option>
+      </select>
+      <select class="input" id="editOutSpeed" style="padding:3px 6px;font-size:11px" title="Export Video Speed">
+        <option value="0.5">0.5x Slow</option>
+        <option value="1" selected>1.0x Normal</option>
+        <option value="1.25">1.25x Fast</option>
+        <option value="1.5">1.5x Fast</option>
+        <option value="2">2.0x Fast</option>
+      </select>
+    </div>
+
+    <div id="studioProgressBox" style="display:none;background:var(--card);border:1px solid var(--primary);border-radius:10px;padding:7px 10px;gap:8px;align-items:center">
+      <strong style="font-size:11px;color:var(--primary)" id="studioProgLabel">Rendering...</strong>
+      <div class="job-prog-track" style="flex:1"><div class="job-prog-fill" id="studioProgFill" style="width:4%"></div></div>
+      <span id="studioProgPct" style="font-size:11px;font-weight:700">0%</span>
+      <button class="mini-btn" onclick="cancelActiveStudioJob()">Cancel</button>
+    </div>
+
+    <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center;padding-top:4px;border-top:1px solid var(--border)">
       <select class="input" id="editQualityMode" style="padding:4px 8px">
-        <option value="lossless">Auto (Lossless Copy if no Crop/Transform)</option>
+        <option value="lossless">Auto (Lossless Copy if no Effects/Crop)</option>
         <option value="compress">Compress / Re-encode H.264</option>
       </select>
-      <label style="font-size:11px;color:var(--muted)">CRF <input type="number" id="editCrf" min="16" max="32" value="22" class="input" style="width:52px;padding:3px 6px"/></label>
+      <label style="font-size:11px;color:var(--muted)">CRF <input type="number" id="editCrf" min="16" max="32" value="22" class="input" style="width:50px;padding:3px 6px"/></label>
       <select class="input" id="editSaveMode" style="padding:4px 8px">
         <option value="overwrite">Save Over Original</option>
         <option value="copy">Save as Copy (_edited.mp4)</option>
       </select>
       <label style="font-size:11px;color:var(--muted)"><input type="checkbox" id="editRecycle" checked/> Recycle Original</label>
+      <button class="mini-btn" onclick="queueExtractAudio(state.activeFile, state.activeHostId, true)" title="Extract trimmed Audio (M4A)">🎵 Extract Audio</button>
+      <button class="mini-btn" onclick="queueExportGif(state.activeFile, state.activeHostId, true)" title="Export trimmed & cropped Animated GIF">🎞 Export GIF</button>
       <span style="flex:1"></span>
-      <button class="pill-btn primary" id="exportEditBtn" onclick="executeStudioEdit()">Render & Save Edit</button>
+      <button class="pill-btn" onclick="executeStudioEdit(true)">+ Add to Queue</button>
+      <button class="pill-btn primary" id="exportEditBtn" onclick="executeStudioEdit(false)">Render & Save Edit</button>
     </div>
   </div>
 </div>
@@ -756,7 +835,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       <div style="font-size:12px;color:var(--muted)">Enter the 6-digit PIN shown on DeckVault Companion to connect from this browser.</div>
       <input class="input" id="lanPinInput" inputmode="numeric" maxlength="6" placeholder="6-digit PIN"/>
       <button class="pill-btn primary" onclick="pairLanBrowser()">Unlock</button>
-      <a href="/DeckVault.apk" style="color:var(--primary);font-size:12px;text-align:center;text-decoration:none">Download Android APK (v1.2.0)</a>
+      <a href="/DeckVault.apk" style="color:var(--primary);font-size:12px;text-align:center;text-decoration:none">Download Android APK (v1.4.0)</a>
       <div id="lanErr" style="color:var(--danger);font-size:12px"></div>
     </div>
   </div>
@@ -847,10 +926,74 @@ const state = {
   cloudProviders: [],
   opt: { items:[], hostId:"", tab:"compress", est:null },
   split: { open:false, hostId:"", currentPath:"", parentPath:"", folders:[], files:[], widthPx:460 },
+  jobs: [],
+  queueCollapsed: false,
+  busyTasks: new Map(),
+  busySeq: 0,
+  activeStudioJobId: "",
+  activeOptJobIds: [],
+  _lastDoneIds: new Set(),
+  _lastErrIds: new Set(),
   audioCtx: null,
   gainNode: null,
   sbMetaMap: {},
 };
+
+function escHtml(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function beginBusy(label="Loading...", pct=null){
+  const id = ++state.busySeq;
+  state.busyTasks.set(id, {label, pct});
+  refreshGlobalProgressUI();
+  return id;
+}
+function setBusyProgress(id, pct, label){
+  const t = state.busyTasks.get(id);
+  if(!t) return;
+  if(pct !== undefined) t.pct = pct;
+  if(label) t.label = label;
+  refreshGlobalProgressUI();
+}
+function endBusy(id){
+  state.busyTasks.delete(id);
+  refreshGlobalProgressUI();
+}
+function refreshGlobalProgressUI(){
+  const bar = document.getElementById("globalLoadBar");
+  const fill = document.getElementById("globalLoadFill");
+  const pill = document.getElementById("titleStatusPill");
+  const activeJobs = (state.jobs||[]).filter(j=>j.status==="running"||j.status==="queued");
+  const runningJob = (state.jobs||[]).find(j=>j.status==="running");
+  if(state.busyTasks.size > 0){
+    const tasks = Array.from(state.busyTasks.values());
+    const last = tasks[tasks.length - 1];
+    bar.classList.add("active");
+    if(typeof last.pct === "number"){
+      bar.classList.remove("indeterminate");
+      fill.style.width = Math.max(3, Math.min(100, last.pct)) + "%";
+      if(pill) pill.textContent = `${last.label} (${Math.round(last.pct)}%)`;
+    }else{
+      bar.classList.add("indeterminate");
+      fill.style.width = "";
+      if(pill) pill.textContent = last.label;
+    }
+    return;
+  }
+  if(runningJob){
+    const p = Math.max(2, Math.min(100, Number(runningJob.progressPct||0)));
+    bar.classList.add("active");
+    bar.classList.remove("indeterminate");
+    fill.style.width = p + "%";
+    if(pill) pill.textContent = `${runningJob.title} • ${Math.round(p)}%`;
+    return;
+  }
+  bar.classList.remove("active","indeterminate");
+  fill.style.width = "0%";
+  if(pill){
+    const curHost = state.hosts.find(h=>h.hostId===state.activeHostId);
+    const queuedN = activeJobs.length;
+    pill.textContent = queuedN>0 ? `${queuedN} queued` : (curHost ? `${curHost.label||curHost.name} • Connected` : "Connected");
+  }
+}
 
 function fmt(b){if(b==null||b<0)return"";const u=["B","KB","MB","GB","TB"];let i=0,v=b;while(v>=1024&&i<u.length-1){v/=1024;i++}return(i===0?Math.round(v):(v>=10?v.toFixed(1):v.toFixed(2)))+" "+u[i]}
 function fmtDur(ms){if(!ms||ms<=0)return"";const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sc=s%60;return h>0?`${h}:${String(m).padStart(2,'0')}:${String(sc).padStart(2,'0')}`:`${m}:${String(sc).padStart(2,'0')}`}
@@ -927,12 +1070,264 @@ function applyVisualPrefs(){
 }
 
 async function sysFetch(url, opts={}){
-  const h=Object.assign({}, opts.headers||{});
-  if(state.token) h["X-DeckVault-Token"]=state.token;
-  const r=await fetch(url, Object.assign({}, opts, {headers:h}));
-  if(r.status===401){document.getElementById("lanLoginModal").classList.add("open");throw new Error("PIN required")}
-  if(!r.ok) throw new Error(await r.text());
-  return r.json();
+  const silent = !!opts.silent;
+  const bid = silent ? 0 : beginBusy(opts.busyLabel || "Working...");
+  try{
+    const h=Object.assign({}, opts.headers||{});
+    if(state.token) h["X-DeckVault-Token"]=state.token;
+    const r=await fetch(url, Object.assign({}, opts, {headers:h}));
+    if(r.status===401){document.getElementById("lanLoginModal").classList.add("open");throw new Error("PIN required")}
+    if(!r.ok) throw new Error(await r.text());
+    return await r.json();
+  }finally{
+    if(bid) endBusy(bid);
+  }
+}
+
+/* Live Queue Dock & Job Progress Sync */
+let _jobPollTimer = null;
+function applyJobsSnapshot(snap){
+  const list = snap?.jobs || [];
+  const prevIdsKnown = state._jobsInitDone;
+  state._jobsInitDone = true;
+  state.jobs = list;
+  let needFolderRefresh = false;
+  list.forEach(j=>{
+    if(j.status==="done" && !state._lastDoneIds.has(j.id)){
+      state._lastDoneIds.add(j.id);
+      if(prevIdsKnown){
+        showToast("Completed: " + (j.outputName || j.sourceName || j.title));
+        needFolderRefresh = true;
+      }
+    }else if(j.status==="error" && !state._lastErrIds.has(j.id)){
+      state._lastErrIds.add(j.id);
+      if(prevIdsKnown) showToast("Job failed: " + (j.error || j.title));
+    }
+  });
+  renderQueueDock();
+  refreshGlobalProgressUI();
+  updateInlineJobBoxes();
+  const hasActive = list.some(j=>j.status==="running"||j.status==="queued");
+  if(hasActive && !_jobPollTimer){
+    _jobPollTimer = setInterval(()=>{ refreshJobs(true); }, 550);
+  }else if(!hasActive && _jobPollTimer){
+    clearInterval(_jobPollTimer);
+    _jobPollTimer = null;
+  }
+  if(needFolderRefresh){
+    if(state.currentPath) loadFolder(state.currentPath, {silent:true});
+    if(state.split.open && state.split.currentPath) loadSplitFolder(state.split.currentPath, {silent:true});
+  }
+}
+async function refreshJobs(silent=true){
+  if(!state.token) return;
+  try{
+    const snap = await sysFetch("/api/jobs", {silent});
+    applyJobsSnapshot(snap);
+  }catch{}
+}
+async function enqueueJobs(type, payloads, openInspector=true){
+  if(!Array.isArray(payloads)) payloads = [payloads];
+  if(openInspector && !prefs.showInspector) setPref("showInspector", true);
+  if(state.queueCollapsed) toggleQueueDock(false);
+  const res = await sysFetch("/api/jobs/enqueue", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    busyLabel:"Adding to Queue...",
+    body:JSON.stringify(payloads.length>1 ? {type, batch:payloads} : {type, payload:payloads[0]})
+  });
+  if(res.snapshot) applyJobsSnapshot(res.snapshot);
+  return res;
+}
+async function cancelJob(id){
+  try{
+    const res = await sysFetch("/api/jobs/cancel", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({id})});
+    if(res.snapshot) applyJobsSnapshot(res.snapshot);
+    showToast("Cancelled task");
+  }catch(e){showToast("Cancel failed: "+e.message)}
+}
+async function clearDoneJobs(){
+  try{
+    const res = await sysFetch("/api/jobs/clear", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+    if(res.snapshot) applyJobsSnapshot(res.snapshot);
+  }catch{}
+}
+function toggleQueueDock(forceCollapsed){
+  state.queueCollapsed = (forceCollapsed !== undefined) ? !!forceCollapsed : !state.queueCollapsed;
+  const dock = document.getElementById("queueDock");
+  if(dock) dock.classList.toggle("collapsed", state.queueCollapsed);
+  const arr = document.getElementById("queueFoldArrow");
+  if(arr) arr.textContent = state.queueCollapsed ? "▸" : "▾";
+}
+function openQueueInspector(){
+  if(!prefs.showInspector) setPref("showInspector", true);
+  toggleQueueDock(false);
+}
+function updateInlineJobBoxes(){
+  const sBox = document.getElementById("studioProgressBox");
+  if(sBox && state.activeStudioJobId){
+    const j = state.jobs.find(x=>x.id===state.activeStudioJobId);
+    if(j){
+      const p = Math.round(Number(j.progressPct||0));
+      document.getElementById("studioProgLabel").textContent = j.status==="done" ? "Done!" : (j.status==="error" ? "Failed" : (j.status==="cancelled" ? "Cancelled" : (j.message||"Rendering...")));
+      document.getElementById("studioProgFill").style.width = p + "%";
+      document.getElementById("studioProgPct").textContent = p + "%";
+      const btn = document.getElementById("exportEditBtn");
+      if(j.status==="done"){
+        state.activeStudioJobId = "";
+        if(btn){ btn.disabled=false; btn.textContent="Render & Save Edit"; }
+        setTimeout(()=>{ if(sBox) sBox.style.display="none"; }, 1800);
+        if(j.outputPath && state.activeFile && j.outputPath === state.activeFile.path){
+          closeVideoOverlay();
+        }
+      }else if(j.status==="error"||j.status==="cancelled"){
+        state.activeStudioJobId = "";
+        if(btn){ btn.disabled=false; btn.textContent="Render & Save Edit"; }
+      }
+    }
+  }
+  const oBox = document.getElementById("optLiveProgress");
+  if(oBox && state.activeOptJobIds?.length){
+    const tracked = state.activeOptJobIds.map(id=>state.jobs.find(j=>j.id===id)).filter(Boolean);
+    if(tracked.length){
+      const avg = Math.round(tracked.reduce((a,j)=>a+Number(j.progressPct||0),0)/tracked.length);
+      const running = tracked.find(j=>j.status==="running") || tracked[0];
+      const allDone = tracked.every(j=>j.status==="done");
+      const anyErr = tracked.find(j=>j.status==="error");
+      document.getElementById("optProgFill").style.width = avg + "%";
+      document.getElementById("optProgPct").textContent = avg + "%";
+      document.getElementById("optProgLabel").textContent = allDone
+        ? `Done (${tracked.length} completed)`
+        : (anyErr ? `Error: ${anyErr.error}` : (running.message || running.title));
+      const cBtn = document.getElementById("cmpRunBtn"), uBtn = document.getElementById("upRunBtn");
+      if(allDone || tracked.every(j=>["done","error","cancelled"].includes(j.status))){
+        if(cBtn){ cBtn.disabled=false; cBtn.textContent=`Run Now (${state.opt.items.length})`; }
+        if(uBtn){ uBtn.disabled=false; uBtn.textContent=`Upscale Now (${state.opt.items.length})`; }
+        if(allDone){
+          const firstOut = tracked[0];
+          const actEl = document.getElementById("optProgActions");
+          if(actEl && firstOut?.outputPath){
+            actEl.innerHTML = `
+              <button class="mini-btn" style="border-color:var(--primary);color:var(--primary)" onclick="closeDialog('optimizeModal');openQueuedOutput('${firstOut.id}',false)">▶ Play / Open</button>
+              ${firstOut.outputMediaType==="video"?`<button class="mini-btn" onclick="closeDialog('optimizeModal');openQueuedOutput('${firstOut.id}',true)">✂ Edit Studio</button>`:""}
+              <button class="mini-btn" onclick="closeDialog('optimizeModal');goToQueuedOutputFolder('${firstOut.id}')">📂 Go to Folder</button>
+            `;
+          }
+          state.activeOptJobIds = [];
+        }
+      }
+    }
+  }
+}
+function cancelActiveStudioJob(){ if(state.activeStudioJobId) cancelJob(state.activeStudioJobId); }
+function renderQueueDock(){
+  const list = state.jobs || [];
+  const active = list.filter(j=>j.status==="running"||j.status==="queued");
+  const running = list.find(j=>j.status==="running");
+  const titleEl = document.getElementById("queueDockTitle");
+  const pctEl = document.getElementById("queueDockPct");
+  const badgeEl = document.getElementById("inspQueueBadge");
+  const footerChip = document.getElementById("footerJobChip");
+  const box = document.getElementById("queueList");
+  if(titleEl) titleEl.textContent = `Render Queue (${list.length})`;
+  if(pctEl) pctEl.textContent = running ? `${Math.round(running.progressPct||0)}%` : (active.length ? `${active.length} queued` : "");
+  if(badgeEl){
+    badgeEl.style.display = active.length ? "inline-flex" : "none";
+    badgeEl.textContent = active.length ? `${active.length} Running` : "";
+  }
+  if(footerChip){
+    if(running){
+      footerChip.style.display = "inline";
+      footerChip.textContent = `⚙ ${running.title} (${Math.round(running.progressPct||0)}%)`;
+    }else if(list.some(j=>j.status==="done")){
+      const dCount = list.filter(j=>j.status==="done").length;
+      footerChip.style.display = "inline";
+      footerChip.textContent = `✓ Queue: ${dCount} done (Click Info)`;
+    }else{
+      footerChip.style.display = "none";
+    }
+  }
+  if(!box) return;
+  if(!list.length){
+    box.innerHTML = `<div style="font-size:11px;color:var(--muted);padding:4px">No queued tasks yet. Edits, compressions, upscales, and merges automatically appear here.</div>`;
+    return;
+  }
+  box.innerHTML = "";
+  list.forEach(j=>{
+    const card = document.createElement("div");
+    card.className = "job-card " + (j.status||"");
+    const pct = Math.max(0, Math.min(100, Number(j.progressPct||0)));
+    const isActive = j.status==="running" || j.status==="queued";
+    const isDone = j.status==="done" && j.outputPath;
+    const isMedia = j.outputMediaType==="video" || j.outputMediaType==="image";
+    const sizeNote = (isDone && j.newSizeBytes>0) ? `<span>${fmt(j.newSizeBytes)}${j.savedBytes>0?` • Saved ${fmt(j.savedBytes)}`:""}</span>` : "";
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+        <strong style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1" title="${escHtml(j.title)}">${escHtml(j.title)}</strong>
+        <span class="job-badge">${escHtml(j.status==="running"?(Math.round(pct)+"%"):j.status)}</span>
+      </div>
+      <div class="job-prog-track"><div class="job-prog-fill" style="width:${j.status==="done"?100:pct}%"></div></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;color:var(--muted);font-size:10px">
+        <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1">${escHtml(j.status==="error"?(j.error||"Failed"):(j.message||""))}</span>
+        ${sizeNote}
+      </div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:1px">
+        ${isActive?`<button class="mini-btn" style="color:var(--danger)" onclick="cancelJob('${j.id}')">✕ Cancel</button>`:""}
+        ${isDone?`<button class="mini-btn" style="border-color:var(--primary);color:var(--primary)" onclick="openQueuedOutput('${j.id}',false)">▶ Play / Open</button>`:""}
+        ${isDone && j.outputMediaType==="video"?`<button class="mini-btn" onclick="openQueuedOutput('${j.id}',true)">✂ Edit / Cut</button>`:""}
+        ${isDone && isMedia?`<button class="mini-btn" onclick="optimizeQueuedOutput('${j.id}','compress')">🗜</button><button class="mini-btn" onclick="optimizeQueuedOutput('${j.id}','upscale')">✨</button>`:""}
+        ${isDone && j.outputDir?`<button class="mini-btn" onclick="goToQueuedOutputFolder('${j.id}')">📂 Folder</button>`:""}
+      </div>
+    `;
+    box.appendChild(card);
+  });
+}
+async function resolveQueuedFileItem(j){
+  const ext = (j.outputName.split(".").pop()||"").toLowerCase();
+  let found = null;
+  if(j.outputDir){
+    try{
+      const d = await hostApi(j.hostId || state.localHostId, "/api/list?" + new URLSearchParams({path:j.outputDir,sort:"name",order:"asc",filter:"all"}).toString(), {silent:true});
+      found = (d.files||[]).find(f=>f.path===j.outputPath || f.name===j.outputName) || null;
+    }catch{}
+  }
+  return found || {
+    name: j.outputName || "Output",
+    path: j.outputPath,
+    sizeBytes: j.newSizeBytes || 0,
+    mediaType: j.outputMediaType || "video",
+    extension: ext,
+    isDir: false,
+    meta: {}
+  };
+}
+async function openQueuedOutput(jobId, openStudio=false){
+  const j = (state.jobs||[]).find(x=>x.id===jobId);
+  if(!j || !j.outputPath) return;
+  const hid = j.hostId || state.localHostId;
+  const item = await resolveQueuedFileItem(j);
+  if(hid !== state.activeHostId){ await selectHost(hid, j.outputDir || ""); }
+  openFileViewer(item, openStudio, hid);
+}
+async function optimizeQueuedOutput(jobId, tab){
+  const j = (state.jobs||[]).find(x=>x.id===jobId);
+  if(!j || !j.outputPath) return;
+  const hid = j.hostId || state.localHostId;
+  const item = await resolveQueuedFileItem(j);
+  openOptimizeModal([item], tab, hid);
+}
+async function goToQueuedOutputFolder(jobId){
+  const j = (state.jobs||[]).find(x=>x.id===jobId);
+  if(!j || !j.outputDir) return;
+  const hid = j.hostId || state.localHostId;
+  if(hid !== state.activeHostId){
+    await selectHost(hid, j.outputDir);
+  }else{
+    await loadFolder(j.outputDir);
+  }
+  const f = (state.files||[]).find(x=>x.path===j.outputPath || x.name===j.outputName);
+  if(f) setFocusedFile(f);
+  showToast("Opened folder: " + j.outputDir);
 }
 function hostUrl(hostId, route){
   if(!hostId || hostId===state.localHostId) return route;
@@ -964,6 +1359,7 @@ async function initApp(){
       buildHostList(d.fleetHosts || []);
       renderCloudSection();
       renderFavoritesStrip();
+      applyJobsSnapshot(d.jobs || {jobs:[]});
       await selectHost(state.hosts[0].hostId);
       return;
     }
@@ -973,6 +1369,7 @@ async function initApp(){
       const ping = await sysFetch("/api/ping");
       state.localHostId = ping.hostId; state.localDeviceName = ping.deviceName;
       state.hosts = [{hostId:ping.hostId, name:ping.deviceName, label:ping.deviceName, os:ping.os||"Windows", isLocal:true}];
+      refreshJobs(true);
       await selectHost(ping.hostId);
       return;
     }catch{}
@@ -994,6 +1391,7 @@ async function pairLanBrowser(){
   document.getElementById("lanLoginModal").classList.remove("open");
   state.localHostId=d.hostId; state.localDeviceName=d.deviceName;
   state.hosts=[{hostId:d.hostId,name:d.deviceName,label:d.deviceName,os:d.os||"Windows",isLocal:true}];
+  refreshJobs(true);
   await selectHost(d.hostId);
 }
 
@@ -1321,26 +1719,32 @@ function renderBreadcrumbs(pathStr, label=""){
   });
 }
 
-async function loadFolder(path){
+async function loadFolder(path, opts={}){
   state.currentPath=path; state.spaceHogs=false; clearSelection(); renderDriveAndQuickStrips();
   const [sortBy, order] = prefs.sort.split(":");
   const q = document.getElementById("searchBox").value.trim();
   const qs = new URLSearchParams({path, sort:sortBy, order, filter:state.filter});
   if(q) qs.set("q", q);
+  const fetchOpts = opts.silent ? {silent:true} : {busyLabel:"Loading folder..."};
   if(state.recursive && q){
-    const d = await hostApi(state.activeHostId, "/api/search?" + new URLSearchParams({path, q}).toString());
+    const d = await hostApi(state.activeHostId, "/api/search?" + new URLSearchParams({path, q}).toString(), fetchOpts);
     state.folders=[]; state.files=d.files||[]; state.parentPath="";
     renderBreadcrumbs(path, `Deep Search: "${q}"`);
     updateFooter(`${state.files.length} matches`);
   }else{
-    const d = await hostApi(state.activeHostId, "/api/list?" + qs.toString());
+    const d = await hostApi(state.activeHostId, "/api/list?" + qs.toString(), fetchOpts);
     state.folders=d.folders||[]; state.files=d.files||[]; state.parentPath=d.parentPath||"";
     renderBreadcrumbs(d.path||path);
     updateFooter(`${state.folders.length} folders • ${state.files.length} files • ${fmt(d.totalSizeBytes)}`);
   }
   loadTree(path);
   renderBrowser();
+  if(state.focusedFile){
+    const refreshed = state.files.find(x=>x.path===state.focusedFile.path);
+    if(refreshed){ state.focusedFile = refreshed; renderInspector(); }
+  }
   updateFavButtonState();
+  refreshGlobalProgressUI();
 }
 
 function updateFooter(leftTxt){
@@ -1351,7 +1755,7 @@ function updateFooter(leftTxt){
 
 async function loadTree(path){
   try{
-    const t = await hostApi(state.activeHostId, "/api/tree?" + new URLSearchParams({path, sort:state.treeSort}).toString());
+    const t = await hostApi(state.activeHostId, "/api/tree?" + new URLSearchParams({path, sort:state.treeSort}).toString(), {silent:true});
     const box=document.getElementById("treeList"); box.innerHTML="";
     document.getElementById("treeCurInfo").textContent=state.parentPath ? "Subfolder" : "Drive Root";
     (t.children||[]).forEach(ch=>{
@@ -1578,11 +1982,15 @@ function showCtxMenu(ev, item, hostOverride=""){
     if(!fromSplit) state.focusedFile = item;
     const canOpt = item.mediaType==="video" || item.mediaType==="image";
     const ctxPaths = (!fromSplit && state.selected.has(item.path) && state.selected.size>1) ? Array.from(state.selected) : [item.path];
+    const selVideos = (!fromSplit && state.selected.size>=2) ? getSelectedFiles().filter(x=>x.mediaType==="video") : [];
     menu.innerHTML=`
       <button class="ctx-item" onclick='hideCtx();openFileViewer(${JSON.stringify(item)},false,${JSON.stringify(hid)})'>Open / Play</button>
       ${item.mediaType==="video"?`<button class="ctx-item" onclick='hideCtx();openFileViewer(${JSON.stringify(item)},true,${JSON.stringify(hid)})'>Cut, Rotate & Crop Studio</button>`:""}
       ${canOpt?`<button class="ctx-item" onclick='hideCtx();openOptimizeModal([${JSON.stringify(item)}],"compress",${JSON.stringify(hid)})'>🗜 Compress & Estimate Size...</button>`:""}
       ${canOpt?`<button class="ctx-item" onclick='hideCtx();openOptimizeModal([${JSON.stringify(item)}],"upscale",${JSON.stringify(hid)})'>✨ Upscale & Enhance...</button>`:""}
+      ${item.mediaType==="video"?`<button class="ctx-item" onclick='hideCtx();queueExtractAudio(${JSON.stringify(item)},${JSON.stringify(hid)},false)'>🎵 Extract Audio to Queue</button>`:""}
+      ${item.mediaType==="video"?`<button class="ctx-item" onclick='hideCtx();queueExportGif(${JSON.stringify(item)},${JSON.stringify(hid)},false)'>🎞 Export GIF (First 15s) to Queue</button>`:""}
+      ${selVideos.length>=2?`<button class="ctx-item" onclick='hideCtx();mergeSelectedVideos()'>🎞 Merge ${selVideos.length} Videos...</button>`:""}
       <button class="ctx-item" onclick='hideCtx();openTransferModal([${JSON.stringify(item)}],true,${JSON.stringify(hid)})'>Move To Device / Folder...</button>
       <button class="ctx-item" onclick='hideCtx();openTransferModal([${JSON.stringify(item)}],false,${JSON.stringify(hid)})'>Copy To Device / Folder...</button>
       <button class="ctx-item" onclick='hideCtx();copyFilesToWindowsClipboard(${JSON.stringify(hid)},${JSON.stringify(ctxPaths)})'>Copy File(s) to App Clipboard (Ctrl+C)</button>
@@ -1638,7 +2046,16 @@ function getSelectedFiles(){return state.files.filter(f=>state.selected.has(f.pa
 function updateSelBar(){
   const bar=document.getElementById("selBar");
   document.body.classList.toggle("has-selection", state.selected.size>0);
-  if(state.selected.size>0){bar.classList.add("open");document.getElementById("selCount").textContent=`${state.selected.size} selected`}
+  if(state.selected.size>0){
+    bar.classList.add("open");
+    document.getElementById("selCount").textContent=`${state.selected.size} selected`;
+    const vidCnt = getSelectedFiles().filter(f=>f.mediaType==="video").length;
+    const mBtn = document.getElementById("mergeSelBtn");
+    if(mBtn){
+      mBtn.style.display = vidCnt >= 2 ? "inline-flex" : "none";
+      mBtn.textContent = `🎞 Merge ${vidCnt} Videos`;
+    }
+  }
   else bar.classList.remove("open");
 }
 
@@ -1812,10 +2229,28 @@ function openVideoOverlay(f, openStudio){
   document.getElementById("vidSpeed").value=String(prefs.defaultSpeed);
   document.getElementById("vidFitSelect").value="contain";
   document.getElementById("vidAspectSelect").value="auto";
+  resetColorStudio();
+  document.getElementById("editSharpen").value="0";
+  document.getElementById("editDeband").checked=false;
+  document.getElementById("editStabilize").checked=false;
+  document.getElementById("editNormAudio").checked=false;
+  document.getElementById("editFadeSec").value="0";
+  document.getElementById("editOutSpeed").value="1";
+  const sBox=document.getElementById("studioProgressBox"); if(sBox && !state.activeStudioJobId) sBox.style.display="none";
 
   const v=document.getElementById("vidEl");
+  const setVidBuf = (on) => {
+    const b=document.getElementById("vidBufferBar");
+    if(b) b.classList.toggle("active", !!on), b.classList.toggle("indeterminate", !!on);
+  };
+  v.onloadstart = () => setVidBuf(true);
+  v.onwaiting = () => setVidBuf(true);
+  v.onstalled = () => setVidBuf(true);
+  v.oncanplay = () => setVidBuf(false);
+  v.onplaying = () => setVidBuf(false);
   v.playbackRate=prefs.defaultSpeed;
   v.onerror = () => {
+    setVidBuf(false);
     if(!state.isTranscode){
       showToast("Converting codec cleanly for playback...");
       startTranscodeStream(0);
@@ -2237,15 +2672,73 @@ function toLegacyPreTransformCrop(c, rot, flipH, flipV){
   return { x, y, w, h };
 }
 
-async function executeStudioEdit(){
-  const btn=document.getElementById("exportEditBtn"); btn.disabled=true; btn.textContent="Rendering...";
+function applyLiveColorPreview(){
+  const bri = Number(document.getElementById("editBrightness")?.value || 0);
+  const con = Number(document.getElementById("editContrast")?.value || 1);
+  const sat = Number(document.getElementById("editSaturation")?.value || 1);
+  const v = document.getElementById("vidEl");
+  if(v) v.style.filter = `brightness(${(1 + bri).toFixed(2)}) contrast(${con.toFixed(2)}) saturate(${sat.toFixed(2)})`;
+}
+function resetColorStudio(){
+  const b=document.getElementById("editBrightness"), c=document.getElementById("editContrast"), s=document.getElementById("editSaturation");
+  if(b) b.value="0"; if(c) c.value="1"; if(s) s.value="1";
+  applyLiveColorPreview();
+}
+
+async function queueExtractAudio(item, hostId="", fromStudio=false){
+  if(!item) return;
+  const hid = hostId || state.activeHostId;
+  const startMs = fromStudio ? Math.round(parseFloat(document.getElementById("inRange").value)*1000) : 0;
+  const endMs = fromStudio ? Math.round(parseFloat(document.getElementById("outRange").value)*1000) : 0;
+  const normalize = fromStudio ? !!document.getElementById("editNormAudio")?.checked : false;
+  try{
+    await enqueueJobs("extract_audio", {hostId:hid, path:item.path, format:"m4a", bitrateKbps:192, normalize, startMs, endMs}, true);
+    showToast("Queued audio extraction -> check Info Queue");
+  }catch(e){showToast("Queue failed: "+e.message)}
+}
+async function queueExportGif(item, hostId="", fromStudio=false){
+  if(!item) return;
+  const hid = hostId || state.activeHostId;
+  const e = state.edit;
+  const cropPayload = fromStudio && (e.cropActive || e.x>0.005 || e.y>0.005 || e.w<0.995 || e.h<0.995) ? {x:e.x, y:e.y, w:e.w, h:e.h} : null;
+  const startMs = fromStudio ? Math.round(parseFloat(document.getElementById("inRange").value)*1000) : 0;
+  const endMs = fromStudio ? Math.round(parseFloat(document.getElementById("outRange").value)*1000) : 0;
+  const speed = fromStudio ? (Number(document.getElementById("editOutSpeed")?.value)||1.0) : 1.0;
+  try{
+    await enqueueJobs("gif", {hostId:hid, path:item.path, startMs, endMs, fps:15, width:640, crop:cropPayload, rotate:fromStudio?e.rotate:0, flipH:fromStudio?e.flipH:false, flipV:fromStudio?e.flipV:false, speed}, true);
+    showToast("Queued GIF export -> check Info Queue");
+  }catch(e){showToast("Queue failed: "+e.message)}
+}
+async function mergeSelectedVideos(){
+  const vids = getSelectedFiles().filter(f=>f.mediaType==="video");
+  if(vids.length < 2){ showToast("Select at least 2 videos to merge"); return; }
+  const outName = prompt(`Merge ${vids.length} selected videos into filename:`, "Merged_Video.mp4");
+  if(!outName) return;
+  try{
+    await enqueueJobs("merge", {
+      hostId: state.activeHostId,
+      paths: vids.map(v=>v.path),
+      outDir: state.currentPath || "",
+      outputName: outName.trim(),
+      crf: 20,
+      title: `Merge ${vids.length} Videos -> ${outName.trim()}`
+    }, true);
+    clearSelection();
+    showToast(`Merging ${vids.length} videos -> check Info Queue for live progress`);
+  }catch(e){showToast("Merge failed: "+e.message)}
+}
+
+async function executeStudioEdit(queueOnly=false){
+  if(!state.activeFile) return;
+  const btn=document.getElementById("exportEditBtn");
+  if(!queueOnly){ btn.disabled=true; btn.textContent="Rendering..."; }
   const e=state.edit;
   let cropPayload = (e.cropActive || e.x>0.005 || e.y>0.005 || e.w<0.995 || e.h<0.995) ? {x:e.x, y:e.y, w:e.w, h:e.h} : null;
   try{
     const isLocalOrSupportsEdit = state.activeHostId===state.localHostId || state.hosts.find(h=>h.hostId===state.activeHostId)?.os==="Windows";
     if(cropPayload && isLocalOrSupportsEdit){
       try{
-        const ping = await hostApi(state.activeHostId, "/api/ping");
+        const ping = await hostApi(state.activeHostId, "/api/ping", {silent:true});
         if(ping?.videoEditOrder !== "transform_first"){
           cropPayload = toLegacyPreTransformCrop(cropPayload, e.rotate, e.flipH, e.flipV);
         }
@@ -2255,30 +2748,52 @@ async function executeStudioEdit(){
         }
       }
     }
-    const route = isLocalOrSupportsEdit ? "/api/video/edit" : "/api/video/trim";
-    const res = await hostApi(state.activeHostId, route, {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({
-        path: state.activeFile.path,
-        startMs: Math.round(parseFloat(document.getElementById("inRange").value)*1000),
-        endMs: Math.round(parseFloat(document.getElementById("outRange").value)*1000),
-        crop: cropPayload,
-        rotate: e.rotate,
-        flipH: e.flipH,
-        flipV: e.flipV,
-        muteAudio: e.muteOut,
-        speed: 1.0,
-        mode: document.getElementById("editQualityMode").value,
-        crf: Number(document.getElementById("editCrf").value)||22,
-        saveMode: document.getElementById("editSaveMode").value,
-        recycleOriginal: document.getElementById("editRecycle").checked
-      })
-    });
-    showToast("Saved edit! " + (res.savedBytes>0 ? "Reclaimed "+fmt(res.savedBytes) : res.path));
-    closeVideoOverlay();
-    await loadFolder(state.currentPath);
-  }catch(err){showToast("Edit failed: "+err.message)}
-  finally{btn.disabled=false;btn.textContent="Render & Save Edit"}
+    const payload = {
+      hostId: state.activeHostId,
+      path: state.activeFile.path,
+      startMs: Math.round(parseFloat(document.getElementById("inRange").value)*1000),
+      endMs: Math.round(parseFloat(document.getElementById("outRange").value)*1000),
+      crop: cropPayload,
+      rotate: e.rotate,
+      flipH: e.flipH,
+      flipV: e.flipV,
+      muteAudio: e.muteOut,
+      speed: Number(document.getElementById("editOutSpeed")?.value || 1.0),
+      brightness: Number(document.getElementById("editBrightness")?.value || 0),
+      contrast: Number(document.getElementById("editContrast")?.value || 1),
+      saturation: Number(document.getElementById("editSaturation")?.value || 1),
+      sharpen: Number(document.getElementById("editSharpen")?.value || 0),
+      deband: !!document.getElementById("editDeband")?.checked,
+      stabilize: !!document.getElementById("editStabilize")?.checked,
+      normalizeAudio: !!document.getElementById("editNormAudio")?.checked,
+      fadeSec: Number(document.getElementById("editFadeSec")?.value || 0),
+      mode: document.getElementById("editQualityMode").value,
+      crf: Number(document.getElementById("editCrf").value)||22,
+      saveMode: document.getElementById("editSaveMode").value,
+      recycleOriginal: document.getElementById("editRecycle").checked
+    };
+    const saveOverwrite = payload.saveMode === "overwrite";
+    if(!queueOnly && saveOverwrite){
+      const v=document.getElementById("vidEl"); if(v) v.pause();
+    }
+    const qRes = await enqueueJobs("edit", payload, true);
+    if(queueOnly){
+      showToast("Added edit to Info Queue!");
+      return;
+    }
+    state.activeStudioJobId = qRes.job.id;
+    const sBox = document.getElementById("studioProgressBox");
+    if(sBox){
+      sBox.style.display = "flex";
+      document.getElementById("studioProgLabel").textContent = "Starting render...";
+      document.getElementById("studioProgFill").style.width = "3%";
+      document.getElementById("studioProgPct").textContent = "3%";
+    }
+    showToast("Rendering in background — tracked in Info Queue!");
+  }catch(err){
+    showToast("Edit failed: "+err.message);
+    btn.disabled=false; btn.textContent="Render & Save Edit";
+  }
 }
 
 function closeVideoOverlay(){const v=document.getElementById("vidEl");v.pause();v.removeAttribute("src");v.load();document.getElementById("videoOverlay").classList.remove("fullscreen-all");closeOverlay("videoOverlay")}
@@ -2401,9 +2916,10 @@ async function openInSplitView(hostId, path=""){
     if(target) await loadSplitFolder(target);
   }catch(e){showToast("Split view error: "+e.message)}
 }
-async function loadSplitFolder(path){
+async function loadSplitFolder(path, opts={}){
   state.split.currentPath = path;
-  const d = await hostApi(state.split.hostId, "/api/list?" + new URLSearchParams({path, sort:"name", order:"asc", filter:"all"}).toString());
+  const fetchOpts = opts.silent ? {silent:true} : {busyLabel:"Loading split folder..."};
+  const d = await hostApi(state.split.hostId, "/api/list?" + new URLSearchParams({path, sort:"name", order:"asc", filter:"all"}).toString(), fetchOpts);
   state.split.folders = d.folders || [];
   state.split.files = d.files || [];
   state.split.parentPath = d.parentPath || "";
@@ -2561,7 +3077,13 @@ function renderOptimizeBody(){
           </select>
           <button class="pill-btn" onclick="refreshOptimizeEstimate(true)" title="Runs 1.5s test encode on PC to predict exact final MB">⚡ Sample Probe Exact Size</button>
           <span style="flex:1"></span>
-          <button class="pill-btn primary" id="cmpRunBtn" onclick="executeCompress()">Compress ${state.opt.items.length} File(s)</button>
+          <button class="pill-btn" onclick="executeCompress(true)">+ Add to Queue</button>
+          <button class="pill-btn primary" id="cmpRunBtn" onclick="executeCompress(false)">Run Now (${state.opt.items.length})</button>
+        </div>
+        <div id="optLiveProgress" class="est-box" style="display:none">
+          <div style="display:flex;justify-content:space-between;font-size:12px"><b id="optProgLabel">Working...</b><b id="optProgPct" style="color:var(--primary)">0%</b></div>
+          <div class="job-prog-track"><div class="job-prog-fill" id="optProgFill" style="width:0%"></div></div>
+          <div id="optProgActions" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         </div>
       </div>
     `;
@@ -2573,7 +3095,7 @@ function renderOptimizeBody(){
           <span>Input: <b>${ow} × ${oh}</b> (${fmt(first.sizeBytes)})</span>
           <span>Output: <b id="upOutDims" style="color:var(--primary);font-size:14px">${ow*2} × ${oh*2}</b></span>
         </div>
-        <div style="font-size:11px;color:var(--muted)" id="upNote">Lanczos Detail-Preserving Resampling + Contrast-Adaptive Unsharp Filter</div>
+        <div style="font-size:11px;color:var(--muted)" id="upNote">Lanczos + Contrast Adaptive Sharpen (CAS), NLM Denoise, Debanding & Video Stabilization</div>
       </div>
       <div class="section-card">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -2585,15 +3107,32 @@ function renderOptimizeBody(){
               <option value="1080p">1080p FHD (1920 wide)</option>
             </select>
           </label>
-          <label style="font-size:12px">Detail Sharpening
-            <select class="input" id="upSharpen" style="width:100%;margin-top:4px">
-              <option value="0.4">Subtle (0.4)</option>
-              <option value="0.9" selected>Crisp Enhancement (0.9)</option>
-              <option value="1.4">Ultra Sharp (1.4)</option>
+          <label style="font-size:12px">Upscale Engine Mode
+            <select class="input" id="upMode" style="width:100%;margin-top:4px">
+              <option value="cas" selected>Crisp CAS (Lanczos + Contrast Adaptive Sharpen)</option>
+              <option value="anime">Anime / Screen Capture Line-Art</option>
+              <option value="restore">Restore & Clean Compressed Video</option>
             </select>
           </label>
         </div>
-        <label style="display:flex;justify-content:space-between;font-size:12px"><span>Temporal Denoise (Clean Compression Artifacts)</span><input type="checkbox" id="upDenoise"/></label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <label style="font-size:12px">CAS Detail Sharpening
+            <select class="input" id="upSharpen" style="width:100%;margin-top:4px">
+              <option value="0.4">Subtle (0.4)</option>
+              <option value="0.9" selected>Crisp Enhancement (0.9)</option>
+              <option value="1.35">Ultra Sharp (1.35)</option>
+            </select>
+          </label>
+          <label style="font-size:12px">Denoise Level
+            <select class="input" id="upDenoiseMode" style="width:100%;margin-top:4px">
+              <option value="off">Off (Clean Source)</option>
+              <option value="fast">Fast Temporal (hqdn3d)</option>
+              <option value="hq">Studio High Quality (nlmeans)</option>
+            </select>
+          </label>
+        </div>
+        <label style="display:flex;justify-content:space-between;font-size:12px"><span>De-band Dark Color Compression Blocks</span><input type="checkbox" id="upDeband"/></label>
+        <label style="display:flex;justify-content:space-between;font-size:12px"><span>Stabilize Shaky Camera Motion (deshake)</span><input type="checkbox" id="upStabilize"/></label>
         <label style="display:flex;justify-content:space-between;font-size:12px"><span>Smooth 60 FPS Motion Interpolation (Video Only)</span><input type="checkbox" id="upFps60"/></label>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <select class="input" id="upSaveMode" style="padding:5px 9px">
@@ -2601,7 +3140,13 @@ function renderOptimizeBody(){
             <option value="overwrite">Save Over Original</option>
           </select>
           <span style="flex:1"></span>
-          <button class="pill-btn primary" id="upRunBtn" onclick="executeUpscale()">Upscale ${state.opt.items.length} File(s)</button>
+          <button class="pill-btn" onclick="executeUpscale(true)">+ Add to Queue</button>
+          <button class="pill-btn primary" id="upRunBtn" onclick="executeUpscale(false)">Upscale Now (${state.opt.items.length})</button>
+        </div>
+        <div id="optLiveProgress" class="est-box" style="display:none">
+          <div style="display:flex;justify-content:space-between;font-size:12px"><b id="optProgLabel">Working...</b><b id="optProgPct" style="color:var(--primary)">0%</b></div>
+          <div class="job-prog-track"><div class="job-prog-fill" id="optProgFill" style="width:0%"></div></div>
+          <div id="optProgActions" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         </div>
       </div>
     `;
@@ -2627,6 +3172,7 @@ async function refreshOptimizeEstimate(sampleProbe){
   try{
     const est = await sysFetch("/api/media/compress-estimate", {
       method:"POST", headers:{"Content-Type":"application/json"},
+      silent: !sampleProbe, busyLabel: "Sampling exact size...",
       body:JSON.stringify({
         hostId: state.opt.hostId,
         path: first.path,
@@ -2653,69 +3199,83 @@ async function refreshOptimizeEstimate(sampleProbe){
     noteEl.textContent = `Out: ${est.newWidth}×${est.newHeight} • ${est.encoderUsed} (${est.method==="sample_probe"?"1.5s Sample Probe Verified":est.method})`;
   }catch(e){ afterEl.textContent="Estimate unavailable"; }
 }
-async function executeCompress(){
-  const btn=document.getElementById("cmpRunBtn"); btn.disabled=true; btn.textContent="Compressing...";
+async function executeCompress(queueOnly=false){
+  const btn=document.getElementById("cmpRunBtn");
   const saveMode=document.getElementById("cmpSaveMode").value;
-  if(saveMode==="overwrite" && document.getElementById("videoOverlay").classList.contains("open")){
+  if(!queueOnly && saveMode==="overwrite" && document.getElementById("videoOverlay").classList.contains("open")){
     closeVideoOverlay(); await new Promise(r=>setTimeout(r, 120));
   }
-  let done=0, saved=0;
+  const payloads = state.opt.items.map(item=>({
+    hostId:state.opt.hostId,
+    path:item.path,
+    targetHeight:Number(document.getElementById("cmpHeight").value)||0,
+    crf:Number(document.getElementById("cmpCrf").value)||24,
+    codec:document.getElementById("cmpCodec").value,
+    audioKbps:Number(document.getElementById("cmpAudio").value),
+    targetMb:Number(document.getElementById("cmpTargetMb").value)||0,
+    saveMode,
+    recycleOriginal:true,
+  }));
   try{
-    for(const item of state.opt.items){
-      const res=await sysFetch("/api/media/compress",{
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({
-          hostId:state.opt.hostId,
-          path:item.path,
-          targetHeight:Number(document.getElementById("cmpHeight").value)||0,
-          crf:Number(document.getElementById("cmpCrf").value)||24,
-          codec:document.getElementById("cmpCodec").value,
-          audioKbps:Number(document.getElementById("cmpAudio").value),
-          targetMb:Number(document.getElementById("cmpTargetMb").value)||0,
-          saveMode,
-          recycleOriginal:true,
-        })
-      });
-      done++; saved += (res.savedBytes||0);
+    if(!queueOnly && btn){ btn.disabled=true; btn.textContent="Starting..."; }
+    const res = await enqueueJobs("compress", payloads, true);
+    if(queueOnly){
+      showToast(`Added ${payloads.length} file(s) to Info Queue!`);
+      closeDialog("optimizeModal");
+      return;
     }
-    showToast(`Compressed ${done} file(s)! ${saved>0?"Reclaimed "+fmt(saved):""}`);
-    closeDialog("optimizeModal");
-    if(state.currentPath) await loadFolder(state.currentPath);
-    if(state.split.open && state.split.currentPath) await loadSplitFolder(state.split.currentPath);
-  }catch(e){showToast("Compression failed: "+e.message)}
-  finally{ btn.disabled=false; btn.textContent=`Compress ${state.opt.items.length} File(s)`; }
+    const jobs = res.jobs || (res.job ? [res.job] : []);
+    state.activeOptJobIds = jobs.map(j=>j.id);
+    const box=document.getElementById("optLiveProgress");
+    if(box){
+      box.style.display="flex";
+      document.getElementById("optProgActions").innerHTML = state.activeOptJobIds.map(id=>`<button class="mini-btn" style="color:var(--danger)" onclick="cancelJob('${id}')">Cancel</button>`).slice(0,1).join("");
+    }
+  }catch(e){
+    showToast("Compression failed: "+e.message);
+    if(btn){ btn.disabled=false; btn.textContent=`Run Now (${state.opt.items.length})`; }
+  }
 }
-async function executeUpscale(){
-  const btn=document.getElementById("upRunBtn"); btn.disabled=true; btn.textContent="Upscaling...";
+async function executeUpscale(queueOnly=false){
+  const btn=document.getElementById("upRunBtn");
   const saveMode=document.getElementById("upSaveMode").value;
-  if(saveMode==="overwrite" && document.getElementById("videoOverlay").classList.contains("open")){
+  if(!queueOnly && saveMode==="overwrite" && document.getElementById("videoOverlay").classList.contains("open")){
     closeVideoOverlay(); await new Promise(r=>setTimeout(r, 120));
   }
-  let done=0;
+  const payloads = state.opt.items.map(item=>({
+    hostId:state.opt.hostId,
+    path:item.path,
+    preset:document.getElementById("upPreset").value,
+    mode:document.getElementById("upMode").value,
+    sharpen:Number(document.getElementById("upSharpen").value),
+    denoiseMode:document.getElementById("upDenoiseMode").value,
+    denoise:document.getElementById("upDenoiseMode").value!=="off",
+    deband:document.getElementById("upDeband").checked,
+    stabilize:document.getElementById("upStabilize").checked,
+    fps60:document.getElementById("upFps60").checked,
+    crf:19,
+    saveMode,
+    recycleOriginal:true,
+  }));
   try{
-    for(const item of state.opt.items){
-      await sysFetch("/api/media/upscale",{
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({
-          hostId:state.opt.hostId,
-          path:item.path,
-          preset:document.getElementById("upPreset").value,
-          sharpen:Number(document.getElementById("upSharpen").value),
-          denoise:document.getElementById("upDenoise").checked,
-          fps60:document.getElementById("upFps60").checked,
-          crf:19,
-          saveMode,
-          recycleOriginal:true,
-        })
-      });
-      done++;
+    if(!queueOnly && btn){ btn.disabled=true; btn.textContent="Starting..."; }
+    const res = await enqueueJobs("upscale", payloads, true);
+    if(queueOnly){
+      showToast(`Added ${payloads.length} upscale job(s) to Info Queue!`);
+      closeDialog("optimizeModal");
+      return;
     }
-    showToast(`Upscaled & enhanced ${done} file(s)!`);
-    closeDialog("optimizeModal");
-    if(state.currentPath) await loadFolder(state.currentPath);
-    if(state.split.open && state.split.currentPath) await loadSplitFolder(state.split.currentPath);
-  }catch(e){showToast("Upscale failed: "+e.message)}
-  finally{ btn.disabled=false; btn.textContent=`Upscale ${state.opt.items.length} File(s)`; }
+    const jobs = res.jobs || (res.job ? [res.job] : []);
+    state.activeOptJobIds = jobs.map(j=>j.id);
+    const box=document.getElementById("optLiveProgress");
+    if(box){
+      box.style.display="flex";
+      document.getElementById("optProgActions").innerHTML = state.activeOptJobIds.map(id=>`<button class="mini-btn" style="color:var(--danger)" onclick="cancelJob('${id}')">Cancel</button>`).slice(0,1).join("");
+    }
+  }catch(e){
+    showToast("Upscale failed: "+e.message);
+    if(btn){ btn.disabled=false; btn.textContent=`Upscale Now (${state.opt.items.length})`; }
+  }
 }
 
 /* Cross-Device Move & Copy */
@@ -2760,14 +3320,33 @@ async function executeTransfer(){
   }catch(e){showToast("Transfer failed: "+e.message)}
 }
 
-/* Upload + Drag & Drop */
+/* Upload + Drag & Drop (With Real Byte-Level Progress Bar) */
 async function uploadLocalFiles(files){
   if(!files||!files.length||!state.currentPath)return;
-  for(const f of files){
-    showToast("Sending "+f.name+"...");
-    await sysFetch(hostUrl(state.activeHostId,"/api/file/upload?"+new URLSearchParams({dir:state.currentPath,name:f.name,conflict:"rename"}).toString()),{method:"POST",body:f});
-  }
-  showToast("Uploaded "+files.length+" file(s)"); await loadFolder(state.currentPath);
+  const bid = beginBusy("Uploading...", 0);
+  try{
+    for(let i=0;i<files.length;i++){
+      const f = files[i];
+      await new Promise((resolve, reject)=>{
+        const xhr = new XMLHttpRequest();
+        const url = hostUrl(state.activeHostId,"/api/file/upload?"+new URLSearchParams({dir:state.currentPath,name:f.name,conflict:"rename"}).toString());
+        xhr.open("POST", url);
+        if(state.token) xhr.setRequestHeader("X-DeckVault-Token", state.token);
+        xhr.upload.onprogress = (ev)=>{
+          if(ev.lengthComputable && ev.total>0){
+            const pct = ((i + (ev.loaded / ev.total)) / files.length) * 100;
+            setBusyProgress(bid, pct, `Uploading ${f.name}`);
+          }
+        };
+        xhr.onload = ()=> (xhr.status>=200 && xhr.status<300) ? resolve() : reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+        xhr.onerror = ()=> reject(new Error("Upload network error"));
+        xhr.send(f);
+      });
+    }
+    showToast("Uploaded "+files.length+" file(s)");
+    await loadFolder(state.currentPath);
+  }catch(e){showToast("Upload failed: "+e.message)}
+  finally{ endBusy(bid); }
 }
 window.addEventListener("dragover",e=>{if(e.dataTransfer?.types?.includes("Files")){e.preventDefault();document.getElementById("dropMask").classList.add("open")}});
 window.addEventListener("dragleave",e=>{if(!e.relatedTarget)document.getElementById("dropMask").classList.remove("open")});
