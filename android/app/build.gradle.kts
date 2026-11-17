@@ -12,8 +12,8 @@ android {
         applicationId = "com.deckvault.app"
         minSdk = 28
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.4.0"
+        versionCode = 5
+        versionName = "1.4.1"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -29,6 +29,9 @@ android {
                 keyAlias = "deckvault"
                 keyPassword = "deckvault_local_key"
             }
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
         }
     }
 
