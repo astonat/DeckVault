@@ -166,7 +166,13 @@ class AndroidPeerServer(private val context: Context) {
                     } catch (_: Exception) {
                         break
                     }
-                    pool.execute { handleSocket(sock) }
+                    pool.execute {
+                        try {
+                            handleSocket(sock)
+                        } catch (_: Throwable) {
+                            runCatching { sock.close() }
+                        }
+                    }
                 }
             } catch (_: Exception) {
                 running = false
@@ -334,11 +340,11 @@ class AndroidPeerServer(private val context: Context) {
                     else -> sendJson(output, 405, """{"error":"Method not allowed"}""")
                 }
             } catch (e: SecurityException) {
-                sendJson(output, 403, json.encodeToString(mapOf("error" to (e.message ?: "Forbidden"))))
+                runCatching { sendJson(output, 403, json.encodeToString(mapOf("error" to (e.message ?: "Forbidden")))) }
             } catch (e: java.io.FileNotFoundException) {
-                sendJson(output, 404, json.encodeToString(mapOf("error" to (e.message ?: "Not found"))))
-            } catch (e: Exception) {
-                sendJson(output, 400, json.encodeToString(mapOf("error" to (e.message ?: "Bad request"))))
+                runCatching { sendJson(output, 404, json.encodeToString(mapOf("error" to (e.message ?: "Not found")))) }
+            } catch (e: Throwable) {
+                runCatching { sendJson(output, 400, json.encodeToString(mapOf("error" to (e.message ?: "Bad request")))) }
             }
         }
     }
@@ -501,6 +507,14 @@ class AndroidPeerServer(private val context: Context) {
                 val rows = (qs["rows"]?.toIntOrNull() ?: 4).coerceIn(2, 6)
                 val sb = getOrBuildStoryboard(safe, cols, rows)
                 sendFileBytes(output, sb, "image/jpeg", headers, headOnly)
+            }
+            "/api/video/frame" -> {
+                val safe = resolveSafePath(qs["path"].orEmpty())
+                val ms = qs["ms"]?.toLongOrNull() ?: 0L
+                val w = (qs["w"]?.toIntOrNull() ?: 360).coerceIn(120, 1280)
+                val frame = localRepo.getOrBuildVideoFrameFile(safe.canonicalPath, ms, w)
+                    ?: throw java.io.FileNotFoundException("No frame available for ${safe.name}")
+                sendFileBytes(output, frame, "image/jpeg", headers, headOnly)
             }
             "/api/image" -> {
                 val safe = resolveSafePath(qs["path"].orEmpty())
@@ -961,15 +975,27 @@ class AndroidPeerServer(private val context: Context) {
         "mov" -> "video/quicktime"
         "mkv" -> "video/x-matroska"
         "webm" -> "video/webm"
+        "avi" -> "video/x-msvideo"
+        "wmv" -> "video/x-ms-wmv"
+        "flv" -> "video/x-flv"
+        "ts", "mts", "m2ts" -> "video/mp2t"
+        "mpg", "mpeg" -> "video/mpeg"
+        "3gp" -> "video/3gpp"
         "jpg", "jpeg" -> "image/jpeg"
         "png" -> "image/png"
         "webp" -> "image/webp"
         "gif" -> "image/gif"
+        "bmp" -> "image/bmp"
+        "heic", "heif" -> "image/heic"
+        "avif" -> "image/avif"
         "mp3" -> "audio/mpeg"
         "flac" -> "audio/flac"
         "wav" -> "audio/wav"
         "m4a", "aac" -> "audio/mp4"
         "ogg", "opus" -> "audio/ogg"
+        "wma" -> "audio/x-ms-wma"
+        "srt" -> "application/x-subrip"
+        "vtt" -> "text/vtt"
         "pdf" -> "application/pdf"
         "txt", "log", "md", "kt", "py", "js", "csv" -> "text/plain; charset=utf-8"
         "json" -> "application/json; charset=utf-8"

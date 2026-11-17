@@ -3795,7 +3795,7 @@ def make_handler(rt: CompanionRuntime):
                 self.end_headers()
                 return
 
-            cmd = [rt.media.ffmpeg, "-y"]
+            cmd = [rt.media.ffmpeg, "-y", "-err_detect", "ignore_err", "-fflags", "+genpts"]
             if start_s > 0.05:
                 cmd.extend(["-ss", f"{start_s:.3f}"])
             cmd.extend([
@@ -3803,7 +3803,7 @@ def make_handler(rt: CompanionRuntime):
                 "-map", "0:v:0", "-map", "0:a?",
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=60",
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "22", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+                "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
                 "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof",
                 "pipe:1",
             ])

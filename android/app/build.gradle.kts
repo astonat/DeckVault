@@ -12,8 +12,8 @@ android {
         applicationId = "com.deckvault.app"
         minSdk = 28
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.4.1"
+        versionCode = 6
+        versionName = "1.4.2"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -104,6 +104,7 @@ dependencies {
     implementation(libs.androidx.media3.transformer)
     implementation(libs.androidx.media3.effect)
     implementation(libs.androidx.media3.common)
+    implementation(libs.nextlib.media3ext)
 
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)

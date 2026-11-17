@@ -26,6 +26,7 @@ All notable changes to **DeckVault** are documented here.
 - **On-Device Media Studio, Optimizer, Merge & PC Offload Render Queue**:
   - Added `LocalMediaProcessor` (`media3-transformer` + `media3-effect`) for offline hardware Trim/Cut, Visual Crop Box, Rotate (`90°`), Flip H/V, Speed, Color adjustments (`Brightness`/`Contrast`/`Saturation`), Mute, Compressor (target MB / H.264 / HEVC / live size estimate), Upscaler, Extract Audio (`M4A`), and multi-select **Merge Videos**.
   - Added top window progress indicators, persistent bottom **Render Queue** (`+ Add to Queue` / `Run Now`, `Cancel`, and `Play` / `Edit Studio` / `Folder` shortcuts), and seamless **PC Companion Offload** to push local tablet/SD files to paired PC FFmpeg (unlocking `Anime`, `Restore`, `HQ NLMeans Denoise`, `60 FPS`, `Deband`, `Stabilize`, `GIF`, `Loudnorm`) and download the result straight back to tablet/SD storage.
+  - Added **Direct `.avi` / `.ts` / Multi-Codec Native Playback (`v1.4.2`)**: Integrated NextLib FFmpeg decoders (`NextRenderersFactory` with `libavcodec`, `libass`, `libswresample`, `libswscale`) + tuned `DefaultExtractorsFactory` (CBR seeking & TS HDMV/non-IDR flags) so `.avi`, `.ts`, `.mkv`, AC-3/DTS/MP2/WMA/ADPCM/DivX/XviD videos and audio play natively on-device and Android-to-Android with full sound; fixed `AndroidPeerServer` uncaught `BrokenPipe` socket crash and added `/api/video/frame` + AVI/TS/WMV/FLV MIME types + silent-audio-track PC transcode fallback.
 
 ## [v1.3.0] - 2026-11-15
 

@@ -125,8 +125,11 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 import com.deckvault.app.R
 import com.deckvault.app.data.DeckVaultApi
 import com.deckvault.app.data.LocalStorageRepository
@@ -314,20 +317,58 @@ fun VideoPlayerAndTrimmerOverlay(
         }
     }
 
-    // Build ExoPlayer with DefaultDataSource (file://, content://, http://) + decoder fallback
+    // Build ExoPlayer with NextLib FFmpeg software+hardware renderers & tuned TS/AVI extractors
     val player = remember(file.path) {
         val httpFactory = OkHttpDataSource.Factory(api.okHttpClient)
         val dataSourceFactory = DefaultDataSource.Factory(context, httpFactory)
-        val renderersFactory = DefaultRenderersFactory(context)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+        val extractorsFactory = DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
+            .setTsExtractorFlags(
+                DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                    DefaultTsPayloadReaderFactory.FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS
+            )
+            .setTsExtractorTimestampSearchBytes(600 * 1024)
+        val renderersFactory = NextRenderersFactory(context)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setEnableDecoderFallback(true)
         ExoPlayer.Builder(context, renderersFactory)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory))
             .build().apply {
                 setSeekParameters(SeekParameters.CLOSEST_SYNC)
                 repeatMode = Player.REPEAT_MODE_OFF
                 playWhenReady = autoPlay && !initialOpenStudio
             }
+    }
+
+    var liveTranscodeBaseMs by remember(file.path) { mutableLongStateOf(0L) }
+
+    fun triggerPcCompatibilityFallback(reason: String, resumeMs: Long) {
+        val base = playableFallbackUrl ?: return
+        if (usedCompatibilityFallback) return
+        usedCompatibilityFallback = true
+        val cleanBase = base.replace(Regex("([?&])start=[^&]*"), "")
+        val sec = (resumeMs.coerceAtLeast(0L) / 1000.0)
+        liveTranscodeBaseMs = resumeMs.coerceAtLeast(0L)
+        activeUri = if (sec > 0.5) "$cleanBase&start=$sec" else cleanBase
+        gestureHudTitle = "Compatibility Stream"
+        gestureHudSub = reason
+        gestureHudFraction = -1f
+        hudNonce++
+    }
+
+    fun smartSeekTo(targetMs: Long) {
+        val safeTarget = targetMs.coerceAtLeast(0L)
+        if (usedCompatibilityFallback && !playableFallbackUrl.isNullOrBlank() && !player.isCurrentMediaItemSeekable) {
+            val base = playableFallbackUrl.replace(Regex("([?&])start=[^&]*"), "")
+            val sec = safeTarget / 1000.0
+            liveTranscodeBaseMs = safeTarget
+            activeUri = if (sec > 0.2) "$base&start=$sec" else base
+            currentPosMs = safeTarget
+        } else {
+            player.seekTo(safeTarget)
+            currentPosMs = safeTarget
+        }
     }
 
     // LoudnessEnhancer for 100%-200% software volume boost
@@ -367,27 +408,35 @@ fun VideoPlayerAndTrimmerOverlay(
 
             override fun onTracksChanged(tracks: Tracks) {
                 currentTracks = tracks
+                if (!usedCompatibilityFallback && !playableFallbackUrl.isNullOrBlank()) {
+                    val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+                    val hasAnySupportedAudio = audioGroups.any { g ->
+                        (0 until g.length).any { idx -> g.isTrackSupported(idx) }
+                    }
+                    if (audioGroups.isNotEmpty() && !hasAnySupportedAudio) {
+                        triggerPcCompatibilityFallback(
+                            reason = "PC H.264 + AAC Stereo Transcode (Audio Fallback)",
+                            resumeMs = player.currentPosition,
+                        )
+                    }
+                }
             }
 
             override fun onPlayerError(error: PlaybackException) {
                 if (!usedCompatibilityFallback && !playableFallbackUrl.isNullOrBlank()) {
-                    usedCompatibilityFallback = true
-                    val sec = (player.currentPosition.coerceAtLeast(0L) / 1000.0)
-                    val base = playableFallbackUrl
-                    val withStart = if (sec > 0.5 && !base.contains("start=")) "$base&start=$sec" else base
-                    activeUri = withStart
-                    gestureHudTitle = "Compatibility Stream"
-                    gestureHudSub = "Live PC H.264 Transcode"
-                    gestureHudFraction = -1f
-                    hudNonce++
+                    triggerPcCompatibilityFallback(
+                        reason = "Live PC H.264 Transcode",
+                        resumeMs = player.currentPosition,
+                    )
                 } else {
-                    playbackErrorText = error.localizedMessage ?: "Unsupported video format or inaccessible file"
+                    playbackErrorText = error.localizedMessage ?: "Unsupported video or audio format"
                 }
             }
         }
         player.addListener(listener)
         onDispose {
-            onSaveResumePosition(file.path, player.currentPosition)
+            val savedPos = if (usedCompatibilityFallback) (liveTranscodeBaseMs + player.currentPosition) else player.currentPosition
+            onSaveResumePosition(file.path, savedPos)
             runCatching { loudnessEnhancer?.release() }
             loudnessEnhancer = null
             player.removeListener(listener)
@@ -398,7 +447,7 @@ fun VideoPlayerAndTrimmerOverlay(
     // Prepare / update MediaItem whenever activeUri or external subtitle changes
     LaunchedEffect(activeUri, externalSubUri) {
         playbackErrorText = null
-        val resumeMs = player.currentPosition.takeIf { it > 1500L } ?: 0L
+        val resumeMs = if (usedCompatibilityFallback) 0L else (player.currentPosition.takeIf { it > 1500L } ?: 0L)
         val subs = buildList {
             addAll(autoSubtitles)
             externalSubUri?.let { sub ->
@@ -473,7 +522,8 @@ fun VideoPlayerAndTrimmerOverlay(
     LaunchedEffect(player, loopStartMs, loopEndMs) {
         while (true) {
             if (!isSliderDragging) {
-                val pos = player.currentPosition.coerceAtLeast(0L)
+                val rawPos = player.currentPosition.coerceAtLeast(0L)
+                val pos = if (usedCompatibilityFallback) (liveTranscodeBaseMs + rawPos) else rawPos
                 currentPosMs = pos
                 val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET }
                 if (dur != null && dur > 0L) {
@@ -483,7 +533,7 @@ fun VideoPlayerAndTrimmerOverlay(
                 val a = loopStartMs
                 val b = loopEndMs
                 if (a != null && b != null && b > a + 300L && pos >= b && player.isPlaying) {
-                    player.seekTo(a)
+                    smartSeekTo(a)
                 }
             }
             delay(200L)
@@ -608,18 +658,19 @@ fun VideoPlayerAndTrimmerOverlay(
                             if (isLocked || studioCropActive) return@detectTapGestures
                             val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET } ?: durationMs
                             val stepMs = seekStepSeconds.coerceAtLeast(5) * 1000L
+                            val basePos = if (usedCompatibilityFallback) (liveTranscodeBaseMs + player.currentPosition.coerceAtLeast(0L)) else player.currentPosition.coerceAtLeast(0L)
                             when {
                                 offset.x < boxWidthPx * 0.34f -> {
-                                    val tgt = (player.currentPosition - stepMs).coerceAtLeast(0L)
-                                    player.seekTo(tgt)
+                                    val tgt = (basePos - stepMs).coerceAtLeast(0L)
+                                    smartSeekTo(tgt)
                                     gestureHudTitle = "<< -${seekStepSeconds}s"
                                     gestureHudSub = Formatters.formatDuration(tgt)
                                     gestureHudFraction = -1f
                                     hudNonce++
                                 }
                                 offset.x > boxWidthPx * 0.66f -> {
-                                    val tgt = (player.currentPosition + stepMs).let { if (dur > 0) it.coerceAtMost(dur) else it }
-                                    player.seekTo(tgt)
+                                    val tgt = (basePos + stepMs).let { if (dur > 0) it.coerceAtMost(dur) else it }
+                                    smartSeekTo(tgt)
                                     gestureHudTitle = "+${seekStepSeconds}s >>"
                                     gestureHudSub = Formatters.formatDuration(tgt)
                                     gestureHudFraction = -1f
@@ -650,7 +701,7 @@ fun VideoPlayerAndTrimmerOverlay(
                             if (isLocked || studioCropActive) return@awaitPointerEventScope
                         val startPos = down.position
                         var mode = ActiveDragGesture.NONE
-                        var seekStartMs = player.currentPosition.coerceAtLeast(0L)
+                        var seekStartMs = (if (usedCompatibilityFallback) (liveTranscodeBaseMs + player.currentPosition) else player.currentPosition).coerceAtLeast(0L)
                         var seekTargetMs = seekStartMs
                         var lastLiveSeekAt = 0L
                         var startBrightness = brightnessFrac
@@ -661,8 +712,7 @@ fun VideoPlayerAndTrimmerOverlay(
                             val pressed = ev.changes.filter { it.pressed }
                             if (pressed.isEmpty()) {
                                 if (mode == ActiveDragGesture.SEEK) {
-                                    player.seekTo(seekTargetMs)
-                                    currentPosMs = seekTargetMs
+                                    smartSeekTo(seekTargetMs)
                                 }
                                 break
                             }
@@ -699,7 +749,7 @@ fun VideoPlayerAndTrimmerOverlay(
                                         mode = ActiveDragGesture.ZOOM_PAN
                                     } else if (abs(totalDx) > abs(totalDy) * 1.15f) {
                                         mode = ActiveDragGesture.SEEK
-                                        seekStartMs = player.currentPosition.coerceAtLeast(0L)
+                                        seekStartMs = (if (usedCompatibilityFallback) (liveTranscodeBaseMs + player.currentPosition) else player.currentPosition).coerceAtLeast(0L)
                                     } else if (startPos.x < boxWidthPx * 0.45f) {
                                         mode = ActiveDragGesture.BRIGHTNESS
                                         startBrightness = brightnessFrac
@@ -731,7 +781,7 @@ fun VideoPlayerAndTrimmerOverlay(
                                     gestureHudFraction = seekTargetMs.toFloat() / dur.coerceAtLeast(1L).toFloat()
                                     hudNonce++
                                     val now = android.os.SystemClock.uptimeMillis()
-                                    if (now - lastLiveSeekAt > 120L) {
+                                    if (now - lastLiveSeekAt > 120L && (!usedCompatibilityFallback || player.isCurrentMediaItemSeekable)) {
                                         lastLiveSeekAt = now
                                         player.seekTo(seekTargetMs)
                                     }
@@ -1119,8 +1169,7 @@ fun VideoPlayerAndTrimmerOverlay(
                                 interactionNonce++
                             },
                             onValueChangeFinished = {
-                                player.seekTo(sliderDragMs)
-                                currentPosMs = sliderDragMs
+                                smartSeekTo(sliderDragMs)
                                 isSliderDragging = false
                                 interactionNonce++
                             },

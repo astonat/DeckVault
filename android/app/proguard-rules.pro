@@ -9,3 +9,5 @@
 }
 -dontwarn okhttp3.**
 -dontwarn okio.**
+-keep class io.github.anilbeesetti.nextlib.** { *; }
+-dontwarn io.github.anilbeesetti.nextlib.**
