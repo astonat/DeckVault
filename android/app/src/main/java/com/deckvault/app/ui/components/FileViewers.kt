@@ -113,6 +113,23 @@ private suspend fun downloadToPreviewCache(
     file: FileItem,
     onProgress: (Float) -> Unit,
 ): File = withContext(Dispatchers.IO) {
+    if (host.isLocalDevice) {
+        if (!com.deckvault.app.data.LocalStorageRepository.isContentUriPath(file.path)) {
+            val localFile = File(file.path)
+            if (localFile.exists()) {
+                onProgress(1f)
+                return@withContext localFile
+            }
+        }
+        val previewDir = File(context.cacheDir, "preview").apply { mkdirs() }
+        val safeName = file.name.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        val target = File(previewDir, "local_${file.sizeBytes}_$safeName")
+        context.contentResolver.openInputStream(android.net.Uri.parse(file.path))?.use { input ->
+            FileOutputStream(target).use { out -> input.copyTo(out) }
+        }
+        onProgress(1f)
+        return@withContext target
+    }
     val previewDir = File(context.cacheDir, "preview").apply { mkdirs() }
     val safeName = file.name.replace(Regex("[^a-zA-Z0-9._-]"), "_")
     val target = File(previewDir, "${host.hostId.take(8)}_${file.sizeBytes}_$safeName")

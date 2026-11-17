@@ -1,61 +1,87 @@
 package com.deckvault.app.ui.components
 
-import android.view.ViewGroup
+import android.app.Activity
+import android.app.PictureInPictureParams
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
+import android.media.AudioManager
+import android.media.audiofx.LoudnessEnhancer
+import android.net.Uri
+import android.os.Build
+import android.util.Rational
+import android.view.WindowManager
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.AspectRatio
+import androidx.compose.material.icons.rounded.AutoFixHigh
+import androidx.compose.material.icons.rounded.BrightnessHigh
+import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.ContentCut
-import androidx.compose.material.icons.rounded.Forward10
+import androidx.compose.material.icons.rounded.FastForward
+import androidx.compose.material.icons.rounded.FastRewind
+import androidx.compose.material.icons.rounded.Flip
+import androidx.compose.material.icons.rounded.Fullscreen
+import androidx.compose.material.icons.rounded.FullscreenExit
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.LockOpen
+import androidx.compose.material.icons.rounded.Loop
 import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Replay10
-import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.ScreenRotation
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Speed
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.rounded.Subtitles
+import androidx.compose.material.icons.rounded.ZoomOutMap
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -68,540 +94,1203 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import com.deckvault.app.R
 import com.deckvault.app.data.DeckVaultApi
+import com.deckvault.app.data.LocalStorageRepository
+import com.deckvault.app.model.CropBoxSpec
+import com.deckvault.app.model.EditStudioRequest
+import com.deckvault.app.model.ExtractAudioRequest
 import com.deckvault.app.model.FileItem
+import com.deckvault.app.model.GifExportRequest
+import com.deckvault.app.model.JobExecutionTarget
 import com.deckvault.app.model.SavedHost
-import com.deckvault.app.model.TrimResponse
-import com.deckvault.app.model.UserPreferences
-import com.deckvault.app.ui.theme.OledColors
+import com.deckvault.app.ui.theme.LocalDeckSurfaces
 import com.deckvault.app.ui.util.Formatters
 import kotlinx.coroutines.delay
+import java.io.File
+import kotlin.math.abs
 import kotlin.math.roundToInt
-import kotlin.math.roundToLong
+
+enum class PlayerAspectMode(val label: String, val fixedRatio: Float?, val resizeMode: Int) {
+    FIT("Fit", null, AspectRatioFrameLayout.RESIZE_MODE_FIT),
+    FILL("Fill", null, AspectRatioFrameLayout.RESIZE_MODE_ZOOM),
+    STRETCH("Stretch", null, AspectRatioFrameLayout.RESIZE_MODE_FILL),
+    RATIO_16_9("16:9", 16f / 9f, AspectRatioFrameLayout.RESIZE_MODE_FILL),
+    RATIO_9_16("9:16", 9f / 16f, AspectRatioFrameLayout.RESIZE_MODE_FILL),
+    RATIO_4_3("4:3", 4f / 3f, AspectRatioFrameLayout.RESIZE_MODE_FILL),
+}
+
+enum class ScreenRotationMode(val label: String, val orientationConst: Int) {
+    AUTO("Auto", ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED),
+    LANDSCAPE("Land", ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE),
+    PORTRAIT("Port", ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT),
+}
+
+private enum class ActiveDragGesture { NONE, SEEK, BRIGHTNESS, VOLUME, ZOOM_PAN }
 
 @OptIn(UnstableApi::class)
 @Composable
 fun VideoPlayerAndTrimmerOverlay(
-    host: SavedHost,
-    api: DeckVaultApi,
     file: FileItem,
-    prefs: UserPreferences,
-    initialOpenTrimmer: Boolean,
-    hasPrev: Boolean,
-    hasNext: Boolean,
-    isTrimming: Boolean,
-    lastTrimResult: TrimResponse?,
-    trimError: String?,
-    cacheVersion: Long,
-    onPrevVideo: () -> Unit,
-    onNextVideo: () -> Unit,
-    onDismiss: () -> Unit,
-    onExecuteTrim: (startMs: Long, endMs: Long, mode: String, crf: Int, recycleOriginal: Boolean) -> Unit,
+    playlist: List<FileItem>,
+    streamUrl: String,
+    playableFallbackUrl: String?,
+    framePreviewUrls: List<String>,
+    api: DeckVaultApi,
+    isLocalSource: Boolean,
+    pairedPcHosts: List<SavedHost>,
+    defaultOffloadHost: SavedHost?,
+    initialResumePositionMs: Long,
+    initialSpeed: Float,
+    seekStepSeconds: Int,
+    autoPlay: Boolean,
+    initialOpenStudio: Boolean,
+    onSelectVideo: (FileItem) -> Unit,
+    onSaveResumePosition: (path: String, positionMs: Long) -> Unit,
+    onSaveSnapshot: (path: String, ms: Long) -> Unit,
+    onOpenOptimizer: (FileItem) -> Unit,
+    onSubmitStudioEdit: (EditStudioRequest, JobExecutionTarget, SavedHost?, runNow: Boolean) -> Unit,
+    onSubmitExtractAudio: (ExtractAudioRequest, JobExecutionTarget, SavedHost?) -> Unit,
+    onSubmitExportGif: (GifExportRequest, SavedHost?) -> Unit,
+    onClose: () -> Unit,
 ) {
     val context = LocalContext.current
-    val streamUrl = remember(host.baseUrl, file.path, cacheVersion) {
-        api.streamUrl(host, file.path, cacheBust = cacheVersion)
+    val view = LocalView.current
+    val activity = remember(context) { context.findActivity() }
+    val audioManager = remember(context) { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    val surfaces = LocalDeckSurfaces.current
+
+    // Playback & HUD state
+    var showControls by remember(file.path) { mutableStateOf(true) }
+    var interactionNonce by remember { mutableIntStateOf(0) }
+    var isFullscreen by remember { mutableStateOf(false) }
+    var isLocked by remember { mutableStateOf(false) }
+    var showUnlockPill by remember { mutableStateOf(false) }
+
+    var activeUri by remember(streamUrl) { mutableStateOf(streamUrl) }
+    var externalSubUri by remember(file.path) { mutableStateOf<Uri?>(null) }
+    var externalSubLabel by remember(file.path) { mutableStateOf("") }
+    var usedCompatibilityFallback by remember(file.path) { mutableStateOf(false) }
+    var playbackErrorText by remember(file.path) { mutableStateOf<String?>(null) }
+
+    var isPlaying by remember(file.path) { mutableStateOf(autoPlay) }
+    var isBuffering by remember(file.path) { mutableStateOf(true) }
+    var durationMs by remember(file.path) { mutableLongStateOf(file.meta?.durationMs ?: 0L) }
+    var currentPosMs by remember(file.path) { mutableLongStateOf(initialResumePositionMs) }
+    var resumeApplied by remember(file.path) { mutableStateOf(false) }
+
+    // Scrub & gesture HUD feedback
+    var isSliderDragging by remember { mutableStateOf(false) }
+    var sliderDragMs by remember { mutableLongStateOf(0L) }
+    var gestureHudTitle by remember { mutableStateOf<String?>(null) }
+    var gestureHudSub by remember { mutableStateOf<String?>(null) }
+    var gestureHudFraction by remember { mutableFloatStateOf(-1f) }
+    var hudNonce by remember { mutableIntStateOf(0) }
+
+    // Pro controls state
+    var playbackSpeed by remember { mutableFloatStateOf(initialSpeed.coerceIn(0.25f, 4.0f)) }
+    var isBoost2x by remember { mutableStateOf(false) }
+    var showSpeedMenu by remember { mutableStateOf(false) }
+    var aspectMode by remember { mutableStateOf(PlayerAspectMode.FIT) }
+    var rotationMode by remember { mutableStateOf(ScreenRotationMode.AUTO) }
+    var mirrorPreview by remember { mutableStateOf(false) }
+
+    // Zoom & pan
+    var zoomScale by remember(file.path) { mutableFloatStateOf(1f) }
+    var panX by remember(file.path) { mutableFloatStateOf(0f) }
+    var panY by remember(file.path) { mutableFloatStateOf(0f) }
+
+    // Brightness (0f..1f) & Volume (0..200 where >100 = LoudnessEnhancer)
+    var brightnessFrac by remember {
+        mutableFloatStateOf(
+            activity?.window?.attributes?.screenBrightness?.takeIf { it >= 0f } ?: 0.55f
+        )
     }
-    val storyboardUrl = remember(host.baseUrl, file.path, cacheVersion) {
-        api.videoStoryboardUrl(host, file.path, cacheBust = cacheVersion)
+    var volumePct by remember {
+        mutableIntStateOf(
+            run {
+                val maxV = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                val curV = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                ((curV.toFloat() / maxV) * 100f).roundToInt().coerceIn(0, 100)
+            }
+        )
     }
 
-    var playbackSpeed by remember { mutableFloatStateOf(prefs.defaultPlaybackSpeed) }
-    val seekStepMs = (prefs.seekStepSeconds.coerceIn(3, 60)) * 1000L
+    // A-B loop & sleep timer & tracks
+    var loopStartMs by remember(file.path) { mutableStateOf<Long?>(null) }
+    var loopEndMs by remember(file.path) { mutableStateOf<Long?>(null) }
+    var sleepMinutes by remember { mutableStateOf<Int?>(null) }
+    var showTracksDialog by remember { mutableStateOf(false) }
+    var currentTracks by remember { mutableStateOf(Tracks.EMPTY) }
 
-    val player = remember(streamUrl) {
-        val dataSourceFactory = OkHttpDataSource.Factory(api.okHttpClient)
-        ExoPlayer.Builder(context)
+    // Edit Studio state
+    var studioExpanded by remember(file.path) { mutableStateOf(initialOpenStudio) }
+    var studioCropActive by remember(file.path) { mutableStateOf(false) }
+    var studioStartMs by remember(file.path) { mutableLongStateOf(0L) }
+    var studioEndMs by remember(file.path) { mutableLongStateOf(file.meta?.durationMs ?: 0L) }
+    var studioCrop by remember(file.path) { mutableStateOf(CropBoxSpec()) }
+    var studioRotate by remember(file.path) { mutableIntStateOf(0) }
+    var studioFlipH by remember(file.path) { mutableStateOf(false) }
+    var studioFlipV by remember(file.path) { mutableStateOf(false) }
+    var studioSpeed by remember(file.path) { mutableFloatStateOf(1.0f) }
+    var studioMute by remember(file.path) { mutableStateOf(false) }
+    var studioBrightness by remember(file.path) { mutableFloatStateOf(0f) }
+    var studioContrast by remember(file.path) { mutableFloatStateOf(1f) }
+    var studioSaturation by remember(file.path) { mutableFloatStateOf(1f) }
+    var studioSharpen by remember(file.path) { mutableFloatStateOf(0f) }
+    var studioDeband by remember(file.path) { mutableStateOf(false) }
+    var studioStabilize by remember(file.path) { mutableStateOf(false) }
+    var studioNormalize by remember(file.path) { mutableStateOf(false) }
+    var studioSaveMode by remember(file.path) { mutableStateOf("copy") }
+    var studioOffloadHost by remember { mutableStateOf(defaultOffloadHost ?: pairedPcHosts.firstOrNull()) }
+    var studioTarget by remember {
+        mutableStateOf(if (isLocalSource) JobExecutionTarget.ON_DEVICE else JobExecutionTarget.PC_REMOTE)
+    }
+
+    // Subtitle picker launcher
+    val subtitlePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            externalSubUri = uri
+            externalSubLabel = uri.lastPathSegment?.substringAfterLast('/') ?: "External Subtitles"
+        }
+    }
+
+    // Sibling .srt / .vtt auto-discovery for local videos
+    val autoSubtitles = remember(file.path, isLocalSource) {
+        if (!isLocalSource || LocalStorageRepository.isContentUriPath(file.path)) emptyList()
+        else {
+            val f = File(file.path)
+            val parent = f.parentFile ?: return@remember emptyList()
+            val stem = f.nameWithoutExtension
+            listOfNotNull(
+                File(parent, "$stem.srt").takeIf { it.isFile }?.let { sub ->
+                    MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(sub))
+                        .setMimeType(MimeTypes.APPLICATION_SUBRIP)
+                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                        .setLabel("${sub.name} (Auto)")
+                        .build()
+                },
+                File(parent, "$stem.vtt").takeIf { it.isFile }?.let { sub ->
+                    MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(sub))
+                        .setMimeType(MimeTypes.TEXT_VTT)
+                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                        .setLabel("${sub.name} (Auto)")
+                        .build()
+                },
+            )
+        }
+    }
+
+    // Build ExoPlayer with DefaultDataSource (file://, content://, http://) + decoder fallback
+    val player = remember(file.path) {
+        val httpFactory = OkHttpDataSource.Factory(api.okHttpClient)
+        val dataSourceFactory = DefaultDataSource.Factory(context, httpFactory)
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setEnableDecoderFallback(true)
+        ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .build().apply {
-                setMediaItem(MediaItem.fromUri(streamUrl))
-                playbackParameters = PlaybackParameters(playbackSpeed)
-                prepare()
-                playWhenReady = if (initialOpenTrimmer) false else prefs.autoPlayVideos
+                setSeekParameters(SeekParameters.CLOSEST_SYNC)
+                repeatMode = Player.REPEAT_MODE_OFF
+                playWhenReady = autoPlay && !initialOpenStudio
             }
     }
 
+    // LoudnessEnhancer for 100%-200% software volume boost
+    var loudnessEnhancer by remember { mutableStateOf<LoudnessEnhancer?>(null) }
     DisposableEffect(player) {
-        onDispose { player.release() }
-    }
-
-    var isPlaying by remember { mutableStateOf(false) }
-    var durationMs by remember(file.path) { mutableLongStateOf(file.meta?.durationMs ?: 0L) }
-    var positionMs by remember(file.path) { mutableLongStateOf(0L) }
-    var trimModeOpen by remember(file.path) { mutableStateOf(initialOpenTrimmer) }
-    var previewCutoffMs by remember { mutableLongStateOf(-1L) }
-
-    var trimStartMs by remember(file.path, cacheVersion) { mutableLongStateOf(0L) }
-    var trimEndMs by remember(file.path, cacheVersion) { mutableLongStateOf(file.meta?.durationMs ?: 0L) }
-    var trimEncodingMode by remember(file.path) { mutableStateOf(prefs.defaultTrimMode) } // lossless | compress
-    var compressCrf by remember(file.path) { mutableIntStateOf(prefs.defaultCompressCrf.coerceIn(18, 32)) }
-    var recycleOriginal by remember { mutableStateOf(prefs.recycleByDefault) }
-    var showOverwriteConfirm by remember { mutableStateOf(false) }
-
-    var resizeFill by remember { mutableStateOf(false) }
-
-    LaunchedEffect(player) {
         val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                isBuffering = playbackState == Player.STATE_BUFFERING
+                if (playbackState == Player.STATE_READY) {
+                    val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET } ?: durationMs
+                    if (dur > 0) {
+                        durationMs = dur
+                        if (studioEndMs <= 0L) studioEndMs = dur
+                    }
+                    if (!resumeApplied && initialResumePositionMs > 2000L && dur > initialResumePositionMs + 4000L) {
+                        resumeApplied = true
+                        player.seekTo(initialResumePositionMs)
+                        gestureHudTitle = "Resumed"
+                        gestureHudSub = Formatters.formatDuration(initialResumePositionMs)
+                        gestureHudFraction = -1f
+                        hudNonce++
+                    } else {
+                        resumeApplied = true
+                    }
+                    if (loudnessEnhancer == null && player.audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
+                        runCatching { loudnessEnhancer = LoudnessEnhancer(player.audioSessionId) }
+                    }
+                } else if (playbackState == Player.STATE_ENDED && sleepMinutes == -1) {
+                    onClose()
+                }
+            }
+
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+                if (playing) interactionNonce++
             }
 
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (player.duration > 0L) {
-                    durationMs = player.duration
-                    if (trimEndMs <= 0L || trimEndMs > player.duration) {
-                        trimEndMs = player.duration
-                    }
+            override fun onTracksChanged(tracks: Tracks) {
+                currentTracks = tracks
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                if (!usedCompatibilityFallback && !playableFallbackUrl.isNullOrBlank()) {
+                    usedCompatibilityFallback = true
+                    val sec = (player.currentPosition.coerceAtLeast(0L) / 1000.0)
+                    val base = playableFallbackUrl
+                    val withStart = if (sec > 0.5 && !base.contains("start=")) "$base&start=$sec" else base
+                    activeUri = withStart
+                    gestureHudTitle = "Compatibility Stream"
+                    gestureHudSub = "Live PC H.264 Transcode"
+                    gestureHudFraction = -1f
+                    hudNonce++
+                } else {
+                    playbackErrorText = error.localizedMessage ?: "Unsupported video format or inaccessible file"
                 }
             }
         }
         player.addListener(listener)
-        while (true) {
-            val pos = player.currentPosition.coerceAtLeast(0L)
-            positionMs = pos
-            if (player.duration > 0L && durationMs != player.duration) {
-                durationMs = player.duration
-                if (trimEndMs <= 0L || trimEndMs > durationMs) {
-                    trimEndMs = durationMs
-                }
-            }
-            if (previewCutoffMs > 0L && pos >= previewCutoffMs && player.isPlaying) {
-                player.pause()
-                previewCutoffMs = -1L
-            }
-            delay(100L)
+        onDispose {
+            onSaveResumePosition(file.path, player.currentPosition)
+            runCatching { loudnessEnhancer?.release() }
+            loudnessEnhancer = null
+            player.removeListener(listener)
+            player.release()
         }
     }
 
-    Surface(
-        color = OledColors.PitchBlack,
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            // Top Bar
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(OledColors.PanelSurface)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-            ) {
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Close", tint = OledColors.TextPrimary)
-                }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = file.name,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = OledColors.TextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = buildString {
-                            append(Formatters.formatBytes(file.sizeBytes))
-                            if (durationMs > 0L) append("  •  ${Formatters.formatDuration(durationMs)}")
-                            file.meta?.let {
-                                val res = Formatters.formatResolution(it.width, it.height)
-                                if (res.isNotBlank()) append("  •  $res")
-                                if (it.videoCodec.isNotBlank()) append(" (${it.videoCodec.uppercase()})")
-                            }
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.secondary,
-                        maxLines = 1,
-                    )
-                }
-
-                // Speed cycle pill
-                Surface(
-                    onClick = {
-                        playbackSpeed = when (playbackSpeed) {
-                            1.0f -> 1.25f
-                            1.25f -> 1.5f
-                            1.5f -> 2.0f
-                            2.0f -> 0.5f
-                            else -> 1.0f
-                        }
-                        player.playbackParameters = PlaybackParameters(playbackSpeed)
-                    },
-                    shape = RoundedCornerShape(50),
-                    color = OledColors.ElevatedSurface,
-                    border = BorderStroke(1.dp, OledColors.HairlineBorder),
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    ) {
-                        Icon(Icons.Rounded.Speed, contentDescription = null, tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(16.dp))
-                        Text("${playbackSpeed}x", style = MaterialTheme.typography.labelMedium, color = OledColors.TextPrimary)
-                    }
-                }
-
-                // Fit / Zoom toggle
-                IconButton(onClick = { resizeFill = !resizeFill }) {
-                    Icon(
-                        Icons.Rounded.AspectRatio,
-                        contentDescription = "Toggle Fill",
-                        tint = if (resizeFill) MaterialTheme.colorScheme.primary else OledColors.TextSecondary,
-                    )
-                }
-
-                // Cut & Save toggle pill
-                Button(
-                    onClick = { trimModeOpen = !trimModeOpen },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (trimModeOpen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = if (trimModeOpen) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onPrimaryContainer,
-                    ),
-                    shape = RoundedCornerShape(14.dp),
-                ) {
-                    Icon(Icons.Rounded.ContentCut, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (trimModeOpen) "Hide Cutter" else "Cut Video")
-                }
-            }
-
-            // Video Surface
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .background(Color.Black),
-                contentAlignment = Alignment.Center,
-            ) {
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            this.player = player
-                            useController = false
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                            )
-                        }
-                    },
-                    update = { pv ->
-                        if (pv.player !== player) pv.player = player
-                        pv.resizeMode = if (resizeFill) {
-                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                        } else {
-                            AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onTap = {
-                                    if (player.isPlaying) player.pause() else player.play()
-                                },
-                                onDoubleTap = { offset ->
-                                    val half = size.width / 2f
-                                    val delta = if (offset.x < half) -seekStepMs else seekStepMs
-                                    player.seekTo((player.currentPosition + delta).coerceIn(0L, durationMs.coerceAtLeast(0L)))
-                                },
-                            )
-                        },
+    // Prepare / update MediaItem whenever activeUri or external subtitle changes
+    LaunchedEffect(activeUri, externalSubUri) {
+        playbackErrorText = null
+        val resumeMs = player.currentPosition.takeIf { it > 1500L } ?: 0L
+        val subs = buildList {
+            addAll(autoSubtitles)
+            externalSubUri?.let { sub ->
+                val mime = if (sub.toString().endsWith(".vtt", true)) MimeTypes.TEXT_VTT else MimeTypes.APPLICATION_SUBRIP
+                add(
+                    MediaItem.SubtitleConfiguration.Builder(sub)
+                        .setMimeType(mime)
+                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                        .setLabel(externalSubLabel.ifBlank { "External Subtitle" })
+                        .build()
                 )
             }
+        }
+        val mediaItem = MediaItem.Builder()
+            .setUri(activeUri)
+            .setSubtitleConfigurations(subs)
+            .build()
+        player.setMediaItem(mediaItem)
+        if (resumeMs > 0L) player.seekTo(resumeMs)
+        player.prepare()
+    }
 
-            // Bottom Transport Controls + Built-in Cutter Panel
-            Surface(
-                color = OledColors.PanelSurface,
-                border = BorderStroke(1.dp, OledColors.HairlineBorder),
-                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 12.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    // Normal Scrubber + Transport Row
-                    val safeDur = durationMs.coerceAtLeast(1L)
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            Formatters.formatDuration(positionMs),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Slider(
-                            value = (positionMs.toFloat() / safeDur.toFloat()).coerceIn(0f, 1f),
-                            onValueChange = { frac ->
-                                previewCutoffMs = -1L
-                                val target = (frac * safeDur).roundToLong()
-                                positionMs = target
-                                player.seekTo(target)
-                            },
-                            colors = SliderDefaults.colors(
-                                thumbColor = MaterialTheme.colorScheme.primary,
-                                activeTrackColor = MaterialTheme.colorScheme.primary,
-                                inactiveTrackColor = OledColors.HighestSurface,
-                            ),
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text(
-                            Formatters.formatDuration(durationMs),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = OledColors.TextSecondary,
-                        )
-                    }
+    // Apply LoudnessEnhancer whenever volumePct > 100
+    LaunchedEffect(volumePct, loudnessEnhancer) {
+        val le = loudnessEnhancer ?: return@LaunchedEffect
+        runCatching {
+            if (volumePct > 100) {
+                le.enabled = true
+                le.setTargetGain(((volumePct - 100) * 14).coerceIn(0, 1400))
+            } else {
+                le.enabled = false
+            }
+        }
+    }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        IconButton(onClick = onPrevVideo, enabled = hasPrev) {
-                            Icon(
-                                Icons.Rounded.SkipPrevious,
-                                contentDescription = "Previous video",
-                                tint = if (hasPrev) OledColors.TextPrimary else OledColors.TextSecondary.copy(alpha = 0.35f),
-                            )
-                        }
-                        Spacer(Modifier.width(4.dp))
-                        IconButton(onClick = { player.seekTo((player.currentPosition - seekStepMs).coerceAtLeast(0L)) }) {
-                            Icon(Icons.Rounded.Replay10, contentDescription = "-${prefs.seekStepSeconds}s", tint = OledColors.TextPrimary)
-                        }
-                        Spacer(Modifier.width(10.dp))
-                        FilledTonalIconButton(
-                            onClick = {
-                                previewCutoffMs = -1L
-                                if (player.isPlaying) player.pause() else player.play()
-                            },
-                            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary,
-                            ),
-                            modifier = Modifier.size(48.dp),
-                        ) {
-                            Icon(
-                                imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                contentDescription = "Play or Pause",
-                                modifier = Modifier.size(28.dp),
-                            )
-                        }
-                        Spacer(Modifier.width(10.dp))
-                        IconButton(onClick = { player.seekTo((player.currentPosition + seekStepMs).coerceAtMost(safeDur)) }) {
-                            Icon(Icons.Rounded.Forward10, contentDescription = "+${prefs.seekStepSeconds}s", tint = OledColors.TextPrimary)
-                        }
-                        Spacer(Modifier.width(4.dp))
-                        IconButton(onClick = onNextVideo, enabled = hasNext) {
-                            Icon(
-                                Icons.Rounded.SkipNext,
-                                contentDescription = "Next video",
-                                tint = if (hasNext) OledColors.TextPrimary else OledColors.TextSecondary.copy(alpha = 0.35f),
-                            )
-                        }
-                    }
+    // Apply playback speed
+    LaunchedEffect(playbackSpeed, isBoost2x) {
+        player.setPlaybackSpeed(if (isBoost2x) 2.0f else playbackSpeed)
+    }
 
-                    // Visual Trimmer & Save-Over-Original Studio
-                    AnimatedVisibility(visible = trimModeOpen) {
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-                        ) {
-                            // Visual Filmstrip Range Trimmer
-                            VisualFilmstripRangeTrimmer(
-                                storyboardUrl = storyboardUrl,
-                                durationMs = safeDur,
-                                startMs = trimStartMs,
-                                endMs = trimEndMs.coerceIn(0L, safeDur),
-                                playheadMs = positionMs,
-                                onRangeChange = { newStart, newEnd, seekTarget ->
-                                    trimStartMs = newStart
-                                    trimEndMs = newEnd
-                                    player.pause()
-                                    player.seekTo(seekTarget)
-                                },
-                            )
+    // Keep screen on + immersive system bars + restore orientation/brightness on exit
+    DisposableEffect(activity) {
+        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            activity?.window?.let { win ->
+                win.attributes = win.attributes.apply {
+                    screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                }
+                WindowCompat.getInsetsController(win, view).show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
 
-                            // Precision In / Out Controls + Preview Selection
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                OutlinedButton(
-                                    onClick = {
-                                        trimStartMs = positionMs.coerceAtMost((trimEndMs - 300L).coerceAtLeast(0L))
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                ) {
-                                    Text("Set In (${Formatters.formatDurationPrecise(trimStartMs)})")
+    LaunchedEffect(rotationMode) {
+        activity?.requestedOrientation = rotationMode.orientationConst
+    }
+
+    LaunchedEffect(isFullscreen, showControls) {
+        val win = activity?.window ?: return@LaunchedEffect
+        val controller = WindowCompat.getInsetsController(win, view)
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (isFullscreen || !showControls) {
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    // Poll position + A-B loop check
+    LaunchedEffect(player, loopStartMs, loopEndMs) {
+        while (true) {
+            if (!isSliderDragging) {
+                val pos = player.currentPosition.coerceAtLeast(0L)
+                currentPosMs = pos
+                val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET }
+                if (dur != null && dur > 0L) {
+                    durationMs = dur
+                    if (studioEndMs <= 0L) studioEndMs = dur
+                }
+                val a = loopStartMs
+                val b = loopEndMs
+                if (a != null && b != null && b > a + 300L && pos >= b && player.isPlaying) {
+                    player.seekTo(a)
+                }
+            }
+            delay(200L)
+        }
+    }
+
+    // Auto-hide controls after 2.8 seconds when playing!
+    LaunchedEffect(showControls, interactionNonce, isPlaying, studioExpanded, showTracksDialog, showSpeedMenu, isSliderDragging) {
+        if (showControls && isPlaying && !studioExpanded && !showTracksDialog && !showSpeedMenu && !isSliderDragging) {
+            delay(2800L)
+            showControls = false
+        }
+    }
+
+    // Auto-hide gesture HUD & lock pill
+    LaunchedEffect(hudNonce) {
+        if (gestureHudTitle != null) {
+            delay(1100L)
+            gestureHudTitle = null
+            gestureHudSub = null
+            gestureHudFraction = -1f
+        }
+    }
+    LaunchedEffect(showUnlockPill) {
+        if (showUnlockPill) {
+            delay(2200L)
+            showUnlockPill = false
+        }
+    }
+
+    // Sleep timer countdown
+    LaunchedEffect(sleepMinutes) {
+        val mins = sleepMinutes
+        if (mins != null && mins > 0) {
+            delay(60_000L)
+            sleepMinutes = (mins - 1).takeIf { it > 0 }
+            if (mins - 1 <= 0) {
+                player.pause()
+                onClose()
+            }
+        }
+    }
+
+    BackHandler {
+        if (studioExpanded) {
+            studioExpanded = false
+            studioCropActive = false
+        } else {
+            onClose()
+        }
+    }
+
+    var boxWidthPx by remember { mutableFloatStateOf(1f) }
+    var boxHeightPx by remember { mutableFloatStateOf(1f) }
+
+    val colorRenderEffect = remember(studioBrightness, studioContrast, studioSaturation) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            (abs(studioBrightness) < 0.02f && abs(studioContrast - 1f) < 0.02f && abs(studioSaturation - 1f) < 0.02f)
+        ) {
+            null
+        } else {
+            val sat = android.graphics.ColorMatrix().apply { setSaturation(studioSaturation) }
+            val c = studioContrast
+            val b = studioBrightness * 255f
+            val t = (1f - c) * 128f + b
+            val contrastBrightness = android.graphics.ColorMatrix(
+                floatArrayOf(
+                    c, 0f, 0f, 0f, t,
+                    0f, c, 0f, 0f, t,
+                    0f, 0f, c, 0f, t,
+                    0f, 0f, 0f, 1f, 0f,
+                )
+            )
+            sat.postConcat(contrastBrightness)
+            android.graphics.RenderEffect.createColorFilterEffect(
+                android.graphics.ColorMatrixColorFilter(sat)
+            ).asComposeRenderEffect()
+        }
+    }
+
+    val currentIdx = playlist.indexOfFirst { it.path == file.path }
+    val prevItem = if (currentIdx > 0) playlist[currentIdx - 1] else null
+    val nextItem = if (currentIdx >= 0 && currentIdx + 1 < playlist.size) playlist[currentIdx + 1] else null
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black),
+    ) {
+        // FULL-BLEED VIDEO CANVAS WITH GESTURES
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .fillMaxSize()
+                .clipToBounds()
+                .onSizeChanged {
+                    boxWidthPx = it.width.toFloat().coerceAtLeast(1f)
+                    boxHeightPx = it.height.toFloat().coerceAtLeast(1f)
+                }
+                .pointerInput(isLocked, studioCropActive) {
+                    detectTapGestures(
+                        onPress = {
+                            tryAwaitRelease()
+                            if (isBoost2x) {
+                                isBoost2x = false
+                            }
+                        },
+                        onLongPress = {
+                            if (!isLocked && !studioCropActive) {
+                                isBoost2x = true
+                            }
+                        },
+                        onTap = {
+                            if (isLocked) {
+                                showUnlockPill = true
+                            } else {
+                                showControls = !showControls
+                                if (showControls) interactionNonce++
+                            }
+                        },
+                        onDoubleTap = { offset ->
+                            if (isLocked || studioCropActive) return@detectTapGestures
+                            val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET } ?: durationMs
+                            val stepMs = seekStepSeconds.coerceAtLeast(5) * 1000L
+                            when {
+                                offset.x < boxWidthPx * 0.34f -> {
+                                    val tgt = (player.currentPosition - stepMs).coerceAtLeast(0L)
+                                    player.seekTo(tgt)
+                                    gestureHudTitle = "<< -${seekStepSeconds}s"
+                                    gestureHudSub = Formatters.formatDuration(tgt)
+                                    gestureHudFraction = -1f
+                                    hudNonce++
                                 }
-                                OutlinedButton(
-                                    onClick = {
-                                        trimEndMs = positionMs.coerceAtLeast((trimStartMs + 300L).coerceAtMost(safeDur))
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                ) {
-                                    Text("Set Out (${Formatters.formatDurationPrecise(trimEndMs)})")
+                                offset.x > boxWidthPx * 0.66f -> {
+                                    val tgt = (player.currentPosition + stepMs).let { if (dur > 0) it.coerceAtMost(dur) else it }
+                                    player.seekTo(tgt)
+                                    gestureHudTitle = "+${seekStepSeconds}s >>"
+                                    gestureHudSub = Formatters.formatDuration(tgt)
+                                    gestureHudFraction = -1f
+                                    hudNonce++
                                 }
-                                FilledTonalButton(
-                                    onClick = {
-                                        player.seekTo(trimStartMs)
-                                        previewCutoffMs = trimEndMs
+                                else -> {
+                                    if (player.isPlaying) {
+                                        player.pause()
+                                        gestureHudTitle = "Paused"
+                                    } else {
                                         player.play()
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                ) {
-                                    Text("Preview Cut")
+                                        gestureHudTitle = "Playing"
+                                    }
+                                    gestureHudSub = null
+                                    gestureHudFraction = -1f
+                                    hudNonce++
                                 }
                             }
+                        },
+                    )
+                }
+                .pointerInput(isLocked, studioCropActive, durationMs, boxWidthPx, boxHeightPx) {
+                    val slop = viewConfiguration.touchSlop
+                    val maxSysVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                    while (true) {
+                        awaitPointerEventScope {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            if (isLocked || studioCropActive) return@awaitPointerEventScope
+                        val startPos = down.position
+                        var mode = ActiveDragGesture.NONE
+                        var seekStartMs = player.currentPosition.coerceAtLeast(0L)
+                        var seekTargetMs = seekStartMs
+                        var lastLiveSeekAt = 0L
+                        var startBrightness = brightnessFrac
+                        var startVolumePct = volumePct.toFloat()
 
-                            // Sub-second In/Out Nudge Controls
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                listOf(
-                                    "In -0.5s" to { trimStartMs = (trimStartMs - 500L).coerceAtLeast(0L); player.seekTo(trimStartMs) },
-                                    "In +0.5s" to { trimStartMs = (trimStartMs + 500L).coerceAtMost((trimEndMs - 300L).coerceAtLeast(0L)); player.seekTo(trimStartMs) },
-                                    "Out -0.5s" to { trimEndMs = (trimEndMs - 500L).coerceAtLeast((trimStartMs + 300L).coerceAtMost(safeDur)); player.seekTo(trimEndMs) },
-                                    "Out +0.5s" to { trimEndMs = (trimEndMs + 500L).coerceAtMost(safeDur); player.seekTo(trimEndMs) },
-                                ).forEach { (label, action) ->
-                                    OutlinedButton(
-                                        onClick = {
-                                            player.pause()
-                                            action()
-                                        },
-                                        shape = RoundedCornerShape(50),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Text(label, style = MaterialTheme.typography.labelSmall)
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val pressed = ev.changes.filter { it.pressed }
+                            if (pressed.isEmpty()) {
+                                if (mode == ActiveDragGesture.SEEK) {
+                                    player.seekTo(seekTargetMs)
+                                    currentPosMs = seekTargetMs
+                                }
+                                break
+                            }
+
+                            if (pressed.size >= 2) {
+                                mode = ActiveDragGesture.ZOOM_PAN
+                                val zChange = ev.calculateZoom()
+                                val pChange = ev.calculatePan()
+                                zoomScale = (zoomScale * zChange).coerceIn(1f, 5f)
+                                if (zoomScale > 1.02f) {
+                                    val maxX = boxWidthPx * (zoomScale - 1f) * 0.5f
+                                    val maxY = boxHeightPx * (zoomScale - 1f) * 0.5f
+                                    panX = (panX + pChange.x).coerceIn(-maxX, maxX)
+                                    panY = (panY + pChange.y).coerceIn(-maxY, maxY)
+                                } else {
+                                    panX = 0f; panY = 0f
+                                }
+                                ev.changes.forEach { if (it.positionChanged()) it.consume() }
+                                gestureHudTitle = "Zoom ${String.format("%.1fx", zoomScale)}"
+                                gestureHudSub = null
+                                gestureHudFraction = -1f
+                                hudNonce++
+                                continue
+                            }
+
+                            val ch = pressed.first()
+                            val totalDx = ch.position.x - startPos.x
+                            val totalDy = ch.position.y - startPos.y
+
+                            if (mode == ActiveDragGesture.NONE) {
+                                val distSq = totalDx * totalDx + totalDy * totalDy
+                                if (distSq > slop * slop * 2.5f) {
+                                    if (zoomScale > 1.05f) {
+                                        mode = ActiveDragGesture.ZOOM_PAN
+                                    } else if (abs(totalDx) > abs(totalDy) * 1.15f) {
+                                        mode = ActiveDragGesture.SEEK
+                                        seekStartMs = player.currentPosition.coerceAtLeast(0L)
+                                    } else if (startPos.x < boxWidthPx * 0.45f) {
+                                        mode = ActiveDragGesture.BRIGHTNESS
+                                        startBrightness = brightnessFrac
+                                    } else {
+                                        mode = ActiveDragGesture.VOLUME
+                                        startVolumePct = volumePct.toFloat()
                                     }
                                 }
                             }
 
-                            // Estimated Savings Banner
-                            val cutDurationMs = (trimEndMs - trimStartMs).coerceAtLeast(0L)
-                            val ratio = if (safeDur > 0) (cutDurationMs.toDouble() / safeDur.toDouble()).coerceIn(0.0, 1.0) else 1.0
-                            val estNewBytes = (file.sizeBytes * ratio).roundToLong()
-                            val estSavedBytes = (file.sizeBytes - estNewBytes).coerceAtLeast(0L)
-                            val pctSaved = ((1.0 - ratio) * 100).roundToInt().coerceIn(0, 99)
+                            when (mode) {
+                                ActiveDragGesture.ZOOM_PAN -> {
+                                    val d = ch.position - ch.previousPosition
+                                    val maxX = boxWidthPx * (zoomScale - 1f) * 0.5f
+                                    val maxY = boxHeightPx * (zoomScale - 1f) * 0.5f
+                                    panX = (panX + d.x).coerceIn(-maxX, maxX)
+                                    panY = (panY + d.y).coerceIn(-maxY, maxY)
+                                    ch.consume()
+                                }
+                                ActiveDragGesture.SEEK -> {
+                                    val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET } ?: durationMs.coerceAtLeast(1000L)
+                                    val spanMs = dur.coerceIn(20_000L, 120_000L)
+                                    val deltaMs = ((totalDx / boxWidthPx) * spanMs).toLong()
+                                    seekTargetMs = (seekStartMs + deltaMs).coerceIn(0L, dur)
+                                    val diffSec = (seekTargetMs - seekStartMs) / 1000L
+                                    val sign = if (diffSec >= 0) "+" else ""
+                                    gestureHudTitle = "${Formatters.formatDuration(seekTargetMs)} / ${Formatters.formatDuration(dur)}"
+                                    gestureHudSub = "$sign${diffSec}s swipe seek"
+                                    gestureHudFraction = seekTargetMs.toFloat() / dur.coerceAtLeast(1L).toFloat()
+                                    hudNonce++
+                                    val now = android.os.SystemClock.uptimeMillis()
+                                    if (now - lastLiveSeekAt > 120L) {
+                                        lastLiveSeekAt = now
+                                        player.seekTo(seekTargetMs)
+                                    }
+                                    ch.consume()
+                                }
+                                ActiveDragGesture.BRIGHTNESS -> {
+                                    val delta = (-totalDy / (boxHeightPx * 0.65f))
+                                    val nextB = (startBrightness + delta).coerceIn(0.02f, 1.0f)
+                                    brightnessFrac = nextB
+                                    activity?.window?.let { win ->
+                                        win.attributes = win.attributes.apply { screenBrightness = nextB }
+                                    }
+                                    val pct = (nextB * 100f).roundToInt()
+                                    gestureHudTitle = "Brightness $pct%"
+                                    gestureHudSub = null
+                                    gestureHudFraction = nextB
+                                    hudNonce++
+                                    ch.consume()
+                                }
+                                ActiveDragGesture.VOLUME -> {
+                                    val deltaPct = (-totalDy / (boxHeightPx * 0.65f)) * 180f
+                                    val nextPct = (startVolumePct + deltaPct).roundToInt().coerceIn(0, 200)
+                                    volumePct = nextPct
+                                    val sysLevel = if (nextPct >= 100) maxSysVol else ((nextPct / 100f) * maxSysVol).roundToInt().coerceIn(0, maxSysVol)
+                                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, sysLevel, 0)
+                                    gestureHudTitle = if (nextPct > 100) "Boost Volume $nextPct%" else "Volume $nextPct%"
+                                    gestureHudSub = if (nextPct > 100) "Software Loudness Boost" else null
+                                    gestureHudFraction = (nextPct / 200f).coerceIn(0f, 1f)
+                                    hudNonce++
+                                    ch.consume()
+                                }
+                                ActiveDragGesture.NONE -> Unit
+                            }
+                        }
+                        }
+                    }
+                },
+        ) {
+            val videoBoxMod = Modifier
+                .let { base ->
+                    val ratio = aspectMode.fixedRatio
+                    if (ratio != null) base.aspectRatio(ratio) else base.fillMaxSize()
+                }
+                .graphicsLayer {
+                    scaleX = zoomScale * (if (mirrorPreview || studioFlipH) -1f else 1f)
+                    scaleY = zoomScale * (if (studioFlipV) -1f else 1f)
+                    translationX = panX
+                    translationY = panY
+                    rotationZ = studioRotate.toFloat()
+                    if (colorRenderEffect != null) {
+                        renderEffect = colorRenderEffect
+                    }
+                }
 
-                            Surface(
-                                shape = RoundedCornerShape(16.dp),
-                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.4f)),
-                                modifier = Modifier.fillMaxWidth(),
+            Box(modifier = videoBoxMod) {
+                AndroidView(
+                    factory = { ctx ->
+                        (android.view.LayoutInflater.from(ctx)
+                            .inflate(R.layout.deckvault_texture_player_view, null) as PlayerView).apply {
+                            this.player = player
+                            useController = false
+                            resizeMode = aspectMode.resizeMode
+                            keepScreenOn = true
+                        }
+                    },
+                    update = { pv ->
+                        if (pv.player !== player) pv.player = player
+                        pv.resizeMode = aspectMode.resizeMode
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+
+                if (studioExpanded && studioCropActive) {
+                    VisualCropOverlay(
+                        crop = studioCrop,
+                        onCropChange = { studioCrop = it },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+
+            if (isBuffering && playbackErrorText == null) {
+                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+            }
+
+            playbackErrorText?.let { err ->
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = surfaces.panelSurface.copy(alpha = 0.94f),
+                    border = BorderStroke(1.dp, surfaces.dangerMuted.copy(alpha = 0.7f)),
+                    modifier = Modifier.padding(24.dp),
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(20.dp),
+                    ) {
+                        Text("Playback Issue", style = MaterialTheme.typography.titleMedium, color = surfaces.dangerMuted)
+                        Text(err, style = MaterialTheme.typography.bodySmall, color = surfaces.textSecondary)
+                    }
+                }
+            }
+
+            // 2x Hold Boost Pill at Top Center
+            AnimatedVisibility(
+                visible = isBoost2x,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 18.dp),
+            ) {
+                Surface(shape = CircleShape, color = Color.Black.copy(alpha = 0.78f), border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)) {
+                        Icon(Icons.Rounded.FastForward, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                        Text("2.0x Speed Boost", color = Color.White, style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold))
+                    }
+                }
+            }
+
+            // Center Gesture HUD (Seek / Brightness / Volume Boost / Double Tap)
+            AnimatedVisibility(
+                visible = gestureHudTitle != null,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.align(Alignment.Center),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = Color.Black.copy(alpha = 0.80f),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.16f)),
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(horizontal = 22.dp, vertical = 14.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            when {
+                                gestureHudTitle?.contains("Brightness") == true -> Icon(Icons.Rounded.BrightnessHigh, null, tint = Color.White)
+                                gestureHudTitle?.contains("Volume") == true -> Icon(Icons.AutoMirrored.Rounded.VolumeUp, null, tint = MaterialTheme.colorScheme.primary)
+                            }
+                            Text(
+                                text = gestureHudTitle.orEmpty(),
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White,
+                            )
+                        }
+                        gestureHudSub?.let {
+                            Text(it, style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.75f))
+                        }
+                        if (gestureHudFraction >= 0f) {
+                            LinearProgressIndicator(
+                                progress = { gestureHudFraction.coerceIn(0f, 1f) },
+                                modifier = Modifier.width(150.dp).height(4.dp),
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Unlock Pill when locked
+            AnimatedVisibility(
+                visible = isLocked && showUnlockPill,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 28.dp),
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.84f),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
+                    modifier = Modifier.clickable {
+                        isLocked = false
+                        showControls = true
+                        interactionNonce++
+                    },
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)) {
+                        Icon(Icons.Rounded.LockOpen, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                        Text("Screen Locked — Tap to Unlock", color = Color.White, style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+        }
+
+        // AUTO-HIDING FLOATING TOP BAR
+        AnimatedVisibility(
+            visible = showControls && !isLocked,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.82f), Color.Transparent)))
+                    .statusBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Close", tint = Color.White)
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = file.name,
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        val infoLine = buildString {
+                            append(Formatters.formatBytes(file.sizeBytes))
+                            file.meta?.let { m ->
+                                val res = Formatters.formatResolution(m.width, m.height)
+                                if (res.isNotBlank()) append(" • $res")
+                            }
+                            if (usedCompatibilityFallback) append(" • Live Transcode")
+                            if (loopStartMs != null && loopEndMs != null) {
+                                append(" • Loop ${Formatters.formatDuration(loopStartMs!!)}–${Formatters.formatDuration(loopEndMs!!)}")
+                            }
+                        }
+                        Text(infoLine, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.72f), maxLines = 1)
+                    }
+
+                    if (prevItem != null) {
+                        IconButton(onClick = { interactionNonce++; onSelectVideo(prevItem) }) {
+                            Icon(Icons.Rounded.SkipPrevious, contentDescription = "Previous Video", tint = Color.White)
+                        }
+                    }
+                    if (nextItem != null) {
+                        IconButton(onClick = { interactionNonce++; onSelectVideo(nextItem) }) {
+                            Icon(Icons.Rounded.SkipNext, contentDescription = "Next Video", tint = Color.White)
+                        }
+                    }
+
+                    AssistChip(
+                        onClick = { interactionNonce++; onOpenOptimizer(file) },
+                        leadingIcon = { Icon(Icons.Rounded.AutoFixHigh, null, Modifier.size(16.dp)) },
+                        label = { Text("Optimize") },
+                    )
+                    AssistChip(
+                        onClick = {
+                            interactionNonce++
+                            studioExpanded = !studioExpanded
+                            if (studioExpanded) player.pause() else studioCropActive = false
+                        },
+                        leadingIcon = { Icon(Icons.Rounded.ContentCut, null, Modifier.size(16.dp)) },
+                        label = { Text(if (studioExpanded) "Hide Studio" else "Studio") },
+                    )
+
+                    if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        IconButton(
+                            onClick = {
+                                val params = PictureInPictureParams.Builder()
+                                    .setAspectRatio(Rational(16, 9))
+                                    .build()
+                                activity.enterPictureInPictureMode(params)
+                            },
+                        ) {
+                            Icon(Icons.Rounded.PictureInPictureAlt, contentDescription = "Picture in Picture", tint = Color.White)
+                        }
+                    }
+
+                    IconButton(
+                        onClick = {
+                            interactionNonce++
+                            val vals = ScreenRotationMode.entries
+                            rotationMode = vals[(rotationMode.ordinal + 1) % vals.size]
+                            gestureHudTitle = "Rotation: ${rotationMode.label}"
+                            gestureHudSub = null
+                            gestureHudFraction = -1f
+                            hudNonce++
+                        },
+                    ) {
+                        Icon(Icons.Rounded.ScreenRotation, contentDescription = "Rotate Screen", tint = Color.White)
+                    }
+                }
+            }
+        }
+
+        // AUTO-HIDING FLOATING BOTTOM SEEKBAR & STUDIO DRAWER (COMPLETELY DISAPPEARS WHEN UNTOUCHED!)
+        AnimatedVisibility(
+            visible = (showControls || studioExpanded) && !isLocked,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f), Color.Black.copy(alpha = 0.96f))))
+                    .navigationBarsPadding(),
+            ) {
+                if (studioExpanded) {
+                    StudioEditorPanel(
+                        filePath = file.path,
+                        frameUrls = framePreviewUrls,
+                        durationMs = durationMs,
+                        currentPosMs = currentPosMs,
+                        startMs = studioStartMs,
+                        endMs = studioEndMs.coerceAtLeast(1L),
+                        crop = studioCrop,
+                        cropActive = studioCropActive,
+                        rotate = studioRotate,
+                        flipH = studioFlipH,
+                        flipV = studioFlipV,
+                        speed = studioSpeed,
+                        muteAudio = studioMute,
+                        brightness = studioBrightness,
+                        contrast = studioContrast,
+                        saturation = studioSaturation,
+                        sharpen = studioSharpen,
+                        deband = studioDeband,
+                        stabilize = studioStabilize,
+                        normalizeAudio = studioNormalize,
+                        saveMode = studioSaveMode,
+                        isLocalSource = isLocalSource,
+                        pairedPcHosts = pairedPcHosts,
+                        selectedOffloadHost = studioOffloadHost,
+                        executionTarget = studioTarget,
+                        onSetStartEnd = { s, e ->
+                            studioStartMs = s
+                            studioEndMs = e
+                            player.seekTo(s)
+                            currentPosMs = s
+                        },
+                        onToggleCropActive = { studioCropActive = it },
+                        onCropChange = { studioCrop = it },
+                        onRotateChange = { studioRotate = it },
+                        onFlipHChange = { studioFlipH = it },
+                        onFlipVChange = { studioFlipV = it },
+                        onSpeedChange = { studioSpeed = it },
+                        onMuteChange = { studioMute = it },
+                        onColorChange = { b, c, s ->
+                            studioBrightness = b
+                            studioContrast = c
+                            studioSaturation = s
+                        },
+                        onProFlagsChange = { sh, db, st, nm ->
+                            studioSharpen = sh
+                            studioDeband = db
+                            studioStabilize = st
+                            studioNormalize = nm
+                            if (isLocalSource && (sh > 0.2f || db || st || nm) && studioOffloadHost != null) {
+                                studioTarget = JobExecutionTarget.PC_OFFLOAD
+                            }
+                        },
+                        onSaveModeChange = { studioSaveMode = it },
+                        onExecutionTargetChange = { tgt, host ->
+                            studioTarget = tgt
+                            if (host != null) studioOffloadHost = host
+                        },
+                        onExtractAudio = { req, tgt, host -> onSubmitExtractAudio(req, tgt, host) },
+                        onExportGif = { req, host -> onSubmitExportGif(req, host) },
+                        onSubmitEdit = { req, tgt, host, runNow ->
+                            onSubmitStudioEdit(req, tgt, host, runNow)
+                            if (runNow) studioExpanded = false
+                        },
+                    )
+                }
+
+                // Floating Seekbar + Transport Bar
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                ) {
+                    val safeDur = durationMs.coerceAtLeast(1000L).toFloat()
+                    val displayPos = if (isSliderDragging) sliderDragMs else currentPosMs
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(Formatters.formatDuration(displayPos), style = MaterialTheme.typography.labelMedium, color = Color.White)
+                        Slider(
+                            value = displayPos.toFloat().coerceIn(0f, safeDur),
+                            onValueChange = { nextVal ->
+                                isSliderDragging = true
+                                sliderDragMs = nextVal.roundToInt().toLong()
+                                interactionNonce++
+                            },
+                            onValueChangeFinished = {
+                                player.seekTo(sliderDragMs)
+                                currentPosMs = sliderDragMs
+                                isSliderDragging = false
+                                interactionNonce++
+                            },
+                            valueRange = 0f..safeDur,
+                            colors = SliderDefaults.colors(
+                                thumbColor = MaterialTheme.colorScheme.primary,
+                                activeTrackColor = MaterialTheme.colorScheme.primary,
+                                inactiveTrackColor = Color.White.copy(alpha = 0.26f),
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(Formatters.formatDuration(durationMs), style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.78f))
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        // Left: Transport buttons
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            IconButton(
+                                onClick = {
+                                    interactionNonce++
+                                    player.pause()
+                                    val t = (player.currentPosition - 33L).coerceAtLeast(0L)
+                                    player.seekTo(t)
+                                    currentPosMs = t
+                                },
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                                ) {
-                                    Text(
-                                        text = "Keep ${Formatters.formatDurationPrecise(cutDurationMs)}  •  " +
-                                            "${Formatters.formatBytes(file.sizeBytes)} → ~${Formatters.formatBytes(estNewBytes)}",
-                                        style = MaterialTheme.typography.labelLarge,
-                                        color = OledColors.TextPrimary,
-                                    )
-                                    Text(
-                                        text = "Saves ~${Formatters.formatBytes(estSavedBytes)} ($pctSaved%)",
-                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                        color = OledColors.SuccessGreen,
-                                    )
-                                }
+                                Text("-1f", color = Color.White, style = MaterialTheme.typography.labelMedium)
                             }
-
-                            // Mode Selection + Recycle Toggle + Save Button
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                modifier = Modifier.fillMaxWidth(),
+                            IconButton(
+                                onClick = {
+                                    interactionNonce++
+                                    val t = (player.currentPosition - seekStepSeconds * 1000L).coerceAtLeast(0L)
+                                    player.seekTo(t)
+                                },
                             ) {
-                                FilterChip(
-                                    selected = trimEncodingMode == "lossless",
-                                    onClick = { trimEncodingMode = "lossless" },
-                                    label = { Text("Lossless Keyframe (Instant)") },
-                                )
-                                FilterChip(
-                                    selected = trimEncodingMode == "compress",
-                                    onClick = { trimEncodingMode = "compress" },
-                                    label = { Text("Re-encode & Compress") },
-                                )
-                                Spacer(Modifier.weight(1f))
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Text("Recycle original", style = MaterialTheme.typography.labelMedium, color = OledColors.TextSecondary)
-                                    Switch(checked = recycleOriginal, onCheckedChange = { recycleOriginal = it })
-                                }
+                                Icon(Icons.Rounded.FastRewind, contentDescription = "Rewind", tint = Color.White)
                             }
-
-                            if (trimEncodingMode == "compress") {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text("CRF Quality: $compressCrf (higher = smaller)", style = MaterialTheme.typography.labelMedium, color = OledColors.TextSecondary)
-                                    Slider(
-                                        value = compressCrf.toFloat(),
-                                        onValueChange = { compressCrf = it.roundToInt() },
-                                        valueRange = 18f..32f,
-                                        steps = 13,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                }
-                            }
-
-                            if (trimError != null) {
-                                Text(trimError, style = MaterialTheme.typography.bodySmall, color = OledColors.DangerRed)
-                            }
-                            if (lastTrimResult != null && lastTrimResult.path == file.path) {
-                                Text(
-                                    text = "Saved over original! ${Formatters.formatBytes(lastTrimResult.oldSizeBytes)} → " +
-                                        "${Formatters.formatBytes(lastTrimResult.newSizeBytes)} (Reclaimed ${Formatters.formatBytes(lastTrimResult.savedBytes)})",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = OledColors.SuccessGreen,
-                                )
-                            }
-
-                            Button(
-                                onClick = { showOverwriteConfirm = true },
-                                enabled = !isTrimming && cutDurationMs >= 300L,
-                                shape = RoundedCornerShape(16.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.primary,
-                                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                                ),
-                                modifier = Modifier.fillMaxWidth().height(48.dp),
+                            FilledIconButton(
+                                onClick = {
+                                    interactionNonce++
+                                    if (player.isPlaying) player.pause() else player.play()
+                                },
+                                colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                modifier = Modifier.size(44.dp),
                             ) {
-                                if (isTrimming) {
-                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-                                    Spacer(Modifier.width(10.dp))
-                                    Text("Cutting & Overwriting on ${host.displayName}...")
-                                } else {
-                                    Icon(Icons.Rounded.Save, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(Modifier.width(8.dp))
-                                    Text("Cut Video & Save Over Original File", style = MaterialTheme.typography.titleSmall)
+                                Icon(
+                                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                    contentDescription = if (isPlaying) "Pause" else "Play",
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    interactionNonce++
+                                    val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET } ?: durationMs
+                                    val t = (player.currentPosition + seekStepSeconds * 1000L).let { if (dur > 0) it.coerceAtMost(dur) else it }
+                                    player.seekTo(t)
+                                },
+                            ) {
+                                Icon(Icons.Rounded.FastForward, contentDescription = "Forward", tint = Color.White)
+                            }
+                            IconButton(
+                                onClick = {
+                                    interactionNonce++
+                                    player.pause()
+                                    val t = player.currentPosition + 33L
+                                    player.seekTo(t)
+                                    currentPosMs = t
+                                },
+                            ) {
+                                Text("+1f", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+
+                        // Right: Quick cinema utility pills
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        ) {
+                            IconButton(onClick = { isLocked = true; showControls = false; showUnlockPill = true }) {
+                                Icon(Icons.Rounded.Lock, contentDescription = "Lock Screen", tint = Color.White)
+                            }
+
+                            Box {
+                                AssistChip(
+                                    onClick = { interactionNonce++; showSpeedMenu = true },
+                                    leadingIcon = { Icon(Icons.Rounded.Speed, null, Modifier.size(16.dp)) },
+                                    label = { Text("${playbackSpeed}x") },
+                                )
+                                DropdownMenu(expanded = showSpeedMenu, onDismissRequest = { showSpeedMenu = false }) {
+                                    listOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f, 4.0f).forEach { spd ->
+                                        DropdownMenuItem(
+                                            text = { Text("${spd}x") },
+                                            onClick = { playbackSpeed = spd; showSpeedMenu = false; interactionNonce++ },
+                                        )
+                                    }
                                 }
+                            }
+
+                            AssistChip(
+                                onClick = {
+                                    interactionNonce++
+                                    val modes = PlayerAspectMode.entries
+                                    aspectMode = modes[(aspectMode.ordinal + 1) % modes.size]
+                                    gestureHudTitle = "Aspect: ${aspectMode.label}"
+                                    gestureHudSub = null
+                                    gestureHudFraction = -1f
+                                    hudNonce++
+                                },
+                                leadingIcon = { Icon(Icons.Rounded.AspectRatio, null, Modifier.size(16.dp)) },
+                                label = { Text(aspectMode.label) },
+                            )
+
+                            AssistChip(
+                                onClick = {
+                                    interactionNonce++
+                                    val pos = player.currentPosition.coerceAtLeast(0L)
+                                    when {
+                                        loopStartMs == null -> {
+                                            loopStartMs = pos
+                                            gestureHudTitle = "Loop A Set"
+                                            gestureHudSub = Formatters.formatDuration(pos)
+                                        }
+                                        loopEndMs == null && pos > loopStartMs!! + 300L -> {
+                                            loopEndMs = pos
+                                            gestureHudTitle = "A-B Loop Active"
+                                            gestureHudSub = "${Formatters.formatDuration(loopStartMs!!)} – ${Formatters.formatDuration(pos)}"
+                                        }
+                                        else -> {
+                                            loopStartMs = null
+                                            loopEndMs = null
+                                            gestureHudTitle = "A-B Loop Cleared"
+                                            gestureHudSub = null
+                                        }
+                                    }
+                                    gestureHudFraction = -1f
+                                    hudNonce++
+                                },
+                                leadingIcon = { Icon(Icons.Rounded.Loop, null, Modifier.size(16.dp)) },
+                                label = { Text(if (loopStartMs != null && loopEndMs == null) "Set B" else if (loopEndMs != null) "A-B On" else "A-B") },
+                            )
+
+                            IconButton(onClick = { interactionNonce++; showTracksDialog = true }) {
+                                Icon(Icons.Rounded.Subtitles, contentDescription = "Audio, Subtitles & Sleep Timer", tint = Color.White)
+                            }
+
+                            IconButton(onClick = { interactionNonce++; mirrorPreview = !mirrorPreview }) {
+                                Icon(Icons.Rounded.Flip, contentDescription = "Mirror Flip Preview", tint = if (mirrorPreview) MaterialTheme.colorScheme.primary else Color.White)
+                            }
+
+                            IconButton(onClick = { interactionNonce++; onSaveSnapshot(file.path, player.currentPosition.coerceAtLeast(0L)) }) {
+                                Icon(Icons.Rounded.CameraAlt, contentDescription = "Save Frame Snapshot", tint = Color.White)
+                            }
+
+                            if (zoomScale > 1.05f) {
+                                IconButton(onClick = { zoomScale = 1f; panX = 0f; panY = 0f }) {
+                                    Icon(Icons.Rounded.ZoomOutMap, contentDescription = "Reset Zoom", tint = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+
+                            IconButton(onClick = { interactionNonce++; isFullscreen = !isFullscreen }) {
+                                Icon(
+                                    imageVector = if (isFullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                                    contentDescription = "Fullscreen",
+                                    tint = Color.White,
+                                )
                             }
                         }
                     }
@@ -610,156 +1299,61 @@ fun VideoPlayerAndTrimmerOverlay(
         }
     }
 
-    if (showOverwriteConfirm) {
-        AlertDialog(
-            onDismissRequest = { showOverwriteConfirm = false },
-            containerColor = OledColors.ElevatedSurface,
-            title = { Text("Save Over Original Video?", color = OledColors.TextPrimary) },
-            text = {
-                Text(
-                    "DeckVault will trim '${file.name}' to " +
-                        "${Formatters.formatDurationPrecise(trimStartMs)} – ${Formatters.formatDurationPrecise(trimEndMs)} " +
-                        "and overwrite the file on ${host.displayName}.\n\n" +
-                        if (recycleOriginal) "The old copy will be moved to the Windows Recycle Bin first."
-                        else "The old copy will be permanently overwritten.",
-                    color = OledColors.TextSecondary,
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showOverwriteConfirm = false
-                        player.pause()
-                        onExecuteTrim(trimStartMs, trimEndMs, trimEncodingMode, compressCrf, recycleOriginal)
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
-                    ),
-                ) {
-                    Text("Overwrite Original")
+    if (showTracksDialog) {
+        val audioOpts = remember(currentTracks) { extractTrackOptions(currentTracks, C.TRACK_TYPE_AUDIO) }
+        val textOpts = remember(currentTracks) { extractTrackOptions(currentTracks, C.TRACK_TYPE_TEXT) }
+        TracksAndSleepDialog(
+            audioTracks = audioOpts,
+            subtitleTracks = textOpts,
+            sleepMinutesRemaining = sleepMinutes,
+            onSelectAudioTrack = { opt ->
+                val grp = currentTracks.groups.getOrNull(opt.groupIndex)?.mediaTrackGroup
+                if (grp != null) {
+                    player.trackSelectionParameters = player.trackSelectionParameters
+                        .buildUpon()
+                        .setOverrideForType(TrackSelectionOverride(grp, opt.trackIndex))
+                        .build()
                 }
             },
-            dismissButton = {
-                TextButton(onClick = { showOverwriteConfirm = false }) { Text("Cancel") }
+            onSelectSubtitleTrack = { opt ->
+                val builder = player.trackSelectionParameters.buildUpon()
+                if (opt == null) {
+                    builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                } else {
+                    val grp = currentTracks.groups.getOrNull(opt.groupIndex)?.mediaTrackGroup
+                    if (grp != null) {
+                        builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        builder.setOverrideForType(TrackSelectionOverride(grp, opt.trackIndex))
+                    }
+                }
+                player.trackSelectionParameters = builder.build()
             },
+            onPickExternalSubtitle = {
+                subtitlePicker.launch(arrayOf("application/x-subrip", "text/vtt", "text/*", "*/*"))
+            },
+            onSetSleepMinutes = { mins -> sleepMinutes = mins },
+            onDismiss = { showTracksDialog = false },
         )
     }
 }
 
-@Composable
-private fun VisualFilmstripRangeTrimmer(
-    storyboardUrl: String,
-    durationMs: Long,
-    startMs: Long,
-    endMs: Long,
-    playheadMs: Long,
-    onRangeChange: (newStartMs: Long, newEndMs: Long, seekMs: Long) -> Unit,
-) {
-    val safeDur = durationMs.coerceAtLeast(1L)
-    val startFrac = (startMs.toFloat() / safeDur.toFloat()).coerceIn(0f, 1f)
-    val endFrac = (endMs.toFloat() / safeDur.toFloat()).coerceIn(startFrac, 1f)
-    val playFrac = (playheadMs.toFloat() / safeDur.toFloat()).coerceIn(0f, 1f)
-    val density = LocalDensity.current
-
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(64.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFF12121A)),
-    ) {
-        val totalWidthPx = with(density) { maxWidth.toPx().coerceAtLeast(1f) }
-        val handleWidth = 18.dp
-        val handlePx = with(density) { handleWidth.toPx() }
-
-        StoryboardFilmstripRow(
-            storyboardUrl = storyboardUrl,
-            slices = 12,
-            modifier = Modifier.fillMaxSize(),
-        )
-
-        // Dimmed left & right trimmed-out regions
-        if (startFrac > 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .fillMaxWidth(startFrac)
-                    .background(Color.Black.copy(alpha = 0.72f)),
-            )
-        }
-        if (endFrac < 1f) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .fillMaxHeight()
-                    .fillMaxWidth((1f - endFrac).coerceIn(0f, 1f))
-                    .background(Color.Black.copy(alpha = 0.72f)),
-            )
-        }
-
-        // Active selection border frame
-        val selStartPx = (startFrac * totalWidthPx).roundToInt()
-        val selWidthPx = ((endFrac - startFrac) * totalWidthPx).roundToInt().coerceAtLeast(4)
-        Box(
-            modifier = Modifier
-                .offset { IntOffset(selStartPx, 0) }
-                .width(with(density) { selWidthPx.toDp() })
-                .fillMaxHeight()
-                .background(Color.Transparent)
-                .clip(RoundedCornerShape(8.dp)),
-        ) {
-            Box(Modifier.fillMaxWidth().height(3.dp).background(MaterialTheme.colorScheme.primary).align(Alignment.TopCenter))
-            Box(Modifier.fillMaxWidth().height(3.dp).background(MaterialTheme.colorScheme.primary).align(Alignment.BottomCenter))
-        }
-
-        // Playhead line
-        Box(
-            modifier = Modifier
-                .offset { IntOffset((playFrac * totalWidthPx).roundToInt(), 0) }
-                .width(2.dp)
-                .fillMaxHeight()
-                .background(Color.White),
-        )
-
-        // Left Start Handle
-        Box(
-            modifier = Modifier
-                .offset { IntOffset((startFrac * (totalWidthPx - handlePx)).roundToInt(), 0) }
-                .width(handleWidth)
-                .fillMaxHeight()
-                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(topStart = 10.dp, bottomStart = 10.dp))
-                .pointerInput(safeDur, endMs) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaMs = ((dragAmount.x / totalWidthPx) * safeDur).roundToLong()
-                        val nextStart = (startMs + deltaMs).coerceIn(0L, (endMs - 300L).coerceAtLeast(0L))
-                        onRangeChange(nextStart, endMs, nextStart)
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(Modifier.width(3.dp).height(24.dp).background(Color.Black, CircleShape))
-        }
-
-        // Right End Handle
-        Box(
-            modifier = Modifier
-                .offset { IntOffset((endFrac * (totalWidthPx - handlePx)).roundToInt(), 0) }
-                .width(handleWidth)
-                .fillMaxHeight()
-                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(topEnd = 10.dp, bottomEnd = 10.dp))
-                .pointerInput(safeDur, startMs) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaMs = ((dragAmount.x / totalWidthPx) * safeDur).roundToLong()
-                        val nextEnd = (endMs + deltaMs).coerceIn((startMs + 300L).coerceAtMost(safeDur), safeDur)
-                        onRangeChange(startMs, nextEnd, nextEnd)
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(Modifier.width(3.dp).height(24.dp).background(Color.Black, CircleShape))
+private fun extractTrackOptions(tracks: Tracks, trackType: Int): List<PlayerTrackOption> {
+    val list = mutableListOf<PlayerTrackOption>()
+    tracks.groups.forEachIndexed { gIdx, grp ->
+        if (grp.type == trackType) {
+            for (tIdx in 0 until grp.length) {
+                val fmt = grp.getTrackFormat(tIdx)
+                val label = fmt.label ?: fmt.sampleMimeType ?: "Track ${list.size + 1}"
+                val lang = fmt.language.orEmpty()
+                list.add(PlayerTrackOption(gIdx, tIdx, label, lang, grp.isTrackSelected(tIdx)))
+            }
         }
     }
+    return list
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

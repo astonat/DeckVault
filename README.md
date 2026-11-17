@@ -21,10 +21,12 @@
 - **Cross-Device Favorites & Google Drive Backup**: Bookmark folders from any device and back up files straight to Google Drive for Desktop or `rclone` remotes.
 - **Single-Instance Desktop Window + Tray Server**: Runs cleanly in the Windows system tray (`48720` HTTP / `48721` UDP) so paired devices stay connected while the frameless OLED studio window opens on demand.
 
-### Android App (`android/` — `com.deckvault.app` v1.2.0)
-- Native Kotlin + Jetpack Compose Material 3 Expressive (`#000000` OLED) app designed for phones, **Galaxy Z Fold**, and **Galaxy Tab Ultra**.
-- **Foreground LAN Peer Server** (`DeckVaultPeerService`) + web portal so your PC and other devices can browse and transfer your phone/tablet files over Wi-Fi.
-- LAN UDP auto-discovery (`48721`) + 6-digit PIN pairing, customizable `1–8` column grid, S Pen / touch video scrub previews, ExoPlayer streaming, and filmstrip clip trimmer.
+### Android App (`android/` — `com.deckvault.app` v1.4.0)
+- Native Kotlin + Jetpack Compose Material 3 Expressive (`#000000` OLED) app tailored for tablets, **Galaxy Z Fold**, and Android phones — usable both **standalone offline** and **paired with your PCs over Wi-Fi**.
+- **Default Cinema Video Player**: Full-bleed edge-to-edge player (`ACTION_VIEW` default video/file player intents) with auto-hiding HUD & immersive system bars, horizontal **swipe-to-seek**, left/right **brightness & 200% `LoudnessEnhancer` volume swipes**, double-tap skip, hold-for-`2x`, pinch-to-zoom, aspect modes (`Fit / Fill / Stretch / 16:9 / 9:16 / 4:3`), PiP, lock screen, orientation toggle, frame stepping, `A-B Loop`, `.srt`/`.vtt` subtitles, sleep timer, frame snapshots, resume memory, and PC live H.264 stream fallback.
+- **On-Device & SD Card Storage Manager**: Direct `This Device` browsing across **Internal Storage**, **removable SD Cards**, and **USB drives** (`StorageManager` + `MediaStore` fallback + persisted SAF `DocumentFile` writes for cross-volume **Internal ↔ SD Card** Move/Copy and dual **Trash vs Permanent Delete**).
+- **On-Device Studio, Optimizer & PC Offload Render Queue**: Built-in `media3-transformer` Cut, Visual Crop Box, Rotate/Flip, Color grading, Compressor, Upscaler, Audio extraction, and multi-select Merge Videos — with live progress bars, unified Queue (`+ Add to Queue` / `Run Now`, `Play` / `Studio` / `Folder` shortcuts), and optional **PC Companion Offload** that sends tablet/SD tasks to desktop FFmpeg and automatically saves outputs back to your device.
+- **Foreground LAN Peer Server** (`DeckVaultPeerService`) + web portal (`48720`/`48721`) so your PCs can browse Internal Storage & SD Card over Wi-Fi.
 
 ### iOS App (`ios/`)
 - SwiftUI browser and `DeckVaultPeerServer` scaffold for sharing iOS local/Documents media on the same LAN fleet.

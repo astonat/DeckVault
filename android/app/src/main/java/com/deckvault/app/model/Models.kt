@@ -16,6 +16,23 @@ data class SavedHost(
 ) {
     val displayName: String get() = label.ifBlank { name }
     val baseUrl: String get() = "http://$ip:$port"
+    val isLocalDevice: Boolean get() = hostId == LOCAL_DEVICE_ID
+
+    companion object {
+        const val LOCAL_DEVICE_ID = "local_android_device"
+
+        fun localDevice(freeBytes: Long = 0L, totalBytes: Long = 0L): SavedHost = SavedHost(
+            hostId = LOCAL_DEVICE_ID,
+            name = "This Tablet",
+            ip = "127.0.0.1",
+            port = 48720,
+            token = "local_direct",
+            label = "This Device",
+            lastKnownFreeBytes = freeBytes,
+            lastKnownTotalBytes = totalBytes,
+            os = "Android",
+        )
+    }
 }
 
 @Serializable
@@ -362,4 +379,229 @@ data class UserPreferences(
     val seekStepSeconds: Int = 10,
     val autoPlayVideos: Boolean = true,
     val deviceShareEnabled: Boolean = true,
+    val videoResumePositionsMs: Map<String, Long> = emptyMap(),
+    val safSdTreeUris: Map<String, String> = emptyMap(),
+    val preferPcOffloadWhenPaired: Boolean = false,
+)
+
+@Serializable
+data class CropBoxSpec(
+    val x: Float = 0f,
+    val y: Float = 0f,
+    val w: Float = 1f,
+    val h: Float = 1f,
+)
+
+@Serializable
+data class EditStudioRequest(
+    val path: String,
+    val hostId: String = "",
+    val startMs: Long = 0L,
+    val endMs: Long = 0L,
+    val crop: CropBoxSpec? = null,
+    val rotate: Int = 0,
+    val flipH: Boolean = false,
+    val flipV: Boolean = false,
+    val speed: Double = 1.0,
+    val muteAudio: Boolean = false,
+    val mode: String = "reencode",
+    val crf: Int = 22,
+    val saveMode: String = "copy",
+    val recycleOriginal: Boolean = true,
+    val brightness: Float = 0f,
+    val contrast: Float = 1f,
+    val saturation: Float = 1f,
+    val sharpen: Float = 0f,
+    val deband: Boolean = false,
+    val stabilize: Boolean = false,
+    val fadeSec: Float = 0f,
+    val normalizeAudio: Boolean = false,
+)
+
+@Serializable
+data class CompressEstimateRequest(
+    val path: String,
+    val hostId: String = "",
+    val targetHeight: Int = 0,
+    val crf: Int = 24,
+    val codec: String = "h264",
+    val audioKbps: Int = 128,
+    val targetMb: Double = 0.0,
+    val sampleProbe: Boolean = false,
+    val quality: Int = 82,
+)
+
+@Serializable
+data class CompressEstimateResponse(
+    val ok: Boolean = true,
+    val mediaType: String = "video",
+    val currentBytes: Long = 0L,
+    val estimatedBytes: Long = 0L,
+    val estimatedSavedBytes: Long = 0L,
+    val savingsPct: Double = 0.0,
+    val targetBitrateKbps: Int = 0,
+    val sampleBased: Boolean = false,
+)
+
+@Serializable
+data class CompressRequest(
+    val path: String,
+    val hostId: String = "",
+    val targetHeight: Int = 0,
+    val crf: Int = 24,
+    val codec: String = "h264",
+    val audioKbps: Int = 128,
+    val targetMb: Double = 0.0,
+    val saveMode: String = "copy",
+    val recycleOriginal: Boolean = true,
+    val quality: Int = 82,
+)
+
+@Serializable
+data class UpscaleRequest(
+    val path: String,
+    val hostId: String = "",
+    val preset: String = "2x",
+    val sharpen: Float = 0.9f,
+    val denoise: Boolean = false,
+    val fps60: Boolean = false,
+    val crf: Int = 19,
+    val saveMode: String = "copy",
+    val recycleOriginal: Boolean = true,
+    val mode: String = "cas",
+    val denoiseMode: String = "off",
+    val deband: Boolean = false,
+    val stabilize: Boolean = false,
+)
+
+@Serializable
+data class ExtractAudioRequest(
+    val path: String,
+    val hostId: String = "",
+    val format: String = "m4a",
+    val bitrateKbps: Int = 192,
+    val normalize: Boolean = false,
+    val startMs: Long = 0L,
+    val endMs: Long = 0L,
+)
+
+@Serializable
+data class GifExportRequest(
+    val path: String,
+    val hostId: String = "",
+    val startMs: Long = 0L,
+    val endMs: Long = 0L,
+    val fps: Int = 15,
+    val width: Int = 640,
+    val crop: CropBoxSpec? = null,
+    val rotate: Int = 0,
+    val flipH: Boolean = false,
+    val flipV: Boolean = false,
+    val speed: Double = 1.0,
+)
+
+@Serializable
+data class MergeRequest(
+    val paths: List<String>,
+    val hostId: String = "",
+    val outDir: String = "",
+    val outputName: String = "Merged_Video.mp4",
+    val crf: Int = 20,
+)
+
+@Serializable
+data class MediaOpResponse(
+    val ok: Boolean = true,
+    val path: String = "",
+    val name: String = "",
+    val oldSizeBytes: Long = 0L,
+    val newSizeBytes: Long = 0L,
+    val savedBytes: Long = 0L,
+    val sizeDeltaBytes: Long = 0L,
+    val saveMode: String = "copy",
+    val totalSpaceSavedBytes: Long = 0L,
+    val recycledOriginal: Boolean = false,
+)
+
+@Serializable
+data class JobRecord(
+    val id: String = "",
+    val type: String = "",
+    val route: String = "",
+    val title: String = "",
+    val hostId: String = "",
+    val sourcePath: String = "",
+    val sourceName: String = "",
+    val status: String = "queued",
+    val progressPct: Double = 0.0,
+    val speed: String = "",
+    val remainingSec: Double? = null,
+    val message: String = "",
+    val createdAt: Double = 0.0,
+    val outputPath: String = "",
+    val outputDir: String = "",
+    val outputName: String = "",
+    val outputMediaType: String = "",
+    val newSizeBytes: Long = 0L,
+    val savedBytes: Long = 0L,
+    val error: String = "",
+)
+
+@Serializable
+data class JobsSnapshotResponse(
+    val jobs: List<JobRecord> = emptyList(),
+    val runningCount: Int = 0,
+    val queuedCount: Int = 0,
+    val activeCount: Int = 0,
+    val overallPct: Double = 0.0,
+)
+
+@Serializable
+data class EnqueueJobResponse(
+    val ok: Boolean = true,
+    val job: JobRecord? = null,
+    val jobs: List<JobRecord> = emptyList(),
+    val snapshot: JobsSnapshotResponse? = null,
+)
+
+@Serializable
+data class OffloadStageResponse(
+    val ok: Boolean = true,
+    val stageId: String = "",
+    val stagedName: String = "",
+    val path: String = "",
+    val sizeBytes: Long = 0L,
+)
+
+enum class JobExecutionTarget(val label: String) {
+    ON_DEVICE("This Tablet (Offline)"),
+    PC_REMOTE("Run on PC Host"),
+    PC_OFFLOAD("Offload to Paired PC"),
+}
+
+data class RenderQueueItem(
+    val id: String,
+    val type: String,
+    val title: String,
+    val target: JobExecutionTarget,
+    val status: String, // "queued", "uploading", "running", "downloading", "done", "error", "cancelled"
+    val progressPct: Double = 0.0,
+    val speed: String = "",
+    val remainingSec: Int? = null,
+    val message: String = "Queued",
+    val sourceHostId: String = "",
+    val sourcePath: String = "",
+    val outputHostId: String = "",
+    val outputPath: String = "",
+    val outputDir: String = "",
+    val outputName: String = "",
+    val outputMediaType: String = "",
+    val newSizeBytes: Long = 0L,
+    val savedBytes: Long = 0L,
+    val error: String = "",
+    val remoteJobId: String? = null,
+    val offloadStageId: String? = null,
+    val offloadHost: SavedHost? = null,
+    val localDestDir: String = "",
+    val overwriteLocalOriginal: Boolean = false,
 )

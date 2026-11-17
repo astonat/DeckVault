@@ -12,8 +12,8 @@ android {
         applicationId = "com.deckvault.app"
         minSdk = 28
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.4.0"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -92,11 +92,15 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
 
     implementation(libs.androidx.window)
+    implementation(libs.androidx.documentfile)
     implementation(libs.androidx.datastore.preferences)
 
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.datasource.okhttp)
+    implementation(libs.androidx.media3.transformer)
+    implementation(libs.androidx.media3.effect)
+    implementation(libs.androidx.media3.common)
 
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
@@ -104,5 +108,6 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
 
+    testImplementation("junit:junit:4.13.2")
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

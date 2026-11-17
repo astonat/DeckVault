@@ -65,4 +65,31 @@ class PrefsRepository(private val context: Context) {
             prefs.copy(hosts = remaining, activeHostId = nextActive)
         }
     }
+
+    suspend fun saveVideoResumePosition(pathKey: String, positionMs: Long) {
+        if (pathKey.isBlank()) return
+        update { prefs ->
+            val next = prefs.videoResumePositionsMs.toMutableMap()
+            if (positionMs <= 2000L) {
+                next.remove(pathKey)
+            } else {
+                next.remove(pathKey)
+                next[pathKey] = positionMs
+                while (next.size > 80) {
+                    val oldest = next.keys.firstOrNull() ?: break
+                    next.remove(oldest)
+                }
+            }
+            prefs.copy(videoResumePositionsMs = next)
+        }
+    }
+
+    suspend fun saveSafTreeUri(volumeRoot: String, treeUri: String) {
+        if (volumeRoot.isBlank() || treeUri.isBlank()) return
+        update { prefs ->
+            val next = prefs.safSdTreeUris.toMutableMap()
+            next[volumeRoot] = treeUri
+            prefs.copy(safSdTreeUris = next)
+        }
+    }
 }

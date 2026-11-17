@@ -108,8 +108,8 @@ fun TransferDestinationDialog(
             runCatching {
                 val roots = fetchRoots(host)
                 val targetPath = explicitPath?.takeIf { it.isNotBlank() }
-                    ?: if (host.hostId == sourceHost.hostId && initialPath.isNotBlank()) initialPath
-                    else roots.quickFolders.firstOrNull { it.name.equals("Videos", ignoreCase = true) }?.path
+                    ?: if (host.hostId == sourceHost.hostId && initialPath.isNotBlank() && !initialPath.startsWith("mediastore://")) initialPath
+                    else roots.quickFolders.firstOrNull { !it.path.startsWith("mediastore://") && (it.name.contains("Videos", true) || it.name.contains("Movies", true) || it.name.contains("SD", true)) }?.path
                         ?: roots.drives.firstOrNull()?.path.orEmpty()
                 val listed = if (targetPath.isNotBlank()) fetchFolders(host, targetPath) else null
                 Triple(roots, targetPath, listed)
@@ -207,6 +207,7 @@ fun TransferDestinationDialog(
                     color = surfaces.textSecondary,
                     modifier = Modifier.padding(horizontal = 18.dp),
                 )
+                val quickTargetLabel = if (sourceHost.isLocalDevice) "" else "Quick Save (Movies/Pictures)"
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier
@@ -225,14 +226,22 @@ fun TransferDestinationDialog(
                             },
                             leadingIcon = {
                                 Icon(
-                                    imageVector = if (isLaptop) Icons.Rounded.Laptop else Icons.Rounded.Computer,
+                                    imageVector = when {
+                                        host.isLocalDevice -> Icons.Rounded.PhoneAndroid
+                                        isLaptop -> Icons.Rounded.Laptop
+                                        else -> Icons.Rounded.Computer
+                                    },
                                     contentDescription = null,
                                     modifier = Modifier.size(16.dp),
                                 )
                             },
                             label = {
                                 Text(
-                                    text = if (host.hostId == sourceHost.hostId) "${host.displayName} (Same PC)" else host.displayName,
+                                    text = when {
+                                        host.isLocalDevice && sourceHost.isLocalDevice -> "This Device (SD / Internal)"
+                                        host.hostId == sourceHost.hostId -> "${host.displayName} (Same Host)"
+                                        else -> host.displayName
+                                    },
                                     style = MaterialTheme.typography.labelLarge,
                                 )
                             },
@@ -240,13 +249,15 @@ fun TransferDestinationDialog(
                         )
                     }
 
-                    FilterChip(
-                        selected = targetIsLocalDevice,
-                        onClick = { targetIsLocalDevice = true },
-                        leadingIcon = { Icon(Icons.Rounded.PhoneAndroid, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                        label = { Text("This Device (Galaxy)", style = MaterialTheme.typography.labelLarge) },
-                        shape = RoundedCornerShape(12.dp),
-                    )
+                    if (quickTargetLabel.isNotBlank()) {
+                        FilterChip(
+                            selected = targetIsLocalDevice,
+                            onClick = { targetIsLocalDevice = true },
+                            leadingIcon = { Icon(Icons.Rounded.Storage, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                            label = { Text(quickTargetLabel, style = MaterialTheme.typography.labelLarge) },
+                            shape = RoundedCornerShape(12.dp),
+                        )
+                    }
                 }
 
                 HorizontalDivider(color = surfaces.hairlineBorder)

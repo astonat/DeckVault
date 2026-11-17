@@ -31,25 +31,33 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.automirrored.rounded.ViewList
 import androidx.compose.material.icons.rounded.AudioFile
+import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.DeleteForever
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DriveFileRenameOutline
 import androidx.compose.material.icons.rounded.FileUpload
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.InsertDriveFile
+import androidx.compose.material.icons.rounded.Merge
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Queue
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Storage
@@ -150,6 +158,13 @@ fun MediaBrowserPane(
     onOpenSettings: () -> Unit,
     onUpdatePrefs: ((UserPreferences) -> UserPreferences) -> Unit,
     modifier: Modifier = Modifier,
+    needsAllFilesPermission: Boolean = false,
+    onGrantAllFilesAccess: () -> Unit = {},
+    onOptimizeFile: (FileItem, OptimizerTab) -> Unit = { _, _ -> },
+    onDeleteSingleFile: (FileItem, Boolean) -> Unit = { _, _ -> },
+    onMergeSelected: () -> Unit = {},
+    activeQueueCount: Int = 0,
+    onOpenQueue: () -> Unit = {},
 ) {
     var showCustomizeSheet by remember { mutableStateOf(false) }
     var showSortMenu by remember { mutableStateOf(false) }
@@ -163,6 +178,31 @@ fun MediaBrowserPane(
 
     Box(modifier = modifier.fillMaxSize().background(OledColors.PitchBlack)) {
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 10.dp)) {
+            if (needsAllFilesPermission && host?.isLocalDevice == true) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) {
+                        Icon(androidx.compose.material.icons.Icons.Rounded.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                        Text(
+                            "Grant All Files Access to browse & move between Internal Storage and SD Card freely.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = surfaces.textPrimary,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Button(onClick = onGrantAllFilesAccess, shape = RoundedCornerShape(10.dp)) {
+                            Text("Allow")
+                        }
+                    }
+                }
+            }
             // Top Expressive Header Bar
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -228,6 +268,32 @@ fun MediaBrowserPane(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                }
+
+                // Render Queue Button (visible on all screen sizes including Fold/Phone)
+                Surface(
+                    onClick = onOpenQueue,
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (activeQueueCount > 0) MaterialTheme.colorScheme.primaryContainer else OledColors.CardSurface,
+                    border = BorderStroke(1.dp, if (activeQueueCount > 0) MaterialTheme.colorScheme.primary else OledColors.HairlineBorder),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Icon(
+                            androidx.compose.material.icons.Icons.Rounded.Queue,
+                            contentDescription = "Queue",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text(
+                            if (activeQueueCount > 0) "Queue ($activeQueueCount)" else "Queue",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = OledColors.TextPrimary,
+                        )
+                    }
                 }
 
                 // All Drives & Devices Dashboard Button
@@ -636,6 +702,18 @@ fun MediaBrowserPane(
                         Spacer(Modifier.width(4.dp))
                         Text("All")
                     }
+                    val selectedVideoCount = files.count { it.path in selectedPaths && it.isVideo }
+                    if (selectedVideoCount >= 2) {
+                        OutlinedButton(
+                            onClick = onMergeSelected,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)),
+                        ) {
+                            Icon(androidx.compose.material.icons.Icons.Rounded.Merge, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Merge ($selectedVideoCount)")
+                        }
+                    }
                     Button(
                         onClick = { showDeleteConfirm = true },
                         colors = ButtonDefaults.buttonColors(
@@ -681,7 +759,10 @@ fun MediaBrowserPane(
             contentColor = surfaces.textPrimary,
         ) {
             Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Text(
@@ -701,7 +782,7 @@ fun MediaBrowserPane(
                 Spacer(Modifier.height(6.dp))
                 ContextActionRow(
                     icon = Icons.AutoMirrored.Rounded.DriveFileMove,
-                    label = "Move to Folder, Drive or Device",
+                    label = "Move to Folder, SD Card or PC",
                     onClick = {
                         contextFile = null
                         onMoveFile(file)
@@ -709,7 +790,7 @@ fun MediaBrowserPane(
                 )
                 ContextActionRow(
                     icon = Icons.Rounded.ContentCopy,
-                    label = "Copy to Folder, Drive or Device",
+                    label = "Copy to Folder, SD Card or PC",
                     onClick = {
                         contextFile = null
                         onCopyFile(file)
@@ -726,10 +807,28 @@ fun MediaBrowserPane(
                 if (file.isVideo) {
                     ContextActionRow(
                         icon = Icons.Rounded.ContentCut,
-                        label = "Cut & Save Over Original",
+                        label = "Edit Studio (Cut, Crop, Rotate, Effects)",
                         onClick = {
                             contextFile = null
                             onOpenVideo(file, true)
+                        },
+                    )
+                }
+                if (file.isVideo || file.isImage) {
+                    ContextActionRow(
+                        icon = androidx.compose.material.icons.Icons.Rounded.Compress,
+                        label = "Compress Size (Target MB / H.264 / HEVC)",
+                        onClick = {
+                            contextFile = null
+                            onOptimizeFile(file, OptimizerTab.COMPRESS)
+                        },
+                    )
+                    ContextActionRow(
+                        icon = androidx.compose.material.icons.Icons.Rounded.AutoFixHigh,
+                        label = "Upscale & Enhance (1080p / 4K / Pro)",
+                        onClick = {
+                            contextFile = null
+                            onOptimizeFile(file, OptimizerTab.UPSCALE)
                         },
                     )
                 }
@@ -747,6 +846,22 @@ fun MediaBrowserPane(
                     onClick = {
                         contextFile = null
                         onToggleSelect(file.path)
+                    },
+                )
+                ContextActionRow(
+                    icon = androidx.compose.material.icons.Icons.Rounded.DeleteOutline,
+                    label = "Move to Trash / Recycle Bin",
+                    onClick = {
+                        contextFile = null
+                        onDeleteSingleFile(file, true)
+                    },
+                )
+                ContextActionRow(
+                    icon = androidx.compose.material.icons.Icons.Rounded.DeleteForever,
+                    label = "Permanently Delete",
+                    onClick = {
+                        contextFile = null
+                        onDeleteSingleFile(file, false)
                     },
                 )
                 Spacer(Modifier.height(14.dp))
@@ -824,20 +939,30 @@ fun MediaBrowserPane(
             title = { Text("Delete ${selectedPaths.size} files?", color = OledColors.TextPrimary) },
             text = {
                 Text(
-                    "This will reclaim ${Formatters.formatBytes(selectedBytes)} on ${host?.displayName ?: "your PC"}. " +
-                        if (prefs.recycleByDefault) "Files will be moved to the Windows Recycle Bin." else "Files will be permanently deleted.",
+                    "This will reclaim ${Formatters.formatBytes(selectedBytes)} on ${host?.displayName ?: "this device"}. " +
+                        "Choose whether to move files to Trash/Recycle Bin or Permanently Delete them.",
                     color = OledColors.TextSecondary,
                 )
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        showDeleteConfirm = false
-                        onDeleteSelected(prefs.recycleByDefault)
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                ) {
-                    Text(if (prefs.recycleByDefault) "Move to Recycle Bin" else "Delete Permanently")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            showDeleteConfirm = false
+                            onDeleteSelected(true)
+                        },
+                    ) {
+                        Text("Recycle")
+                    }
+                    Button(
+                        onClick = {
+                            showDeleteConfirm = false
+                            onDeleteSelected(false)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    ) {
+                        Text("Permanently Delete")
+                    }
                 }
             },
             dismissButton = {

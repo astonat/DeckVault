@@ -15,6 +15,7 @@ import android.media.MediaMuxer
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
+import com.deckvault.app.data.LocalStorageRepository
 import com.deckvault.app.model.CreateFolderRequest
 import com.deckvault.app.model.CreateFolderResponse
 import com.deckvault.app.model.DeleteRequest
@@ -94,6 +95,7 @@ class AndroidPeerServer(private val context: Context) {
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val localRepo = LocalStorageRepository(context)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val pool: ExecutorService = Executors.newCachedThreadPool()
     private val metaCache = ConcurrentHashMap<String, VideoMeta?>()
@@ -240,75 +242,17 @@ class AndroidPeerServer(private val context: Context) {
         return result.sortedByDescending { it.startsWith("192.168.") || it.startsWith("10.") }
     }
 
-    fun detectStorageDrives(): List<DriveInfo> {
-        val roots = linkedMapOf<String, File>()
-        val primary = Environment.getExternalStorageDirectory()
-        if (primary != null && primary.exists()) {
-            roots[primary.canonicalPath] = primary
-        }
-        context.getExternalFilesDirs(null).filterNotNull().forEach { appDir ->
-            var cur: File? = appDir
-            while (cur != null && cur.parentFile != null) {
-                if (cur.name.equals("Android", ignoreCase = true)) {
-                    val volRoot = cur.parentFile
-                    if (volRoot != null && volRoot.exists() && volRoot.canRead()) {
-                        roots.putIfAbsent(volRoot.canonicalPath, volRoot)
-                    }
-                    break
-                }
-                cur = cur.parentFile
-            }
-        }
+    fun detectStorageDrives(): List<DriveInfo> = localRepo.detectStorageDrives()
 
-        return roots.entries.mapIndexed { idx, (canonPath, file) ->
-            val (total, free) = statVolume(file)
-            val label = if (idx == 0) "Internal Storage" else "External (${file.name})"
-            DriveInfo(
-                name = label,
-                path = canonPath,
-                totalBytes = total,
-                usedBytes = (total - free).coerceAtLeast(0L),
-                freeBytes = free,
-                indexedSizeBytes = -1L,
-            )
-        }
-    }
-
-    fun detectQuickFolders(): List<QuickFolder> {
-        val base = Environment.getExternalStorageDirectory() ?: return emptyList()
-        val candidates = listOf(
-            "Camera / DCIM" to File(base, "DCIM"),
-            "Pictures" to File(base, "Pictures"),
-            "Movies" to File(base, "Movies"),
-            "Downloads" to File(base, "Download"),
-            "Documents" to File(base, "Documents"),
-            "Music" to File(base, "Music"),
-        )
-        return candidates.mapNotNull { (label, dir) ->
-            if (dir.exists() && dir.isDirectory) {
-                QuickFolder(name = label, path = dir.canonicalPath)
-            } else null
-        }
-    }
+    fun detectQuickFolders(): List<QuickFolder> =
+        localRepo.detectQuickFolders().filterNot { LocalStorageRepository.isVirtualMediaStorePath(it.path) }
 
     private fun statVolume(dir: File): Pair<Long, Long> = runCatching {
         val sf = StatFs(dir.absolutePath)
         sf.totalBytes to sf.availableBytes
     }.getOrDefault(0L to 0L)
 
-    private fun resolveSafePath(raw: String): File {
-        if (raw.isBlank()) throw IllegalArgumentException("Missing path")
-        val target = File(raw).canonicalFile
-        val roots = detectStorageDrives().map { File(it.path).canonicalPath }
-        val targetCanon = target.canonicalPath
-        val allowed = roots.any { root ->
-            targetCanon == root || targetCanon.startsWith("$root${File.separator}")
-        }
-        if (!allowed) {
-            throw SecurityException("Access denied outside device storage: $raw")
-        }
-        return target
-    }
+    private fun resolveSafePath(raw: String): File = localRepo.resolveSafePath(raw)
 
     private fun handleSocket(socket: Socket) {
         socket.use { sock ->
@@ -346,7 +290,7 @@ class AndroidPeerServer(private val context: Context) {
             if (method == "GET" && route == "/api/ping") {
                 val ping = PingResponse(
                     service = "DeckVault",
-                    version = "1.2.0",
+                    version = "1.4.0",
                     hostId = hostId,
                     deviceName = deviceName,
                     os = "Android",

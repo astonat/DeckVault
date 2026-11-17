@@ -1,7 +1,11 @@
 package com.deckvault.app
 
+import android.content.Intent
 import android.graphics.Color as AndroidColor
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -37,8 +41,12 @@ import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Laptop
+import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.Queue
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -54,6 +62,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
@@ -83,16 +92,21 @@ import androidx.window.layout.WindowLayoutInfo
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import com.deckvault.app.data.DeckVaultLocalFetcherFactory
 import com.deckvault.app.model.FoldLayoutMode
 import com.deckvault.app.peer.DeckVaultPeerService
 import com.deckvault.app.ui.components.AllDrivesDashboard
 import com.deckvault.app.ui.components.AnyFileViewerOverlay
 import com.deckvault.app.ui.components.AudioPlayerOverlay
+import com.deckvault.app.ui.components.FloatingQueueMiniBar
 import com.deckvault.app.ui.components.FolderTreePane
 import com.deckvault.app.ui.components.HostsModalDialog
 import com.deckvault.app.ui.components.ImageViewerOverlay
 import com.deckvault.app.ui.components.MediaBrowserPane
+import com.deckvault.app.ui.components.MediaOptimizerDialog
+import com.deckvault.app.ui.components.MergeVideosDialog
 import com.deckvault.app.ui.components.PdfViewerOverlay
+import com.deckvault.app.ui.components.QueueManagerDialog
 import com.deckvault.app.ui.components.SettingsDialog
 import com.deckvault.app.ui.components.TextViewerOverlay
 import com.deckvault.app.ui.components.TransferDestinationDialog
@@ -105,6 +119,19 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
+    private var externalLaunchUri by mutableStateOf<Uri?>(null)
+
+    private fun extractViewUri(incoming: Intent?): Uri? {
+        if (incoming?.action == Intent.ACTION_VIEW) return incoming.data
+        return null
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        externalLaunchUri = extractViewUri(intent)
+    }
+
     @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
@@ -112,15 +139,25 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.BLACK),
         )
         super.onCreate(savedInstanceState)
+        externalLaunchUri = extractViewUri(intent)
 
         setContent {
             val vm: MainViewModel = viewModel()
 
-            // Wire Coil 3 to DeckVault's shared OkHttpClient once
+            LaunchedEffect(externalLaunchUri) {
+                val uri = externalLaunchUri
+                if (uri != null) {
+                    externalLaunchUri = null
+                    vm.openExternalViewUri(uri)
+                }
+            }
+
+            // Wire Coil 3 to both Local Direct Thumbnail Fetcher & DeckVault OkHttp Client
             LaunchedEffect(Unit) {
                 SingletonImageLoader.setSafe { ctx ->
                     ImageLoader.Builder(ctx)
                         .components {
+                            add(DeckVaultLocalFetcherFactory(vm.localRepo))
                             add(OkHttpNetworkFetcherFactory(callFactory = { vm.api.okHttpClient }))
                         }
                         .build()
@@ -181,6 +218,39 @@ private fun DeckVaultRoot(
         }
     }
 
+    val allFilesPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) {
+        vm.onPermissionChanged()
+    }
+
+    val openAllFilesGrantScreen: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val intent = runCatching {
+                Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:${context.packageName}"),
+                )
+            }.getOrElse { Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION) }
+            allFilesPermissionLauncher.launch(intent)
+        }
+    }
+
+    val sdCardTreeLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        val pending = ui.pendingSdCardAccess
+        if (uri != null && pending != null) {
+            runCatching {
+                val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(uri, flags)
+            }
+            vm.onSdCardTreeGranted(pending.first, uri)
+        } else {
+            vm.dismissSdCardAccessPrompt()
+        }
+    }
+
     LaunchedEffect(ui.toastMessage) {
         val msg = ui.toastMessage
         if (!msg.isNullOrBlank()) {
@@ -210,7 +280,7 @@ private fun DeckVaultRoot(
     var folderPaneCollapsed by remember { mutableStateOf(false) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
 
-    // Back handling for viewers / dashboard / drawer
+    // Back handling for viewers / dashboard / drawer / modals
     BackHandler(
         enabled = ui.activeVideoFile != null ||
             ui.activeImageIndex >= 0 ||
@@ -218,6 +288,9 @@ private fun DeckVaultRoot(
             ui.activePdfFile != null ||
             ui.activeTextFile != null ||
             ui.activeOtherFile != null ||
+            ui.showQueueSheet ||
+            ui.optimizerFile != null ||
+            ui.mergeCandidates.isNotEmpty() ||
             ui.showAllDrivesDashboard ||
             (!useSplitPane && drawerState.isOpen),
     ) {
@@ -228,6 +301,9 @@ private fun DeckVaultRoot(
             ui.activePdfFile != null -> vm.dismissPdfViewer()
             ui.activeTextFile != null -> vm.dismissTextViewer()
             ui.activeOtherFile != null -> vm.dismissOtherFileViewer()
+            ui.showQueueSheet -> vm.closeQueueSheet()
+            ui.optimizerFile != null -> vm.closeOptimizer()
+            ui.mergeCandidates.isNotEmpty() -> vm.closeMergeDialog()
             ui.showAllDrivesDashboard -> vm.closeAllDrivesDashboard()
             !useSplitPane && drawerState.isOpen -> scope.launch { drawerState.close() }
         }
@@ -244,16 +320,19 @@ private fun DeckVaultRoot(
                 // Z Fold 5 Unfolded (Medium): Direct 2-Pane Split (no rail crowding!) + 1-tap Collapse
                 Row(modifier = Modifier.fillMaxSize()) {
                     if (showNavigationRail) {
+                        val activeQueueCount = ui.queueJobs.count { it.status in listOf("queued", "uploading", "running", "downloading") }
                         ExpressiveSideRail(
                             savedHosts = prefs.hosts,
                             activeHost = activeHost,
                             isSpaceHogsMode = ui.isSpaceHogsMode,
                             showAllDrivesDashboard = ui.showAllDrivesDashboard,
+                            activeQueueCount = activeQueueCount,
                             spaceSavedBytes = ui.spaceSavedBytes,
                             folderPaneCollapsed = folderPaneCollapsed,
                             onToggleCollapseFolders = { folderPaneCollapsed = !folderPaneCollapsed },
                             onSelectHost = { vm.selectHost(it) },
                             onOpenAllDrives = { vm.openAllDrivesDashboard() },
+                            onOpenQueue = { vm.openQueueSheet() },
                             onOpenHostManager = { vm.openHostsModal() },
                             onOpenSettings = { vm.openSettingsModal() },
                             onScanSpaceHogs = { vm.scanLargestInCurrentFolder() },
@@ -382,6 +461,13 @@ private fun DeckVaultRoot(
                                 onRenameFile = { file, name -> vm.renameFile(file, name) },
                                 onOpenSettings = { vm.openSettingsModal() },
                                 onUpdatePrefs = { vm.updatePreferences(it) },
+                                needsAllFilesPermission = ui.needsAllFilesPermission,
+                                onGrantAllFilesAccess = openAllFilesGrantScreen,
+                                onOptimizeFile = { file, tab -> vm.openOptimizer(file, tab) },
+                                onDeleteSingleFile = { file, recycle -> vm.deleteSingleFileWithMode(file, recycle) },
+                                onMergeSelected = { vm.openMergeForSelection() },
+                                activeQueueCount = ui.queueJobs.count { it.status in listOf("queued", "uploading", "running", "downloading") },
+                                onOpenQueue = { vm.openQueueSheet() },
                                 modifier = Modifier.weight(1f).fillMaxHeight(),
                             )
                         }
@@ -478,36 +564,58 @@ private fun DeckVaultRoot(
                         onRenameFile = { file, name -> vm.renameFile(file, name) },
                         onOpenSettings = { vm.openSettingsModal() },
                         onUpdatePrefs = { vm.updatePreferences(it) },
+                        needsAllFilesPermission = ui.needsAllFilesPermission,
+                        onGrantAllFilesAccess = openAllFilesGrantScreen,
+                        onOptimizeFile = { file, tab -> vm.openOptimizer(file, tab) },
+                        onDeleteSingleFile = { file, recycle -> vm.deleteSingleFileWithMode(file, recycle) },
+                        onMergeSelected = { vm.openMergeForSelection() },
+                        activeQueueCount = ui.queueJobs.count { it.status in listOf("queued", "uploading", "running", "downloading") },
+                        onOpenQueue = { vm.openQueueSheet() },
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
             }
 
-            // Full-Screen Built-in Video Player & Cutter Overlay
+            // Full-Screen Built-in Cinema Video Player & Studio Overlay
             val videoFile = ui.activeVideoFile
             if (videoFile != null && activeHost != null) {
                 val videoList = remember(ui.files) { ui.files.filter { it.isVideo } }
-                val videoIdx = remember(videoList, videoFile.path) {
-                    videoList.indexOfFirst { it.path == videoFile.path }
+                val durMs = (videoFile.meta?.durationMs ?: 0L).coerceAtLeast(1000L)
+                val frameUrls = remember(activeHost.hostId, videoFile.path, durMs, ui.cacheVersion) {
+                    (0..5).map { idx ->
+                        val ms = ((durMs * (idx + 0.5)) / 6.0).toLong()
+                        vm.api.videoFrameUrl(activeHost, videoFile.path, ms, width = 320)
+                    }
                 }
                 VideoPlayerAndTrimmerOverlay(
-                    host = activeHost,
-                    api = vm.api,
                     file = videoFile,
-                    prefs = prefs,
-                    initialOpenTrimmer = ui.openPlayerInTrimmer,
-                    hasPrev = videoIdx > 0,
-                    hasNext = videoIdx in 0 until (videoList.size - 1),
-                    isTrimming = ui.isTrimming,
-                    lastTrimResult = ui.lastTrimResult,
-                    trimError = ui.trimError,
-                    cacheVersion = ui.cacheVersion,
-                    onPrevVideo = { vm.openAdjacentVideo(-1) },
-                    onNextVideo = { vm.openAdjacentVideo(1) },
-                    onDismiss = { vm.dismissVideoPlayer() },
-                    onExecuteTrim = { startMs, endMs, mode, crf, recycle ->
-                        vm.executeTrim(startMs, endMs, mode, crf, recycle)
+                    playlist = videoList,
+                    streamUrl = vm.api.streamUrl(activeHost, videoFile.path, ui.cacheVersion),
+                    playableFallbackUrl = vm.api.playableStreamUrlOrNull(activeHost, videoFile.path, cacheBust = ui.cacheVersion),
+                    framePreviewUrls = frameUrls,
+                    api = vm.api,
+                    isLocalSource = activeHost.isLocalDevice,
+                    pairedPcHosts = vm.pairedPcHosts(),
+                    defaultOffloadHost = vm.pairedPcHosts().firstOrNull(),
+                    initialResumePositionMs = prefs.videoResumePositionsMs[videoFile.path] ?: 0L,
+                    initialSpeed = prefs.defaultPlaybackSpeed,
+                    seekStepSeconds = prefs.seekStepSeconds,
+                    autoPlay = prefs.autoPlayVideos,
+                    initialOpenStudio = ui.openPlayerInTrimmer,
+                    onSelectVideo = { nextVid -> vm.openVideo(nextVid, false) },
+                    onSaveResumePosition = { p, ms -> vm.saveVideoResumePosition(p, ms) },
+                    onSaveSnapshot = { p, ms -> vm.saveVideoSnapshot(p, ms) },
+                    onOpenOptimizer = { f -> vm.openOptimizer(f) },
+                    onSubmitStudioEdit = { req, target, offloadHost, runNow ->
+                        vm.submitStudioEdit(req, target, offloadHost, runNow)
                     },
+                    onSubmitExtractAudio = { req, target, offloadHost ->
+                        vm.submitExtractAudio(req, target, offloadHost)
+                    },
+                    onSubmitExportGif = { req, offloadHost ->
+                        vm.submitExportGif(req, offloadHost)
+                    },
+                    onClose = { vm.dismissVideoPlayer() },
                 )
             }
 
@@ -659,34 +767,135 @@ private fun DeckVaultRoot(
                 )
             }
 
-            // Active Transfer Progress Banner
-            if (ui.isTransferring) {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = OledColors.HighestSurface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)),
-                    shadowElevation = 8.dp,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 12.dp, start = 16.dp, end = 16.dp)
-                        .fillMaxWidth(0.7f),
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
+            // Media Optimizer (Compress & Upscale) Modal
+            ui.optimizerFile?.let { optFile ->
+                MediaOptimizerDialog(
+                    file = optFile,
+                    initialTab = ui.optimizerTab,
+                    isLocalSource = activeHost?.isLocalDevice == true,
+                    pairedPcHosts = vm.pairedPcHosts(),
+                    defaultPcHost = vm.pairedPcHosts().firstOrNull(),
+                    estimateFn = { req -> vm.estimateCompression(req) },
+                    onSubmitCompress = { req, target, offloadHost, runNow ->
+                        vm.submitCompress(req, target, offloadHost, runNow)
+                    },
+                    onSubmitUpscale = { req, target, offloadHost, runNow ->
+                        vm.submitUpscale(req, target, offloadHost, runNow)
+                    },
+                    onDismiss = { vm.closeOptimizer() },
+                )
+            }
+
+            // Merge Videos Modal
+            if (ui.mergeCandidates.isNotEmpty()) {
+                MergeVideosDialog(
+                    clips = ui.mergeCandidates,
+                    isLocalSource = activeHost?.isLocalDevice == true,
+                    pairedPcHosts = vm.pairedPcHosts(),
+                    defaultPcHost = vm.pairedPcHosts().firstOrNull(),
+                    onSubmitMerge = { clips, outName, target, offloadHost, runNow ->
+                        vm.submitMergeVideos(clips, outName, target, offloadHost, runNow)
+                    },
+                    onDismiss = { vm.closeMergeDialog() },
+                )
+            }
+
+            // Render & PC Offload Queue Sheet
+            if (ui.showQueueSheet) {
+                QueueManagerDialog(
+                    jobs = ui.queueJobs,
+                    onCancelJob = { vm.cancelQueueJob(it) },
+                    onClearFinished = { vm.clearFinishedQueueJobs() },
+                    onPlayOutput = { vm.playQueueOutput(it) },
+                    onOpenInStudio = { vm.openQueueOutputInStudio(it) },
+                    onGoToFolder = { vm.goToQueueOutputFolder(it) },
+                    onDismiss = { vm.closeQueueSheet() },
+                )
+            }
+
+            // SD Card / USB DocumentTree Permission Prompt
+            ui.pendingSdCardAccess?.let { (_, volumeName) ->
+                AlertDialog(
+                    onDismissRequest = { vm.dismissSdCardAccessPrompt() },
+                    containerColor = OledColors.ElevatedSurface,
+                    title = { Text("Enable SD Card Writes", color = OledColors.TextPrimary) },
+                    text = {
                         Text(
-                            text = ui.transferStatusText.ifBlank { "Transferring..." },
-                            style = MaterialTheme.typography.labelLarge,
-                            color = OledColors.TextPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                            "Android requires one-time folder access to write, move, or delete directly on \"$volumeName\". Pick the root of \"$volumeName\" and tap \"Use this folder\".",
+                            color = OledColors.TextSecondary,
                         )
-                        LinearProgressIndicator(
-                            progress = { ui.transferProgressFraction.coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth().height(4.dp),
-                        )
+                    },
+                    confirmButton = {
+                        Button(onClick = { sdCardTreeLauncher.launch(null) }) {
+                            Text("Choose SD Card Root")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { vm.dismissSdCardAccessPrompt() }) {
+                            Text("Cancel")
+                        }
+                    },
+                )
+            }
+
+            // Floating Bottom Queue Mini Bar (when browser visible & items aren't covered by multi-select bar)
+            if (ui.queueJobs.isNotEmpty() && ui.selectedPaths.isEmpty() && ui.activeVideoFile == null) {
+                FloatingQueueMiniBar(
+                    jobs = ui.queueJobs,
+                    onOpenQueue = { vm.openQueueSheet() },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 16.dp)
+                        .fillMaxWidth(0.46f),
+                )
+            }
+
+            // Global Top Activity & Transfer Progress Banner + Window Progress Strip
+            val activeQueueItem = ui.queueJobs.firstOrNull { it.status in listOf("uploading", "running", "downloading") }
+            val showTopProgress = ui.isTransferring || activeQueueItem != null || ui.isLoading || ui.isIndexing
+            if (showTopProgress) {
+                if (ui.isTransferring || activeQueueItem != null) {
+                    val bannerTitle = if (ui.isTransferring) {
+                        ui.transferStatusText.ifBlank { "Transferring..." }
+                    } else {
+                        "${activeQueueItem!!.title} • ${activeQueueItem.message}"
                     }
+                    val frac = if (ui.isTransferring) {
+                        ui.transferProgressFraction.coerceIn(0f, 1f)
+                    } else {
+                        (activeQueueItem!!.progressPct.toFloat() / 100f).coerceIn(0f, 1f)
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = OledColors.HighestSurface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)),
+                        shadowElevation = 8.dp,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 10.dp, start = 16.dp, end = 16.dp)
+                            .fillMaxWidth(0.7f),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = bannerTitle,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = OledColors.TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            LinearProgressIndicator(
+                                progress = { frac },
+                                modifier = Modifier.fillMaxWidth().height(4.dp),
+                            )
+                        }
+                    }
+                } else {
+                    LinearProgressIndicator(
+                        modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().height(2.5.dp),
+                    )
                 }
             }
         }
@@ -699,11 +908,13 @@ private fun ExpressiveSideRail(
     activeHost: com.deckvault.app.model.SavedHost?,
     isSpaceHogsMode: Boolean,
     showAllDrivesDashboard: Boolean,
+    activeQueueCount: Int,
     spaceSavedBytes: Long,
     folderPaneCollapsed: Boolean,
     onToggleCollapseFolders: () -> Unit,
     onSelectHost: (com.deckvault.app.model.SavedHost) -> Unit,
     onOpenAllDrives: () -> Unit,
+    onOpenQueue: () -> Unit,
     onOpenHostManager: () -> Unit,
     onOpenSettings: () -> Unit,
     onScanSpaceHogs: () -> Unit,
@@ -775,13 +986,17 @@ private fun ExpressiveSideRail(
                 onClick = { onSelectHost(host) },
                 icon = {
                     Icon(
-                        imageVector = if (isLaptop) Icons.Rounded.Laptop else Icons.Rounded.Computer,
+                        imageVector = when {
+                            host.isLocalDevice -> Icons.Rounded.PhoneAndroid
+                            isLaptop -> Icons.Rounded.Laptop
+                            else -> Icons.Rounded.Computer
+                        },
                         contentDescription = host.displayName,
                     )
                 },
                 label = {
                     Text(
-                        text = host.displayName.take(8),
+                        text = if (host.isLocalDevice) "Device" else host.displayName.take(8),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -795,6 +1010,17 @@ private fun ExpressiveSideRail(
                 ),
             )
         }
+
+        NavigationRailItem(
+            selected = false,
+            onClick = onOpenQueue,
+            icon = { Icon(Icons.Rounded.Queue, contentDescription = "Render Queue") },
+            label = { Text(if (activeQueueCount > 0) "Q ($activeQueueCount)" else "Queue", maxLines = 1) },
+            colors = NavigationRailItemDefaults.colors(
+                unselectedIconColor = if (activeQueueCount > 0) MaterialTheme.colorScheme.primary else OledColors.TextSecondary,
+                unselectedTextColor = OledColors.TextSecondary,
+            ),
+        )
 
         Spacer(Modifier.weight(1f))
 

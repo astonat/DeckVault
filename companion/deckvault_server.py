@@ -22,6 +22,7 @@ import mimetypes
 import os
 from pathlib import Path
 import queue
+import re
 import secrets
 import shutil
 import socket
@@ -2266,6 +2267,39 @@ def detect_cloud_storage_providers(config_data: dict[str, Any]) -> list[dict[str
 
 
 DRAG_STAGING_DIR = CONFIG_DIR / "drag_staging"
+OFFLOAD_STAGING_DIR = CONFIG_DIR / "offload_staging"
+
+
+def _sanitize_stage_id(raw_id: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "", str(raw_id or "")).strip("_-")
+    return cleaned or f"stage_{uuid.uuid4().hex[:10]}"
+
+
+def _resolve_offload_stage_dir(stage_id: str, create: bool = True) -> Path:
+    sid = _sanitize_stage_id(stage_id)
+    base = OFFLOAD_STAGING_DIR.resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    target = (base / sid).resolve()
+    if os.path.commonpath([str(target).lower(), str(base).lower()]) != str(base).lower():
+        raise PermissionError("Invalid offload stageId")
+    if create:
+        target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _cleanup_stale_offload_dirs(max_age_sec: int = 86400) -> None:
+    try:
+        if not OFFLOAD_STAGING_DIR.exists():
+            return
+        now = time.time()
+        for entry in OFFLOAD_STAGING_DIR.iterdir():
+            try:
+                if entry.is_dir() and (now - entry.stat().st_mtime) > max_age_sec:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def _prepare_local_drag_files(rt: CompanionRuntime, host_id: str, paths: list[str]) -> list[str]:
@@ -3284,6 +3318,9 @@ def make_handler(rt: CompanionRuntime):
                 if route == "/api/file/upload":
                     self._handle_upload(qs)
                     return
+                if route == "/api/offload/stage":
+                    self._handle_offload_stage(qs)
+                    return
                 if route == "/api/fleet/proxy":
                     self._handle_fleet_proxy(qs, method="POST")
                     return
@@ -3488,6 +3525,46 @@ def make_handler(rt: CompanionRuntime):
                 elif route == "/api/jobs/clear":
                     removed = rt.jobs.clear_finished()
                     self._send_json(HTTPStatus.OK, {"ok": True, "removed": removed, "snapshot": rt.jobs.snapshot()})
+                elif route == "/api/offload/enqueue":
+                    stage_dir = _resolve_offload_stage_dir(str(body.get("stageId", "")), create=False)
+                    if not stage_dir.is_dir():
+                        raise FileNotFoundError("Offload staging folder not found")
+                    job_type = str(body.get("type", "")).strip()
+                    raw_payload = dict(body.get("payload") or body)
+                    raw_payload.pop("type", None)
+                    raw_payload.pop("stageId", None)
+                    base_str = str(stage_dir.resolve())
+                    if job_type == "merge":
+                        staged_names = [str(n) for n in (body.get("stagedNames") or raw_payload.get("stagedNames") or []) if str(n).strip()]
+                        resolved_paths: list[str] = []
+                        for sname in staged_names:
+                            cand = (stage_dir / os.path.basename(sname)).resolve()
+                            if os.path.commonpath([str(cand).lower(), base_str.lower()]) != base_str.lower() or not cand.is_file():
+                                raise FileNotFoundError(f"Staged file missing: {os.path.basename(sname)}")
+                            resolved_paths.append(str(cand))
+                        if len(resolved_paths) < 2:
+                            raise ValueError("Select at least 2 staged clips to merge")
+                        raw_payload["paths"] = resolved_paths
+                        raw_payload["outDir"] = base_str
+                    else:
+                        sname = os.path.basename(str(body.get("stagedName") or raw_payload.get("stagedName") or "").strip())
+                        if not sname:
+                            raise ValueError("stagedName is required")
+                        cand = (stage_dir / sname).resolve()
+                        if os.path.commonpath([str(cand).lower(), base_str.lower()]) != base_str.lower() or not cand.is_file():
+                            raise FileNotFoundError(f"Staged file missing: {sname}")
+                        raw_payload["path"] = str(cand)
+                    raw_payload["hostId"] = rt.config.data["host_id"]
+                    raw_payload["saveMode"] = "copy"
+                    raw_payload["recycleOriginal"] = False
+                    job = rt.jobs.enqueue(job_type, raw_payload)
+                    self._send_json(HTTPStatus.OK, {"ok": True, "job": job, "snapshot": rt.jobs.snapshot()})
+                elif route == "/api/offload/cleanup":
+                    stage_dir = _resolve_offload_stage_dir(str(body.get("stageId", "")), create=False)
+                    if stage_dir.exists():
+                        shutil.rmtree(stage_dir, ignore_errors=True)
+                    _cleanup_stale_offload_dirs()
+                    self._send_json(HTTPStatus.OK, {"ok": True})
                 elif route == "/api/system/prepare-drag":
                     if not self._is_loopback():
                         raise PermissionError("Localhost only")
@@ -3837,20 +3914,11 @@ def make_handler(rt: CompanionRuntime):
             rt.log(f"Backed up {backed_up} item(s) to rclone remote: {remote_dest}")
             self._send_json(HTTPStatus.OK, {"backedUpCount": backed_up, "destination": remote_dest})
 
-        def _handle_upload(self, qs: dict[str, list[str]]) -> None:
-            raw_dir = (qs.get("dir") or [""])[0]
-            raw_name = (qs.get("name") or [self.headers.get("X-File-Name", "")])[0]
-            conflict = (qs.get("conflict") or ["rename"])[0]
-            safe_dir = rt.config.resolve_safe_path(raw_dir)
-            if not os.path.isdir(safe_dir):
-                raise NotADirectoryError(f"Destination is not a directory: {safe_dir}")
-
+        def _receive_file_into_dir(self, safe_dir: str, raw_name: str, conflict: str = "rename") -> tuple[str, int, bool]:
             target = _resolve_unique_dest(safe_dir, raw_name, conflict)
             if target is None:
-                self._send_json(HTTPStatus.OK, {"ok": True, "skipped": True, "path": os.path.join(safe_dir, os.path.basename(raw_name)), "sizeBytes": 0})
-                return
+                return os.path.join(safe_dir, os.path.basename(raw_name)), 0, True
 
-            rt.config.resolve_safe_path(target)
             content_length = int(self.headers.get("Content-Length", "0"))
             tmp_path = os.path.join(safe_dir, f".deckvault_upload_{uuid.uuid4().hex}")
             written = 0
@@ -3875,7 +3943,22 @@ def make_handler(rt: CompanionRuntime):
                     except OSError:
                         pass
                 raise
+            return target, written, False
 
+        def _handle_upload(self, qs: dict[str, list[str]]) -> None:
+            raw_dir = (qs.get("dir") or [""])[0]
+            raw_name = (qs.get("name") or [self.headers.get("X-File-Name", "")])[0]
+            conflict = (qs.get("conflict") or ["rename"])[0]
+            safe_dir = rt.config.resolve_safe_path(raw_dir)
+            if not os.path.isdir(safe_dir):
+                raise NotADirectoryError(f"Destination is not a directory: {safe_dir}")
+
+            target, written, skipped = self._receive_file_into_dir(safe_dir, raw_name, conflict)
+            if skipped:
+                self._send_json(HTTPStatus.OK, {"ok": True, "skipped": True, "path": target, "sizeBytes": 0})
+                return
+
+            rt.config.resolve_safe_path(target)
             is_media = 1 if classify_media_type(target) in ("video", "image") else 0
             rt.indexer.adjust_ancestors(target, written, 1, is_media)
             rt.log(f"Uploaded {os.path.basename(target)} ({written / (1024*1024):.1f} MB) -> {safe_dir}")
@@ -3883,6 +3966,21 @@ def make_handler(rt: CompanionRuntime):
                 "ok": True,
                 "path": target,
                 "name": os.path.basename(target),
+                "sizeBytes": written,
+            })
+
+        def _handle_offload_stage(self, qs: dict[str, list[str]]) -> None:
+            _cleanup_stale_offload_dirs()
+            stage_id = (qs.get("stageId") or [""])[0]
+            raw_name = (qs.get("name") or [self.headers.get("X-File-Name", "clip.mp4")])[0]
+            stage_dir = _resolve_offload_stage_dir(stage_id, create=True)
+            target, written, _ = self._receive_file_into_dir(str(stage_dir), raw_name, "rename")
+            rt.log(f"Staged offload media {os.path.basename(target)} ({written / (1024*1024):.1f} MB) [{stage_dir.name}]")
+            self._send_json(HTTPStatus.OK, {
+                "ok": True,
+                "stageId": stage_dir.name,
+                "stagedName": os.path.basename(target),
+                "path": target,
                 "sizeBytes": written,
             })
 
