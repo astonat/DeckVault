@@ -11,3 +11,5 @@
 -dontwarn okio.**
 -keep class io.github.anilbeesetti.nextlib.** { *; }
 -dontwarn io.github.anilbeesetti.nextlib.**
+-keep class org.videolan.libvlc.** { *; }
+-dontwarn org.videolan.libvlc.**

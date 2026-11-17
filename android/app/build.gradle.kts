@@ -10,10 +10,14 @@ android {
 
     defaultConfig {
         applicationId = "com.deckvault.app"
-        minSdk = 28
+                minSdk = 28
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.4.2"
+        versionCode = 7
+        versionName = "1.4.3"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
 
         vectorDrawables {
             useSupportLibrary = true
@@ -69,6 +73,9 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            pickFirsts += "lib/**/libc++_shared.so"
+        }
     }
 }
 
@@ -105,6 +112,7 @@ dependencies {
     implementation(libs.androidx.media3.effect)
     implementation(libs.androidx.media3.common)
     implementation(libs.nextlib.media3ext)
+    implementation(libs.libvlc.all)
 
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)

@@ -91,6 +91,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultDataSource
@@ -204,9 +205,10 @@ fun AudioPlayerOverlay(
             .setConstantBitrateSeekingEnabled(true)
             .setConstantBitrateSeekingAlwaysEnabled(true)
         val renderers = NextRenderersFactory(context)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             .setEnableDecoderFallback(true)
         ExoPlayer.Builder(context, renderers)
+            .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource, extractors))
             .build().apply {
                 playWhenReady = true

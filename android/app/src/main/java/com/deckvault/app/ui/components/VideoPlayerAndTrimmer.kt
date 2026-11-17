@@ -5,10 +5,13 @@ import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.content.res.AssetFileDescriptor
 import android.media.AudioManager
 import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Rational
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
@@ -111,6 +114,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -130,6 +134,11 @@ import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.Media as VlcMedia
+import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
+import org.videolan.libvlc.interfaces.IMedia
+import org.videolan.libvlc.util.VLCVideoLayout
 import com.deckvault.app.R
 import com.deckvault.app.data.DeckVaultApi
 import com.deckvault.app.data.LocalStorageRepository
@@ -147,14 +156,29 @@ import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-enum class PlayerAspectMode(val label: String, val fixedRatio: Float?, val resizeMode: Int) {
-    FIT("Fit", null, AspectRatioFrameLayout.RESIZE_MODE_FIT),
-    FILL("Fill", null, AspectRatioFrameLayout.RESIZE_MODE_ZOOM),
-    STRETCH("Stretch", null, AspectRatioFrameLayout.RESIZE_MODE_FILL),
-    RATIO_16_9("16:9", 16f / 9f, AspectRatioFrameLayout.RESIZE_MODE_FILL),
-    RATIO_9_16("9:16", 9f / 16f, AspectRatioFrameLayout.RESIZE_MODE_FILL),
-    RATIO_4_3("4:3", 4f / 3f, AspectRatioFrameLayout.RESIZE_MODE_FILL),
+enum class PlayerAspectMode(
+    val label: String,
+    val fixedRatio: Float?,
+    val resizeMode: Int,
+    val vlcScale: VlcMediaPlayer.ScaleType,
+) {
+    FIT("Fit", null, AspectRatioFrameLayout.RESIZE_MODE_FIT, VlcMediaPlayer.ScaleType.SURFACE_BEST_FIT),
+    FILL("Fill", null, AspectRatioFrameLayout.RESIZE_MODE_ZOOM, VlcMediaPlayer.ScaleType.SURFACE_FILL),
+    STRETCH("Stretch", null, AspectRatioFrameLayout.RESIZE_MODE_FILL, VlcMediaPlayer.ScaleType.SURFACE_FIT_SCREEN),
+    RATIO_16_9("16:9", 16f / 9f, AspectRatioFrameLayout.RESIZE_MODE_FILL, VlcMediaPlayer.ScaleType.SURFACE_16_9),
+    RATIO_9_16("9:16", 9f / 16f, AspectRatioFrameLayout.RESIZE_MODE_FILL, VlcMediaPlayer.ScaleType.SURFACE_BEST_FIT),
+    RATIO_4_3("4:3", 4f / 3f, AspectRatioFrameLayout.RESIZE_MODE_FILL, VlcMediaPlayer.ScaleType.SURFACE_4_3),
 }
+
+private enum class VideoEngineMode(val label: String) {
+    EXO("Exo"),
+    VLC("VLC"),
+}
+
+private val VLC_NATIVE_CONTAINERS = setOf(
+    "avi", "wmv", "asf", "flv", "vob", "mpg", "mpeg", "divx",
+    "rm", "rmvb", "ts", "mts", "m2ts", "mxf", "ogv", "3g2",
+)
 
 enum class ScreenRotationMode(val label: String, val orientationConst: Int) {
     AUTO("Auto", ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED),
@@ -193,10 +217,18 @@ fun VideoPlayerAndTrimmerOverlay(
     val context = LocalContext.current
     val view = LocalView.current
     val activity = remember(context) { context.findActivity() }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val audioManager = remember(context) { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val surfaces = LocalDeckSurfaces.current
 
+    val lowerExt = remember(file.name) { file.name.substringAfterLast('.', "").lowercase() }
+    val defaultEngine = remember(file.path, lowerExt) {
+        if (lowerExt in VLC_NATIVE_CONTAINERS) VideoEngineMode.VLC else VideoEngineMode.EXO
+    }
+
     // Playback & HUD state
+    var activeEngine by remember(file.path) { mutableStateOf(defaultEngine) }
+    var pendingEngineResumeMs by remember(file.path) { mutableLongStateOf(initialResumePositionMs) }
     var showControls by remember(file.path) { mutableStateOf(true) }
     var interactionNonce by remember { mutableIntStateOf(0) }
     var isFullscreen by remember { mutableStateOf(false) }
@@ -209,11 +241,13 @@ fun VideoPlayerAndTrimmerOverlay(
     var usedCompatibilityFallback by remember(file.path) { mutableStateOf(false) }
     var playbackErrorText by remember(file.path) { mutableStateOf<String?>(null) }
 
-    var isPlaying by remember(file.path) { mutableStateOf(autoPlay) }
+    var isPlaying by remember(file.path) { mutableStateOf(autoPlay && !initialOpenStudio) }
     var isBuffering by remember(file.path) { mutableStateOf(true) }
     var durationMs by remember(file.path) { mutableLongStateOf(file.meta?.durationMs ?: 0L) }
     var currentPosMs by remember(file.path) { mutableLongStateOf(initialResumePositionMs) }
     var resumeApplied by remember(file.path) { mutableStateOf(false) }
+    var vlcAudioTracks by remember(file.path) { mutableStateOf<List<PlayerTrackOption>>(emptyList()) }
+    var vlcSubTracks by remember(file.path) { mutableStateOf<List<PlayerTrackOption>>(emptyList()) }
 
     // Scrub & gesture HUD feedback
     var isSliderDragging by remember { mutableStateOf(false) }
@@ -317,8 +351,9 @@ fun VideoPlayerAndTrimmerOverlay(
         }
     }
 
-    // Build ExoPlayer with NextLib FFmpeg software+hardware renderers & tuned TS/AVI extractors
-    val player = remember(file.path) {
+    // Build ExoPlayer (when in Exo mode) and LibVLC Native Engine (when in VLC mode for AVI/TS/WMV/FLV/universal codecs)
+    val exoPlayer = remember(file.path, activeEngine) {
+        if (activeEngine != VideoEngineMode.EXO) return@remember null
         val httpFactory = OkHttpDataSource.Factory(api.okHttpClient)
         val dataSourceFactory = DefaultDataSource.Factory(context, httpFactory)
         val extractorsFactory = DefaultExtractorsFactory()
@@ -330,9 +365,10 @@ fun VideoPlayerAndTrimmerOverlay(
             )
             .setTsExtractorTimestampSearchBytes(600 * 1024)
         val renderersFactory = NextRenderersFactory(context)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             .setEnableDecoderFallback(true)
         ExoPlayer.Builder(context, renderersFactory)
+            .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory))
             .build().apply {
                 setSeekParameters(SeekParameters.CLOSEST_SYNC)
@@ -341,7 +377,81 @@ fun VideoPlayerAndTrimmerOverlay(
             }
     }
 
+    val vlcSession = remember(file.path, activeEngine) {
+        if (activeEngine != VideoEngineMode.VLC) return@remember null
+        val libVlc = LibVLC(
+            context.applicationContext,
+            arrayListOf(
+                "--no-drop-late-frames",
+                "--no-skip-frames",
+                "--http-reconnect",
+                "--network-caching=1200",
+                "--file-caching=500",
+            ),
+        )
+        libVlc to VlcMediaPlayer(libVlc)
+    }
+    var vlcAssetFd by remember { mutableStateOf<AssetFileDescriptor?>(null) }
+    var attachedVlcLayout by remember { mutableStateOf<VLCVideoLayout?>(null) }
+    var vlcAutoPausedInitial by remember(file.path, activeEngine) { mutableStateOf(false) }
+
     var liveTranscodeBaseMs by remember(file.path) { mutableLongStateOf(0L) }
+
+    fun engineCurrentRawPosMs(): Long = when (activeEngine) {
+        VideoEngineMode.VLC -> vlcSession?.second?.time?.coerceAtLeast(0L) ?: currentPosMs
+        VideoEngineMode.EXO -> exoPlayer?.currentPosition?.coerceAtLeast(0L) ?: currentPosMs
+    }
+
+    fun engineCurrentLogicalPosMs(): Long =
+        if (usedCompatibilityFallback) (liveTranscodeBaseMs + engineCurrentRawPosMs()) else engineCurrentRawPosMs()
+
+    fun engineDurationMs(): Long = when (activeEngine) {
+        VideoEngineMode.VLC -> vlcSession?.second?.length?.takeIf { it > 0L } ?: durationMs
+        VideoEngineMode.EXO -> exoPlayer?.duration?.takeIf { it > 0L && it != C.TIME_UNSET } ?: durationMs
+    }
+
+    fun engineIsPlaying(): Boolean = when (activeEngine) {
+        VideoEngineMode.VLC -> vlcSession?.second?.isPlaying == true
+        VideoEngineMode.EXO -> exoPlayer?.isPlaying == true
+    }
+
+    fun enginePlay() {
+        when (activeEngine) {
+            VideoEngineMode.VLC -> vlcSession?.second?.play()
+            VideoEngineMode.EXO -> exoPlayer?.play()
+        }
+        isPlaying = true
+    }
+
+    fun enginePause() {
+        when (activeEngine) {
+            VideoEngineMode.VLC -> vlcSession?.second?.pause()
+            VideoEngineMode.EXO -> exoPlayer?.pause()
+        }
+        isPlaying = false
+    }
+
+    fun engineSeekRaw(targetMs: Long) {
+        val safe = targetMs.coerceAtLeast(0L)
+        when (activeEngine) {
+            VideoEngineMode.VLC -> runCatching { vlcSession?.second?.setTime(safe, false) }
+            VideoEngineMode.EXO -> exoPlayer?.seekTo(safe)
+        }
+    }
+
+    fun switchToVlcEngine(reason: String, resumeMs: Long) {
+        if (activeEngine == VideoEngineMode.VLC) return
+        pendingEngineResumeMs = resumeMs.coerceAtLeast(0L)
+        resumeApplied = false
+        usedCompatibilityFallback = false
+        liveTranscodeBaseMs = 0L
+        activeUri = streamUrl
+        activeEngine = VideoEngineMode.VLC
+        gestureHudTitle = "VLC Native Engine"
+        gestureHudSub = reason
+        gestureHudFraction = -1f
+        hudNonce++
+    }
 
     fun triggerPcCompatibilityFallback(reason: String, resumeMs: Long) {
         val base = playableFallbackUrl ?: return
@@ -350,7 +460,9 @@ fun VideoPlayerAndTrimmerOverlay(
         val cleanBase = base.replace(Regex("([?&])start=[^&]*"), "")
         val sec = (resumeMs.coerceAtLeast(0L) / 1000.0)
         liveTranscodeBaseMs = resumeMs.coerceAtLeast(0L)
+        pendingEngineResumeMs = 0L
         activeUri = if (sec > 0.5) "$cleanBase&start=$sec" else cleanBase
+        activeEngine = VideoEngineMode.EXO
         gestureHudTitle = "Compatibility Stream"
         gestureHudSub = reason
         gestureHudFraction = -1f
@@ -359,21 +471,23 @@ fun VideoPlayerAndTrimmerOverlay(
 
     fun smartSeekTo(targetMs: Long) {
         val safeTarget = targetMs.coerceAtLeast(0L)
-        if (usedCompatibilityFallback && !playableFallbackUrl.isNullOrBlank() && !player.isCurrentMediaItemSeekable) {
+        val exo = exoPlayer
+        if (usedCompatibilityFallback && !playableFallbackUrl.isNullOrBlank() && activeEngine == VideoEngineMode.EXO && exo?.isCurrentMediaItemSeekable != true) {
             val base = playableFallbackUrl.replace(Regex("([?&])start=[^&]*"), "")
             val sec = safeTarget / 1000.0
             liveTranscodeBaseMs = safeTarget
             activeUri = if (sec > 0.2) "$base&start=$sec" else base
             currentPosMs = safeTarget
         } else {
-            player.seekTo(safeTarget)
+            engineSeekRaw(safeTarget)
             currentPosMs = safeTarget
         }
     }
 
-    // LoudnessEnhancer for 100%-200% software volume boost
+    // LoudnessEnhancer for 100%-200% software volume boost on ExoPlayer
     var loudnessEnhancer by remember { mutableStateOf<LoudnessEnhancer?>(null) }
-    DisposableEffect(player) {
+    DisposableEffect(exoPlayer) {
+        val player = exoPlayer ?: return@DisposableEffect onDispose {}
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 isBuffering = playbackState == Player.STATE_BUFFERING
@@ -383,11 +497,11 @@ fun VideoPlayerAndTrimmerOverlay(
                         durationMs = dur
                         if (studioEndMs <= 0L) studioEndMs = dur
                     }
-                    if (!resumeApplied && initialResumePositionMs > 2000L && dur > initialResumePositionMs + 4000L) {
+                    if (!resumeApplied && pendingEngineResumeMs > 2000L && dur > pendingEngineResumeMs + 3000L) {
                         resumeApplied = true
-                        player.seekTo(initialResumePositionMs)
+                        player.seekTo(pendingEngineResumeMs)
                         gestureHudTitle = "Resumed"
-                        gestureHudSub = Formatters.formatDuration(initialResumePositionMs)
+                        gestureHudSub = Formatters.formatDuration(pendingEngineResumeMs)
                         gestureHudFraction = -1f
                         hudNonce++
                     } else {
@@ -408,14 +522,15 @@ fun VideoPlayerAndTrimmerOverlay(
 
             override fun onTracksChanged(tracks: Tracks) {
                 currentTracks = tracks
-                if (!usedCompatibilityFallback && !playableFallbackUrl.isNullOrBlank()) {
+                if (!usedCompatibilityFallback) {
                     val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
                     val hasAnySupportedAudio = audioGroups.any { g ->
                         (0 until g.length).any { idx -> g.isTrackSupported(idx) }
                     }
-                    if (audioGroups.isNotEmpty() && !hasAnySupportedAudio) {
-                        triggerPcCompatibilityFallback(
-                            reason = "PC H.264 + AAC Stereo Transcode (Audio Fallback)",
+                    val expectsAudioFromMeta = file.meta?.audioCodec?.isNotBlank() == true
+                    if ((audioGroups.isNotEmpty() && !hasAnySupportedAudio) || (audioGroups.isEmpty() && expectsAudioFromMeta)) {
+                        switchToVlcEngine(
+                            reason = "Native Audio Decoder",
                             resumeMs = player.currentPosition,
                         )
                     }
@@ -423,9 +538,9 @@ fun VideoPlayerAndTrimmerOverlay(
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                if (!usedCompatibilityFallback && !playableFallbackUrl.isNullOrBlank()) {
-                    triggerPcCompatibilityFallback(
-                        reason = "Live PC H.264 Transcode",
+                if (!usedCompatibilityFallback) {
+                    switchToVlcEngine(
+                        reason = "Native Container & Audio Decoder",
                         resumeMs = player.currentPosition,
                     )
                 } else {
@@ -436,7 +551,7 @@ fun VideoPlayerAndTrimmerOverlay(
         player.addListener(listener)
         onDispose {
             val savedPos = if (usedCompatibilityFallback) (liveTranscodeBaseMs + player.currentPosition) else player.currentPosition
-            onSaveResumePosition(file.path, savedPos)
+            if (savedPos > 0L) onSaveResumePosition(file.path, savedPos)
             runCatching { loudnessEnhancer?.release() }
             loudnessEnhancer = null
             player.removeListener(listener)
@@ -444,10 +559,125 @@ fun VideoPlayerAndTrimmerOverlay(
         }
     }
 
-    // Prepare / update MediaItem whenever activeUri or external subtitle changes
-    LaunchedEffect(activeUri, externalSubUri) {
+    // LibVLC Native Engine lifecycle + event listener (plays AVI/MP2/ADPCM/WMA, TS, WMV, FLV, VOB, MKV natively)
+    DisposableEffect(vlcSession) {
+        val sess = vlcSession ?: return@DisposableEffect onDispose {}
+        val libVlc = sess.first
+        val vlcPlayer = sess.second
+
+        fun refreshVlcTracks() {
+            val curAudio = runCatching { vlcPlayer.audioTrack }.getOrDefault(-1)
+            vlcAudioTracks = runCatching {
+                vlcPlayer.audioTracks?.filter { it.id >= 0 }?.mapIndexed { idx, td ->
+                    PlayerTrackOption(0, td.id, td.name ?: "Audio ${idx + 1}", "", td.id == curAudio)
+                }
+            }.getOrNull().orEmpty()
+            val curSpu = runCatching { vlcPlayer.spuTrack }.getOrDefault(-1)
+            vlcSubTracks = runCatching {
+                vlcPlayer.spuTracks?.filter { it.id >= 0 }?.mapIndexed { idx, td ->
+                    PlayerTrackOption(0, td.id, td.name ?: "Subtitle ${idx + 1}", "", td.id == curSpu)
+                }
+            }.getOrNull().orEmpty()
+        }
+
+        vlcPlayer.setEventListener { ev ->
+            val evType = ev.type
+            val evTime = ev.timeChanged
+            val evLen = ev.lengthChanged
+            val evBuf = ev.buffering
+            mainHandler.post {
+                if (vlcPlayer.isReleased) return@post
+                when (evType) {
+                    VlcMediaPlayer.Event.Opening -> {
+                        isBuffering = true
+                    }
+                    VlcMediaPlayer.Event.Buffering -> {
+                        isBuffering = evBuf < 100f
+                    }
+                    VlcMediaPlayer.Event.Playing -> {
+                        isPlaying = true
+                        isBuffering = false
+                        interactionNonce++
+                        runCatching { vlcPlayer.rate = if (isBoost2x) 2.0f else playbackSpeed }
+                        runCatching { vlcPlayer.volume = if (volumePct > 100) volumePct.coerceIn(100, 200) else 100 }
+                        refreshVlcTracks()
+                        if ((!autoPlay || initialOpenStudio) && !vlcAutoPausedInitial) {
+                            vlcAutoPausedInitial = true
+                            vlcPlayer.pause()
+                            isPlaying = false
+                        } else if (!resumeApplied && pendingEngineResumeMs > 2000L) {
+                            val dur = vlcPlayer.length
+                            if (dur <= 0L || dur > pendingEngineResumeMs + 3000L) {
+                                resumeApplied = true
+                                if (vlcPlayer.isSeekable) {
+                                    vlcPlayer.setTime(pendingEngineResumeMs, false)
+                                    gestureHudTitle = "Resumed"
+                                    gestureHudSub = Formatters.formatDuration(pendingEngineResumeMs)
+                                    gestureHudFraction = -1f
+                                    hudNonce++
+                                }
+                            }
+                        } else {
+                            resumeApplied = true
+                        }
+                    }
+                    VlcMediaPlayer.Event.Paused, VlcMediaPlayer.Event.Stopped -> {
+                        isPlaying = false
+                        isBuffering = false
+                    }
+                    VlcMediaPlayer.Event.LengthChanged -> {
+                        if (evLen > 0L) {
+                            durationMs = evLen
+                            if (studioEndMs <= 0L) studioEndMs = evLen
+                        }
+                    }
+                    VlcMediaPlayer.Event.TimeChanged -> {
+                        if (!isSliderDragging && evTime >= 0L) {
+                            currentPosMs = evTime
+                        }
+                    }
+                    VlcMediaPlayer.Event.ESAdded, VlcMediaPlayer.Event.ESDeleted, VlcMediaPlayer.Event.ESSelected -> {
+                        refreshVlcTracks()
+                    }
+                    VlcMediaPlayer.Event.EndReached -> {
+                        isPlaying = false
+                        isBuffering = false
+                        if (sleepMinutes == -1) onClose()
+                    }
+                    VlcMediaPlayer.Event.EncounteredError -> {
+                        isBuffering = false
+                        if (!usedCompatibilityFallback && !playableFallbackUrl.isNullOrBlank()) {
+                            triggerPcCompatibilityFallback(
+                                reason = "Live PC H.264 + AAC Transcode",
+                                resumeMs = currentPosMs,
+                            )
+                        } else {
+                            playbackErrorText = "Unable to decode video or audio stream"
+                        }
+                    }
+                }
+            }
+        }
+
+        onDispose {
+            val savedPos = currentPosMs.coerceAtLeast(0L)
+            if (savedPos > 0L) onSaveResumePosition(file.path, savedPos)
+            runCatching { vlcPlayer.setEventListener(null) }
+            runCatching { vlcPlayer.detachViews() }
+            attachedVlcLayout = null
+            runCatching { vlcPlayer.stop() }
+            runCatching { vlcPlayer.release() }
+            runCatching { libVlc.release() }
+            runCatching { vlcAssetFd?.close() }
+            vlcAssetFd = null
+        }
+    }
+
+    // Prepare / update ExoPlayer MediaItem whenever activeUri, engine, or external subtitle changes
+    LaunchedEffect(exoPlayer, activeUri, externalSubUri) {
+        val player = exoPlayer ?: return@LaunchedEffect
         playbackErrorText = null
-        val resumeMs = if (usedCompatibilityFallback) 0L else (player.currentPosition.takeIf { it > 1500L } ?: 0L)
+        val resumeMs = if (usedCompatibilityFallback) 0L else (pendingEngineResumeMs.takeIf { it > 1500L } ?: 0L)
         val subs = buildList {
             addAll(autoSubtitles)
             externalSubUri?.let { sub ->
@@ -470,22 +700,58 @@ fun VideoPlayerAndTrimmerOverlay(
         player.prepare()
     }
 
-    // Apply LoudnessEnhancer whenever volumePct > 100
-    LaunchedEffect(volumePct, loudnessEnhancer) {
-        val le = loudnessEnhancer ?: return@LaunchedEffect
-        runCatching {
-            if (volumePct > 100) {
-                le.enabled = true
-                le.setTargetGain(((volumePct - 100) * 14).coerceIn(0, 1400))
-            } else {
-                le.enabled = false
+    // Prepare / update LibVLC Media whenever activeUri, engine, or external subtitle changes
+    LaunchedEffect(vlcSession, activeUri, externalSubUri) {
+        val sess = vlcSession ?: return@LaunchedEffect
+        val libVlc = sess.first
+        val vlcPlayer = sess.second
+        playbackErrorText = null
+        isBuffering = true
+        resumeApplied = false
+        runCatching { vlcAssetFd?.close() }
+        vlcAssetFd = null
+        val vlcMedia = when {
+            activeUri.startsWith("content://", ignoreCase = true) -> {
+                val afd = runCatching { context.contentResolver.openAssetFileDescriptor(Uri.parse(activeUri), "r") }.getOrNull()
+                vlcAssetFd = afd
+                if (afd != null) VlcMedia(libVlc, afd) else VlcMedia(libVlc, Uri.parse(activeUri))
             }
+            activeUri.startsWith("/") -> VlcMedia(libVlc, activeUri)
+            else -> VlcMedia(libVlc, Uri.parse(activeUri))
+        }
+        vlcMedia.setHWDecoderEnabled(true, false)
+        vlcMedia.addOption(":http-reconnect")
+        vlcPlayer.media = vlcMedia
+        vlcMedia.release()
+        externalSubUri?.let { sub ->
+            runCatching { vlcPlayer.addSlave(IMedia.Slave.Type.Subtitle, sub, true) }
+        }
+        vlcPlayer.play()
+    }
+
+    // Apply volume boost (LoudnessEnhancer for ExoPlayer, native 0..200 software amplification for LibVLC)
+    LaunchedEffect(volumePct, loudnessEnhancer, vlcSession) {
+        val le = loudnessEnhancer
+        if (le != null) {
+            runCatching {
+                if (volumePct > 100) {
+                    le.enabled = true
+                    le.setTargetGain(((volumePct - 100) * 14).coerceIn(0, 1400))
+                } else {
+                    le.enabled = false
+                }
+            }
+        }
+        vlcSession?.second?.let { vp ->
+            runCatching { vp.volume = if (volumePct > 100) volumePct.coerceIn(100, 200) else 100 }
         }
     }
 
     // Apply playback speed
-    LaunchedEffect(playbackSpeed, isBoost2x) {
-        player.setPlaybackSpeed(if (isBoost2x) 2.0f else playbackSpeed)
+    LaunchedEffect(playbackSpeed, isBoost2x, exoPlayer, vlcSession) {
+        val targetRate = if (isBoost2x) 2.0f else playbackSpeed
+        exoPlayer?.setPlaybackSpeed(targetRate)
+        vlcSession?.second?.let { vp -> runCatching { vp.rate = targetRate } }
     }
 
     // Keep screen on + immersive system bars + restore orientation/brightness on exit
@@ -519,20 +785,19 @@ fun VideoPlayerAndTrimmerOverlay(
     }
 
     // Poll position + A-B loop check
-    LaunchedEffect(player, loopStartMs, loopEndMs) {
+    LaunchedEffect(exoPlayer, vlcSession, activeEngine, loopStartMs, loopEndMs) {
         while (true) {
             if (!isSliderDragging) {
-                val rawPos = player.currentPosition.coerceAtLeast(0L)
-                val pos = if (usedCompatibilityFallback) (liveTranscodeBaseMs + rawPos) else rawPos
+                val pos = engineCurrentLogicalPosMs()
                 currentPosMs = pos
-                val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET }
-                if (dur != null && dur > 0L) {
+                val dur = engineDurationMs()
+                if (dur > 0L) {
                     durationMs = dur
                     if (studioEndMs <= 0L) studioEndMs = dur
                 }
                 val a = loopStartMs
                 val b = loopEndMs
-                if (a != null && b != null && b > a + 300L && pos >= b && player.isPlaying) {
+                if (a != null && b != null && b > a + 300L && pos >= b && engineIsPlaying()) {
                     smartSeekTo(a)
                 }
             }
@@ -571,7 +836,7 @@ fun VideoPlayerAndTrimmerOverlay(
             delay(60_000L)
             sleepMinutes = (mins - 1).takeIf { it > 0 }
             if (mins - 1 <= 0) {
-                player.pause()
+                enginePause()
                 onClose()
             }
         }
@@ -656,9 +921,9 @@ fun VideoPlayerAndTrimmerOverlay(
                         },
                         onDoubleTap = { offset ->
                             if (isLocked || studioCropActive) return@detectTapGestures
-                            val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET } ?: durationMs
+                            val dur = engineDurationMs()
                             val stepMs = seekStepSeconds.coerceAtLeast(5) * 1000L
-                            val basePos = if (usedCompatibilityFallback) (liveTranscodeBaseMs + player.currentPosition.coerceAtLeast(0L)) else player.currentPosition.coerceAtLeast(0L)
+                            val basePos = engineCurrentLogicalPosMs()
                             when {
                                 offset.x < boxWidthPx * 0.34f -> {
                                     val tgt = (basePos - stepMs).coerceAtLeast(0L)
@@ -677,11 +942,11 @@ fun VideoPlayerAndTrimmerOverlay(
                                     hudNonce++
                                 }
                                 else -> {
-                                    if (player.isPlaying) {
-                                        player.pause()
+                                    if (engineIsPlaying()) {
+                                        enginePause()
                                         gestureHudTitle = "Paused"
                                     } else {
-                                        player.play()
+                                        enginePlay()
                                         gestureHudTitle = "Playing"
                                     }
                                     gestureHudSub = null
@@ -701,7 +966,7 @@ fun VideoPlayerAndTrimmerOverlay(
                             if (isLocked || studioCropActive) return@awaitPointerEventScope
                         val startPos = down.position
                         var mode = ActiveDragGesture.NONE
-                        var seekStartMs = (if (usedCompatibilityFallback) (liveTranscodeBaseMs + player.currentPosition) else player.currentPosition).coerceAtLeast(0L)
+                        var seekStartMs = engineCurrentLogicalPosMs()
                         var seekTargetMs = seekStartMs
                         var lastLiveSeekAt = 0L
                         var startBrightness = brightnessFrac
@@ -749,7 +1014,7 @@ fun VideoPlayerAndTrimmerOverlay(
                                         mode = ActiveDragGesture.ZOOM_PAN
                                     } else if (abs(totalDx) > abs(totalDy) * 1.15f) {
                                         mode = ActiveDragGesture.SEEK
-                                        seekStartMs = (if (usedCompatibilityFallback) (liveTranscodeBaseMs + player.currentPosition) else player.currentPosition).coerceAtLeast(0L)
+                                        seekStartMs = engineCurrentLogicalPosMs()
                                     } else if (startPos.x < boxWidthPx * 0.45f) {
                                         mode = ActiveDragGesture.BRIGHTNESS
                                         startBrightness = brightnessFrac
@@ -770,7 +1035,7 @@ fun VideoPlayerAndTrimmerOverlay(
                                     ch.consume()
                                 }
                                 ActiveDragGesture.SEEK -> {
-                                    val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET } ?: durationMs.coerceAtLeast(1000L)
+                                    val dur = engineDurationMs().coerceAtLeast(1000L)
                                     val spanMs = dur.coerceIn(20_000L, 120_000L)
                                     val deltaMs = ((totalDx / boxWidthPx) * spanMs).toLong()
                                     seekTargetMs = (seekStartMs + deltaMs).coerceIn(0L, dur)
@@ -781,9 +1046,10 @@ fun VideoPlayerAndTrimmerOverlay(
                                     gestureHudFraction = seekTargetMs.toFloat() / dur.coerceAtLeast(1L).toFloat()
                                     hudNonce++
                                     val now = android.os.SystemClock.uptimeMillis()
-                                    if (now - lastLiveSeekAt > 120L && (!usedCompatibilityFallback || player.isCurrentMediaItemSeekable)) {
+                                    val exoSeekable = exoPlayer?.isCurrentMediaItemSeekable == true
+                                    if (now - lastLiveSeekAt > 120L && (!usedCompatibilityFallback || exoSeekable)) {
                                         lastLiveSeekAt = now
-                                        player.seekTo(seekTargetMs)
+                                        engineSeekRaw(seekTargetMs)
                                     }
                                     ch.consume()
                                 }
@@ -837,22 +1103,42 @@ fun VideoPlayerAndTrimmerOverlay(
                 }
 
             Box(modifier = videoBoxMod) {
-                AndroidView(
-                    factory = { ctx ->
-                        (android.view.LayoutInflater.from(ctx)
-                            .inflate(R.layout.deckvault_texture_player_view, null) as PlayerView).apply {
-                            this.player = player
-                            useController = false
-                            resizeMode = aspectMode.resizeMode
-                            keepScreenOn = true
-                        }
-                    },
-                    update = { pv ->
-                        if (pv.player !== player) pv.player = player
-                        pv.resizeMode = aspectMode.resizeMode
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
+                if (activeEngine == VideoEngineMode.VLC && vlcSession != null) {
+                    val vp = vlcSession.second
+                    AndroidView(
+                        factory = { ctx ->
+                            VLCVideoLayout(ctx).apply {
+                                keepScreenOn = true
+                            }
+                        },
+                        update = { layout ->
+                            if (attachedVlcLayout !== layout) {
+                                attachedVlcLayout = layout
+                                runCatching { vp.detachViews() }
+                                vp.attachViews(layout, null, true, true)
+                            }
+                            vp.videoScale = aspectMode.vlcScale
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else if (exoPlayer != null) {
+                    AndroidView(
+                        factory = { ctx ->
+                            (android.view.LayoutInflater.from(ctx)
+                                .inflate(R.layout.deckvault_texture_player_view, null) as PlayerView).apply {
+                                this.player = exoPlayer
+                                useController = false
+                                resizeMode = aspectMode.resizeMode
+                                keepScreenOn = true
+                            }
+                        },
+                        update = { pv ->
+                            if (pv.player !== exoPlayer) pv.player = exoPlayer
+                            pv.resizeMode = aspectMode.resizeMode
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
 
                 if (studioExpanded && studioCropActive) {
                     VisualCropOverlay(
@@ -1002,7 +1288,11 @@ fun VideoPlayerAndTrimmerOverlay(
                                 val res = Formatters.formatResolution(m.width, m.height)
                                 if (res.isNotBlank()) append(" • $res")
                             }
-                            if (usedCompatibilityFallback) append(" • Live Transcode")
+                            if (usedCompatibilityFallback) {
+                                append(" • Live Transcode")
+                            } else if (activeEngine == VideoEngineMode.VLC) {
+                                append(" • VLC Native")
+                            }
                             if (loopStartMs != null && loopEndMs != null) {
                                 append(" • Loop ${Formatters.formatDuration(loopStartMs!!)}–${Formatters.formatDuration(loopEndMs!!)}")
                             }
@@ -1030,7 +1320,7 @@ fun VideoPlayerAndTrimmerOverlay(
                         onClick = {
                             interactionNonce++
                             studioExpanded = !studioExpanded
-                            if (studioExpanded) player.pause() else studioCropActive = false
+                            if (studioExpanded) enginePause() else studioCropActive = false
                         },
                         leadingIcon = { Icon(Icons.Rounded.ContentCut, null, Modifier.size(16.dp)) },
                         label = { Text(if (studioExpanded) "Hide Studio" else "Studio") },
@@ -1109,8 +1399,7 @@ fun VideoPlayerAndTrimmerOverlay(
                         onSetStartEnd = { s, e ->
                             studioStartMs = s
                             studioEndMs = e
-                            player.seekTo(s)
-                            currentPosMs = s
+                            smartSeekTo(s)
                         },
                         onToggleCropActive = { studioCropActive = it },
                         onCropChange = { studioCrop = it },
@@ -1194,10 +1483,9 @@ fun VideoPlayerAndTrimmerOverlay(
                             IconButton(
                                 onClick = {
                                     interactionNonce++
-                                    player.pause()
-                                    val t = (player.currentPosition - 33L).coerceAtLeast(0L)
-                                    player.seekTo(t)
-                                    currentPosMs = t
+                                    enginePause()
+                                    val t = (engineCurrentLogicalPosMs() - 33L).coerceAtLeast(0L)
+                                    smartSeekTo(t)
                                 },
                             ) {
                                 Text("-1f", color = Color.White, style = MaterialTheme.typography.labelMedium)
@@ -1205,8 +1493,8 @@ fun VideoPlayerAndTrimmerOverlay(
                             IconButton(
                                 onClick = {
                                     interactionNonce++
-                                    val t = (player.currentPosition - seekStepSeconds * 1000L).coerceAtLeast(0L)
-                                    player.seekTo(t)
+                                    val t = (engineCurrentLogicalPosMs() - seekStepSeconds * 1000L).coerceAtLeast(0L)
+                                    smartSeekTo(t)
                                 },
                             ) {
                                 Icon(Icons.Rounded.FastRewind, contentDescription = "Rewind", tint = Color.White)
@@ -1214,7 +1502,7 @@ fun VideoPlayerAndTrimmerOverlay(
                             FilledIconButton(
                                 onClick = {
                                     interactionNonce++
-                                    if (player.isPlaying) player.pause() else player.play()
+                                    if (engineIsPlaying()) enginePause() else enginePlay()
                                 },
                                 colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
                                 modifier = Modifier.size(44.dp),
@@ -1227,9 +1515,9 @@ fun VideoPlayerAndTrimmerOverlay(
                             IconButton(
                                 onClick = {
                                     interactionNonce++
-                                    val dur = player.duration.takeIf { it > 0 && it != C.TIME_UNSET } ?: durationMs
-                                    val t = (player.currentPosition + seekStepSeconds * 1000L).let { if (dur > 0) it.coerceAtMost(dur) else it }
-                                    player.seekTo(t)
+                                    val dur = engineDurationMs()
+                                    val t = (engineCurrentLogicalPosMs() + seekStepSeconds * 1000L).let { if (dur > 0) it.coerceAtMost(dur) else it }
+                                    smartSeekTo(t)
                                 },
                             ) {
                                 Icon(Icons.Rounded.FastForward, contentDescription = "Forward", tint = Color.White)
@@ -1237,10 +1525,9 @@ fun VideoPlayerAndTrimmerOverlay(
                             IconButton(
                                 onClick = {
                                     interactionNonce++
-                                    player.pause()
-                                    val t = player.currentPosition + 33L
-                                    player.seekTo(t)
-                                    currentPosMs = t
+                                    enginePause()
+                                    val t = engineCurrentLogicalPosMs() + 33L
+                                    smartSeekTo(t)
                                 },
                             ) {
                                 Text("+1f", color = Color.White, style = MaterialTheme.typography.labelMedium)
@@ -1290,7 +1577,25 @@ fun VideoPlayerAndTrimmerOverlay(
                             AssistChip(
                                 onClick = {
                                     interactionNonce++
-                                    val pos = player.currentPosition.coerceAtLeast(0L)
+                                    val nextEngine = if (activeEngine == VideoEngineMode.VLC) VideoEngineMode.EXO else VideoEngineMode.VLC
+                                    pendingEngineResumeMs = engineCurrentLogicalPosMs()
+                                    resumeApplied = false
+                                    usedCompatibilityFallback = false
+                                    liveTranscodeBaseMs = 0L
+                                    activeUri = streamUrl
+                                    activeEngine = nextEngine
+                                    gestureHudTitle = "Decoder: ${nextEngine.label}"
+                                    gestureHudSub = if (nextEngine == VideoEngineMode.VLC) "LibVLC Universal Engine" else "ExoPlayer + FFmpeg"
+                                    gestureHudFraction = -1f
+                                    hudNonce++
+                                },
+                                label = { Text(activeEngine.label) },
+                            )
+
+                            AssistChip(
+                                onClick = {
+                                    interactionNonce++
+                                    val pos = engineCurrentLogicalPosMs()
                                     when {
                                         loopStartMs == null -> {
                                             loopStartMs = pos
@@ -1324,7 +1629,7 @@ fun VideoPlayerAndTrimmerOverlay(
                                 Icon(Icons.Rounded.Flip, contentDescription = "Mirror Flip Preview", tint = if (mirrorPreview) MaterialTheme.colorScheme.primary else Color.White)
                             }
 
-                            IconButton(onClick = { interactionNonce++; onSaveSnapshot(file.path, player.currentPosition.coerceAtLeast(0L)) }) {
+                            IconButton(onClick = { interactionNonce++; onSaveSnapshot(file.path, engineCurrentLogicalPosMs()) }) {
                                 Icon(Icons.Rounded.CameraAlt, contentDescription = "Save Frame Snapshot", tint = Color.White)
                             }
 
@@ -1349,33 +1654,57 @@ fun VideoPlayerAndTrimmerOverlay(
     }
 
     if (showTracksDialog) {
-        val audioOpts = remember(currentTracks) { extractTrackOptions(currentTracks, C.TRACK_TYPE_AUDIO) }
-        val textOpts = remember(currentTracks) { extractTrackOptions(currentTracks, C.TRACK_TYPE_TEXT) }
+        val audioOpts = remember(activeEngine, currentTracks, vlcAudioTracks) {
+            if (activeEngine == VideoEngineMode.VLC) vlcAudioTracks
+            else extractTrackOptions(currentTracks, C.TRACK_TYPE_AUDIO)
+        }
+        val textOpts = remember(activeEngine, currentTracks, vlcSubTracks) {
+            if (activeEngine == VideoEngineMode.VLC) vlcSubTracks
+            else extractTrackOptions(currentTracks, C.TRACK_TYPE_TEXT)
+        }
         TracksAndSleepDialog(
             audioTracks = audioOpts,
             subtitleTracks = textOpts,
             sleepMinutesRemaining = sleepMinutes,
             onSelectAudioTrack = { opt ->
-                val grp = currentTracks.groups.getOrNull(opt.groupIndex)?.mediaTrackGroup
-                if (grp != null) {
-                    player.trackSelectionParameters = player.trackSelectionParameters
-                        .buildUpon()
-                        .setOverrideForType(TrackSelectionOverride(grp, opt.trackIndex))
-                        .build()
+                if (activeEngine == VideoEngineMode.VLC) {
+                    val vp = vlcSession?.second
+                    if (vp != null) {
+                        vp.setAudioTrack(opt.trackIndex)
+                        val cur = vp.audioTrack
+                        vlcAudioTracks = vlcAudioTracks.map { it.copy(selected = it.trackIndex == cur) }
+                    }
+                } else if (exoPlayer != null) {
+                    val grp = currentTracks.groups.getOrNull(opt.groupIndex)?.mediaTrackGroup
+                    if (grp != null) {
+                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                            .buildUpon()
+                            .setOverrideForType(TrackSelectionOverride(grp, opt.trackIndex))
+                            .build()
+                    }
                 }
             },
             onSelectSubtitleTrack = { opt ->
-                val builder = player.trackSelectionParameters.buildUpon()
-                if (opt == null) {
-                    builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                } else {
-                    val grp = currentTracks.groups.getOrNull(opt.groupIndex)?.mediaTrackGroup
-                    if (grp != null) {
-                        builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                        builder.setOverrideForType(TrackSelectionOverride(grp, opt.trackIndex))
+                if (activeEngine == VideoEngineMode.VLC) {
+                    val vp = vlcSession?.second
+                    if (vp != null) {
+                        vp.setSpuTrack(opt?.trackIndex ?: -1)
+                        val cur = vp.spuTrack
+                        vlcSubTracks = vlcSubTracks.map { it.copy(selected = it.trackIndex == cur) }
                     }
+                } else if (exoPlayer != null) {
+                    val builder = exoPlayer.trackSelectionParameters.buildUpon()
+                    if (opt == null) {
+                        builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                    } else {
+                        val grp = currentTracks.groups.getOrNull(opt.groupIndex)?.mediaTrackGroup
+                        if (grp != null) {
+                            builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            builder.setOverrideForType(TrackSelectionOverride(grp, opt.trackIndex))
+                        }
+                    }
+                    exoPlayer.trackSelectionParameters = builder.build()
                 }
-                player.trackSelectionParameters = builder.build()
             },
             onPickExternalSubtitle = {
                 subtitlePicker.launch(arrayOf("application/x-subrip", "text/vtt", "text/*", "*/*"))
