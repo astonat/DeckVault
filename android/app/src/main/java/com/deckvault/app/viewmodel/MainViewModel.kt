@@ -15,6 +15,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.deckvault.app.data.AllFilesPermissionRequiredException
 import com.deckvault.app.data.DeckVaultApi
+import com.deckvault.app.data.HttpStatusException
 import com.deckvault.app.data.LanDiscovery
 import com.deckvault.app.data.LocalStorageRepository
 import com.deckvault.app.data.PrefsRepository
@@ -71,6 +72,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -1077,8 +1079,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun submitExportGif(req: GifExportRequest, offloadHost: SavedHost?) {
         val name = File(req.path).name.ifBlank { "Video" }
         val host = activeHost()
-        val tgt = if (host.isLocalDevice) JobExecutionTarget.PC_OFFLOAD else JobExecutionTarget.PC_REMOTE
-        val pc = if (host.isLocalDevice) (offloadHost ?: pairedPcHosts().firstOrNull()) else host
+        val isAndroidSource = host.isLocalDevice || host.os.equals("Android", ignoreCase = true)
+        val tgt = if (isAndroidSource) JobExecutionTarget.PC_OFFLOAD else JobExecutionTarget.PC_REMOTE
+        val pc = if (isAndroidSource) (offloadHost ?: pairedPcHosts().firstOrNull()) else host
         if (pc == null) {
             _ui.update { it.copy(toastMessage = "Pair a PC host to export animated GIFs") }
             return
@@ -1138,25 +1141,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         prependQueueJob(item)
 
-        when (target) {
+        val mergeSpec = LocalTaskSpec.Merge(
+            MergeRequest(paths = clips.map { it.path }, outDir = firstDir, outputName = cleanOut)
+        )
+        val mergePayload = buildJsonObject {
+            put("outDir", firstDir)
+            put("outputName", cleanOut)
+            put("crf", 20)
+            put(
+                "paths",
+                kotlinx.serialization.json.buildJsonArray {
+                    clips.forEach { add(JsonPrimitive(it.path)) }
+                },
+            )
+        }
+        val effectiveTarget = if (target == JobExecutionTarget.PC_REMOTE && (srcHost.isLocalDevice || srcHost.os.equals("Android", ignoreCase = true))) {
+            JobExecutionTarget.ON_DEVICE
+        } else {
+            target
+        }
+
+        when (effectiveTarget) {
             JobExecutionTarget.ON_DEVICE -> {
-                localTasks[jobId] = LocalTaskSpec.Merge(
-                    MergeRequest(paths = clips.map { it.path }, outDir = firstDir, outputName = cleanOut)
-                )
-                localQueueChannel.trySend(jobId)
+                if (srcHost.isLocalDevice) {
+                    localTasks[jobId] = mergeSpec
+                    localQueueChannel.trySend(jobId)
+                } else {
+                    val job = viewModelScope.launch {
+                        runRemotePullAndLocalProcess(jobId, srcHost, "merge", clips.map { it.path }, mergeSpec)
+                    }
+                    runningCoroutines[jobId] = job
+                }
             }
             JobExecutionTarget.PC_REMOTE -> {
-                val payload = buildJsonObject {
-                    put("outDir", firstDir)
-                    put("outputName", cleanOut)
-                    put("crf", 20)
-                }
                 val job = viewModelScope.launch {
-                    val pathsJson = kotlinx.serialization.json.buildJsonArray {
-                        clips.forEach { add(JsonPrimitive(it.path)) }
-                    }
-                    val full = JsonObject(payload + ("paths" to pathsJson))
-                    runRemoteHostJob(jobId, srcHost, "merge", full)
+                    runRemoteHostJob(jobId, srcHost, "merge", mergePayload, clips.map { it.path }, mergeSpec)
                 }
                 runningCoroutines[jobId] = job
             }
@@ -1167,18 +1186,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return
                 }
                 val job = viewModelScope.launch {
-                    runPcOffloadPipeline(
-                        jobId = jobId,
-                        jobType = "merge",
-                        pcHost = pc,
-                        localSourcePaths = clips.map { it.path },
-                        localDestDir = firstDir,
-                        overwriteOriginal = false,
-                        payload = buildJsonObject {
-                            put("outputName", cleanOut)
-                            put("crf", 20)
-                        },
-                    )
+                    val offloadMeta = buildJsonObject {
+                        put("outputName", cleanOut)
+                        put("crf", 20)
+                    }
+                    if (srcHost.isLocalDevice) {
+                        runPcOffloadPipeline(
+                            jobId = jobId,
+                            jobType = "merge",
+                            pcHost = pc,
+                            localSourcePaths = clips.map { it.path },
+                            localDestDir = firstDir,
+                            overwriteOriginal = false,
+                            payload = offloadMeta,
+                        )
+                    } else {
+                        runRemoteToPcOffloadPipeline(
+                            jobId = jobId,
+                            jobType = "merge",
+                            srcHost = srcHost,
+                            remotePaths = clips.map { it.path },
+                            pcHost = pc,
+                            payload = offloadMeta,
+                        )
+                    }
                 }
                 runningCoroutines[jobId] = job
             }
@@ -1208,32 +1239,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             File(sourcePath).parent.orEmpty()
         } else ""
 
+        val effectiveTarget = if (target == JobExecutionTarget.PC_REMOTE && (srcHost.isLocalDevice || srcHost.os.equals("Android", ignoreCase = true))) {
+            JobExecutionTarget.ON_DEVICE
+        } else {
+            target
+        }
+
         val item = RenderQueueItem(
             id = jobId,
             type = type,
             title = title,
-            target = target,
+            target = effectiveTarget,
             status = "queued",
             message = "Queued",
             sourceHostId = srcHost.hostId,
             sourcePath = sourcePath,
-            outputHostId = if (target == JobExecutionTarget.PC_REMOTE) srcHost.hostId else SavedHost.LOCAL_DEVICE_ID,
+            outputHostId = if (effectiveTarget == JobExecutionTarget.PC_REMOTE) srcHost.hostId else SavedHost.LOCAL_DEVICE_ID,
             offloadHost = offloadHost,
-            localDestDir = localDir,
-            overwriteLocalOriginal = overwriteLocalOriginal,
+            localDestDir = if (srcHost.isLocalDevice) localDir else defaultLocalMoviesDir().absolutePath,
+            overwriteLocalOriginal = if (srcHost.isLocalDevice) overwriteLocalOriginal else false,
         )
         prependQueueJob(item)
 
-        when (target) {
+        when (effectiveTarget) {
             JobExecutionTarget.ON_DEVICE -> {
-                if (localSpec != null) {
-                    localTasks[jobId] = localSpec
-                    localQueueChannel.trySend(jobId)
+                if (srcHost.isLocalDevice) {
+                    if (localSpec != null) {
+                        localTasks[jobId] = localSpec
+                        localQueueChannel.trySend(jobId)
+                    } else {
+                        updateQueueJob(jobId) { it.copy(status = "error", error = "This action requires a paired PC host") }
+                    }
+                } else {
+                    val job = viewModelScope.launch {
+                        runRemotePullAndLocalProcess(jobId, srcHost, type, listOf(sourcePath), localSpec)
+                    }
+                    runningCoroutines[jobId] = job
                 }
             }
             JobExecutionTarget.PC_REMOTE -> {
                 val job = viewModelScope.launch {
-                    runRemoteHostJob(jobId, srcHost, type, remotePayload)
+                    runRemoteHostJob(jobId, srcHost, type, remotePayload, listOf(sourcePath), localSpec)
                 }
                 runningCoroutines[jobId] = job
             }
@@ -1244,15 +1290,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return
                 }
                 val job = viewModelScope.launch {
-                    runPcOffloadPipeline(
-                        jobId = jobId,
-                        jobType = type,
-                        pcHost = pc,
-                        localSourcePaths = listOf(sourcePath),
-                        localDestDir = localDir,
-                        overwriteOriginal = overwriteLocalOriginal,
-                        payload = remotePayload,
-                    )
+                    if (srcHost.isLocalDevice) {
+                        runPcOffloadPipeline(
+                            jobId = jobId,
+                            jobType = type,
+                            pcHost = pc,
+                            localSourcePaths = listOf(sourcePath),
+                            localDestDir = localDir,
+                            overwriteOriginal = overwriteLocalOriginal,
+                            payload = remotePayload,
+                        )
+                    } else {
+                        runRemoteToPcOffloadPipeline(
+                            jobId = jobId,
+                            jobType = type,
+                            srcHost = srcHost,
+                            remotePaths = listOf(sourcePath),
+                            pcHost = pc,
+                            payload = remotePayload,
+                        )
+                    }
                 }
                 runningCoroutines[jobId] = job
             }
@@ -1265,26 +1322,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun defaultLocalMoviesDir(): File =
+        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "DeckVault").apply { mkdirs() }
+
+    private fun remotePathFileName(remotePath: String, fallback: String): String =
+        remotePath.substringAfterLast('/').substringAfterLast('\\').ifBlank { fallback }
+
+    private fun remotePathParentDir(remotePath: String): String {
+        val slash = maxOf(remotePath.lastIndexOf('/'), remotePath.lastIndexOf('\\'))
+        return if (slash > 0) remotePath.substring(0, slash) else ""
+    }
+
+    private suspend fun executeLocalMediaSpec(
+        jobId: String,
+        spec: LocalTaskSpec,
+        safMap: Map<String, String>,
+        onProgress: (pct: Double, msg: String) -> Unit,
+    ): MediaOpResponse = when (spec) {
+        is LocalTaskSpec.Edit -> localMedia.editVideo(jobId, spec.req, safMap, onProgress)
+        is LocalTaskSpec.Compress -> localMedia.compressMedia(jobId, spec.req, safMap, onProgress)
+        is LocalTaskSpec.Upscale -> localMedia.upscaleMedia(jobId, spec.req, safMap, onProgress)
+        is LocalTaskSpec.ExtractAudio -> localMedia.extractAudio(jobId, spec.req, safMap, onProgress)
+        is LocalTaskSpec.Merge -> localMedia.mergeVideos(jobId, spec.req, safMap, onProgress)
+    }
+
     private suspend fun runLocalTask(jobId: String, spec: LocalTaskSpec) {
         updateQueueJob(jobId) { it.copy(status = "running", progressPct = 2.0, message = "Starting on device...") }
         val safMap = preferences.value.safSdTreeUris
         try {
-            val res: MediaOpResponse = when (spec) {
-                is LocalTaskSpec.Edit -> localMedia.editVideo(jobId, spec.req, safMap) { p, msg ->
-                    updateQueueJob(jobId) { it.copy(progressPct = p, message = msg) }
-                }
-                is LocalTaskSpec.Compress -> localMedia.compressMedia(jobId, spec.req, safMap) { p, msg ->
-                    updateQueueJob(jobId) { it.copy(progressPct = p, message = msg) }
-                }
-                is LocalTaskSpec.Upscale -> localMedia.upscaleMedia(jobId, spec.req, safMap) { p, msg ->
-                    updateQueueJob(jobId) { it.copy(progressPct = p, message = msg) }
-                }
-                is LocalTaskSpec.ExtractAudio -> localMedia.extractAudio(jobId, spec.req, safMap) { p, msg ->
-                    updateQueueJob(jobId) { it.copy(progressPct = p, message = msg) }
-                }
-                is LocalTaskSpec.Merge -> localMedia.mergeVideos(jobId, spec.req, safMap) { p, msg ->
-                    updateQueueJob(jobId) { it.copy(progressPct = p, message = msg) }
-                }
+            val res = executeLocalMediaSpec(jobId, spec, safMap) { p, msg ->
+                updateQueueJob(jobId) { it.copy(progressPct = p, message = msg) }
             }
             val outFile = File(res.path)
             updateQueueJob(jobId) {
@@ -1315,13 +1382,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun runRemoteHostJob(jobId: String, host: SavedHost, jobType: String, payload: JsonObject) {
+    private suspend fun runRemoteHostJob(
+        jobId: String,
+        host: SavedHost,
+        jobType: String,
+        payload: JsonObject,
+        remotePaths: List<String> = emptyList(),
+        localSpecFallback: LocalTaskSpec? = null,
+    ) {
+        if (host.os.equals("Android", ignoreCase = true)) {
+            runRemotePullAndLocalProcess(jobId, host, jobType, remotePaths, localSpecFallback)
+            return
+        }
         try {
             updateQueueJob(jobId) { it.copy(status = "running", progressPct = 2.0, message = "Queuing on ${host.displayName}...") }
-            val enqueued = api.enqueueRemoteJob(host, jobType, payload)
-            val remoteId = enqueued.job?.id ?: throw IllegalStateException("Server did not return job id")
-            updateQueueJob(jobId) { it.copy(remoteJobId = remoteId) }
-            val finished = pollRemoteJobToCompletion(jobId, host, remoteId, 0.0, 1.0)
+            val finished = try {
+                val enqueued = api.enqueueRemoteJob(host, jobType, payload)
+                val remoteId = enqueued.job?.id ?: throw IllegalStateException("Server did not return job id")
+                updateQueueJob(jobId) { it.copy(remoteJobId = remoteId) }
+                pollRemoteJobToCompletion(jobId, host, remoteId, 0.0, 1.0)
+            } catch (httpErr: HttpStatusException) {
+                if (httpErr.code != 404) throw httpErr
+                // Companion host < v1.4 lacks /api/jobs/enqueue — fall back cleanly to synchronous v1.2/v1.3 endpoints
+                runLegacySyncRemoteJob(jobId, host, jobType, payload)
+            }
             updateQueueJob(jobId) {
                 it.copy(
                     status = "done",
@@ -1339,8 +1423,182 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (activeHost().hostId == host.hostId) refreshAfterMutation(host)
         } catch (_: CancellationException) {
             updateQueueJob(jobId) { it.copy(status = "cancelled", message = "Cancelled") }
+        } catch (httpErr: HttpStatusException) {
+            if (httpErr.code == 404 && localSpecFallback != null && remotePaths.isNotEmpty() && jobType != "gif") {
+                runRemotePullAndLocalProcess(jobId, host, jobType, remotePaths, localSpecFallback)
+            } else {
+                val msg = if (httpErr.code == 404) {
+                    "Host ${host.displayName} does not support $jobType (try updating DeckVault Desktop or pick Save on Device)"
+                } else {
+                    httpErr.message ?: "Remote job error"
+                }
+                updateQueueJob(jobId) { it.copy(status = "error", message = "Failed", error = msg) }
+            }
         } catch (err: Exception) {
             updateQueueJob(jobId) { it.copy(status = "error", message = "Failed", error = err.message ?: "Remote job error") }
+        }
+    }
+
+    private suspend fun runLegacySyncRemoteJob(
+        jobId: String,
+        host: SavedHost,
+        jobType: String,
+        payload: JsonObject,
+    ): com.deckvault.app.model.JobRecord {
+        updateQueueJob(jobId) { it.copy(status = "running", progressPct = 20.0, message = "Rendering on ${host.displayName}...") }
+        val res: MediaOpResponse = when (jobType) {
+            "edit" -> api.editStudio(host, api.json.decodeFromJsonElement(EditStudioRequest.serializer(), payload))
+            "compress" -> api.compressMedia(host, api.json.decodeFromJsonElement(CompressRequest.serializer(), payload))
+            "upscale" -> api.upscaleMedia(host, api.json.decodeFromJsonElement(UpscaleRequest.serializer(), payload))
+            "extract_audio" -> api.extractAudio(host, api.json.decodeFromJsonElement(ExtractAudioRequest.serializer(), payload))
+            "gif" -> api.exportGif(host, api.json.decodeFromJsonElement(GifExportRequest.serializer(), payload))
+            "merge" -> api.mergeVideos(host, api.json.decodeFromJsonElement(MergeRequest.serializer(), payload))
+            else -> throw HttpStatusException(404, "HTTP 404: Unknown job type $jobType")
+        }
+        val outName = res.name.ifBlank { remotePathFileName(res.path, "DeckVault_Out.mp4") }
+        return com.deckvault.app.model.JobRecord(
+            id = jobId,
+            type = jobType,
+            status = "done",
+            progressPct = 100.0,
+            message = "Completed",
+            outputPath = res.path,
+            outputDir = remotePathParentDir(res.path),
+            outputName = outName,
+            outputMediaType = LocalStorageRepository.classifyMedia(outName),
+            newSizeBytes = res.newSizeBytes,
+            savedBytes = res.savedBytes,
+        )
+    }
+
+    private suspend fun stageRemotePathsToCache(
+        jobId: String,
+        srcHost: SavedHost,
+        remotePaths: List<String>,
+        stageDir: File,
+        basePct: Double,
+        weightPct: Double,
+    ): List<String> {
+        val stagedFiles = mutableListOf<String>()
+        remotePaths.forEachIndexed { idx, rPath ->
+            if (cancelledIds.contains(jobId)) throw CancellationException("Cancelled")
+            val origName = remotePathFileName(rPath, "media_${idx + 1}.mp4")
+            val dest = File(stageDir, origName).let { candidate ->
+                if (!candidate.exists()) candidate
+                else File(stageDir, "${idx}_$origName")
+            }
+            api.downloadFile(srcHost, rPath, openOutput = { FileOutputStream(dest) }) { bytes ->
+                val frac = ((idx.toDouble() + 0.5) / remotePaths.size.coerceAtLeast(1).toDouble()).coerceIn(0.0, 1.0)
+                updateQueueJob(jobId) {
+                    it.copy(
+                        status = "downloading",
+                        progressPct = basePct + frac * weightPct,
+                        message = "Pulling from ${srcHost.displayName} (${Formatters.formatBytes(bytes)})...",
+                    )
+                }
+            }
+            stagedFiles.add(dest.absolutePath)
+        }
+        return stagedFiles
+    }
+
+    private suspend fun runRemotePullAndLocalProcess(
+        jobId: String,
+        srcHost: SavedHost,
+        jobType: String,
+        remotePaths: List<String>,
+        spec: LocalTaskSpec?,
+    ) {
+        if (spec == null || jobType == "gif") {
+            updateQueueJob(jobId) { it.copy(status = "error", message = "Failed", error = "GIF export requires a paired PC host") }
+            return
+        }
+        val stageDir = File(getApplication<Application>().cacheDir, "remote_local_$jobId").apply { mkdirs() }
+        val safMap = preferences.value.safSdTreeUris
+        try {
+            val stagedLocalPaths = stageRemotePathsToCache(jobId, srcHost, remotePaths, stageDir, basePct = 2.0, weightPct = 28.0)
+            if (cancelledIds.contains(jobId)) throw CancellationException("Cancelled")
+
+            val destDir = defaultLocalMoviesDir()
+            val rewrittenSpec = when (spec) {
+                is LocalTaskSpec.Edit -> LocalTaskSpec.Edit(spec.req.copy(path = stagedLocalPaths.first(), saveMode = "copy"))
+                is LocalTaskSpec.Compress -> LocalTaskSpec.Compress(spec.req.copy(path = stagedLocalPaths.first(), saveMode = "copy"))
+                is LocalTaskSpec.Upscale -> LocalTaskSpec.Upscale(spec.req.copy(path = stagedLocalPaths.first(), saveMode = "copy"))
+                is LocalTaskSpec.ExtractAudio -> LocalTaskSpec.ExtractAudio(spec.req.copy(path = stagedLocalPaths.first()))
+                is LocalTaskSpec.Merge -> LocalTaskSpec.Merge(spec.req.copy(paths = stagedLocalPaths, outDir = destDir.absolutePath))
+            }
+
+            updateQueueJob(jobId) { it.copy(status = "running", progressPct = 32.0, message = "Rendering on this device...") }
+            val res = executeLocalMediaSpec(jobId, rewrittenSpec, safMap) { p, msg ->
+                updateQueueJob(jobId) { it.copy(progressPct = 32.0 + (p * 0.62), message = msg) }
+            }
+
+            val produced = File(res.path)
+            val finalFile = if (produced.parentFile?.absolutePath == stageDir.absolutePath) {
+                val targetName = res.name.ifBlank { produced.name }
+                val outTarget = localRepo.resolveUniqueTargetFile(destDir, targetName, "rename")
+                FileInputStream(produced).use { inp ->
+                    localRepo.openOutputStreamWritable(outTarget, safMap).use { out ->
+                        inp.copyTo(out, 256 * 1024)
+                        out.flush()
+                    }
+                }
+                localRepo.scanMediaPath(outTarget.absolutePath)
+                outTarget
+            } else {
+                produced
+            }
+            val finalSize = finalFile.length().takeIf { it > 0L } ?: res.newSizeBytes
+            updateQueueJob(jobId) {
+                it.copy(
+                    status = "done",
+                    progressPct = 100.0,
+                    message = "Saved to ${destDir.name}",
+                    outputHostId = SavedHost.LOCAL_DEVICE_ID,
+                    outputPath = finalFile.absolutePath,
+                    outputDir = finalFile.parent.orEmpty(),
+                    outputName = finalFile.name,
+                    outputMediaType = LocalStorageRepository.classifyMedia(finalFile.name),
+                    newSizeBytes = finalSize,
+                    savedBytes = 0L,
+                )
+            }
+            if (activeHost().isLocalDevice) refreshAfterMutation(activeHost())
+        } catch (_: CancellationException) {
+            updateQueueJob(jobId) { it.copy(status = "cancelled", message = "Cancelled") }
+        } catch (err: Exception) {
+            updateQueueJob(jobId) { it.copy(status = "error", message = "Failed", error = err.message ?: "Processing error") }
+        } finally {
+            runCatching { stageDir.deleteRecursively() }
+        }
+    }
+
+    private suspend fun runRemoteToPcOffloadPipeline(
+        jobId: String,
+        jobType: String,
+        srcHost: SavedHost,
+        remotePaths: List<String>,
+        pcHost: SavedHost,
+        payload: JsonObject,
+    ) {
+        val stageDir = File(getApplication<Application>().cacheDir, "remote_offload_$jobId").apply { mkdirs() }
+        try {
+            val stagedLocalPaths = stageRemotePathsToCache(jobId, srcHost, remotePaths, stageDir, basePct = 1.0, weightPct = 18.0)
+            runPcOffloadPipeline(
+                jobId = jobId,
+                jobType = jobType,
+                pcHost = pcHost,
+                localSourcePaths = stagedLocalPaths,
+                localDestDir = defaultLocalMoviesDir().absolutePath,
+                overwriteOriginal = false,
+                payload = payload,
+            )
+        } catch (_: CancellationException) {
+            updateQueueJob(jobId) { it.copy(status = "cancelled", message = "Cancelled") }
+        } catch (err: Exception) {
+            updateQueueJob(jobId) { it.copy(status = "error", message = "Failed", error = err.message ?: "Offload error") }
+        } finally {
+            runCatching { stageDir.deleteRecursively() }
         }
     }
 

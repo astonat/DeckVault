@@ -2,6 +2,17 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.4.4] - 2026-11-18
+
+### Android LibVLC Crop & Peek Pixel-Lock Fix, Target Clarity & 404 Render Fallback
+- **Fixed `.ts`/`.avi` Small Centered Video + Mismatched Crop Overlay & Peek Jump (`VideoPlayerAndTrimmer.kt`)**:
+  - Replaced `VLCVideoLayout` (`VideoHelper`'s broken portrait/landscape container bounds swap) with direct `android.view.TextureView` binding via `vlcVout.setVideoView(tv)` + `IVLCVout.OnNewVideoLayoutListener` and layout `setWindowSize` updates.
+  - Sized both the active video surface (`TextureView` / `PlayerView`) and `VisualCropOverlay` inside the exact same centered aspect-fitted rectangle (`fitWDp × fitHDp`) across Split Stage, Side Rail, Fullscreen, and Peek toggle — zero black margins inside the crop frame and zero size jumps on Peek.
+- **Fixed `HTTP 404: Unknown route` Render Errors & Explicit Execution Targets (`MainViewModel.kt`, `VideoStudioComponents.kt`, `MediaOptimizerSheet.kt`, `MainActivity.kt`)**:
+  - Added clear execution target pills inside **Edit Studio**, **Media Optimizer**, and **Merge Videos** even when browsing remote PC or Android peer devices (`Run on <PC>` vs `Pull & Save on Device`, or `Pull & Save Here` vs `Offload: <PC>`), plus explicit primary action text (`Render on PC` vs `Render Here`).
+  - Added automatic `HTTP 404` fallback in `MainViewModel.runRemoteHostJob`: falls back seamlessly to synchronous PC endpoints (`/api/video/edit`, `/api/media/*`) on `< v1.4` desktop companions, and stages & processes locally via `LocalMediaProcessor` into `Movies/DeckVault` when targeting Android peers or unsupported endpoints.
+- *(Desktop Companion `DeckVault.exe` remains untouched on `v1.4.1` and 100% compatible.)*
+
 ## [v1.4.3] - 2026-11-18
 
 ### Android AVI/TS Studio Video Fix, TS Seekbar/Duration Fix & Flagship Phone Portrait UI

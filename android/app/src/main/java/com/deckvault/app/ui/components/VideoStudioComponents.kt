@@ -399,6 +399,8 @@ fun StudioEditorPanel(
     normalizeAudio: Boolean,
     saveMode: String,
     isLocalSource: Boolean,
+    sourceHostName: String = "",
+    sourceHostIsAndroid: Boolean = false,
     pairedPcHosts: List<SavedHost>,
     selectedOffloadHost: SavedHost?,
     executionTarget: JobExecutionTarget,
@@ -469,17 +471,17 @@ fun StudioEditorPanel(
                 }
             }
 
-            if (isLocalSource) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+            ) {
+                if (isLocalSource || sourceHostIsAndroid) {
                     FilterChip(
                         selected = executionTarget == JobExecutionTarget.ON_DEVICE,
                         onClick = { onExecutionTargetChange(JobExecutionTarget.ON_DEVICE, selectedOffloadHost) },
                         leadingIcon = { Icon(Icons.Rounded.Tablet, null, Modifier.size(15.dp)) },
-                        label = { Text("This Tablet") },
+                        label = { Text(if (isLocalSource) "This Device" else "Pull & Save Here") },
                     )
                     pairedPcHosts.forEach { pc ->
                         FilterChip(
@@ -489,6 +491,23 @@ fun StudioEditorPanel(
                             label = { Text("Offload: ${pc.displayName}") },
                         )
                     }
+                } else {
+                    val hostLabel = sourceHostName.ifBlank { "PC Host" }
+                    FilterChip(
+                        selected = executionTarget == JobExecutionTarget.PC_REMOTE,
+                        onClick = { onExecutionTargetChange(JobExecutionTarget.PC_REMOTE, selectedOffloadHost) },
+                        leadingIcon = { Icon(Icons.Rounded.Computer, null, Modifier.size(15.dp)) },
+                        label = { Text("Run on $hostLabel") },
+                    )
+                    FilterChip(
+                        selected = executionTarget == JobExecutionTarget.ON_DEVICE,
+                        onClick = {
+                            if (saveMode == "overwrite") onSaveModeChange("copy")
+                            onExecutionTargetChange(JobExecutionTarget.ON_DEVICE, selectedOffloadHost)
+                        },
+                        leadingIcon = { Icon(Icons.Rounded.Tablet, null, Modifier.size(15.dp)) },
+                        label = { Text("Pull & Save on Device") },
+                    )
                 }
             }
 
@@ -557,25 +576,25 @@ fun StudioEditorPanel(
                         AssistChip(onClick = { onColorChange(0f, 1f, 1f) }, label = { Text("Reset Color") })
                         FilterChip(
                             selected = sharpen > 0.2f,
-                            enabled = !isLocalSource || pairedPcHosts.isNotEmpty(),
+                            enabled = (!isLocalSource && !sourceHostIsAndroid) || pairedPcHosts.isNotEmpty(),
                             onClick = { onProFlagsChange(if (sharpen > 0.2f) 0f else 0.7f, deband, stabilize, normalizeAudio) },
                             label = { Text("CAS Sharpen (PC)") },
                         )
                         FilterChip(
                             selected = deband,
-                            enabled = !isLocalSource || pairedPcHosts.isNotEmpty(),
+                            enabled = (!isLocalSource && !sourceHostIsAndroid) || pairedPcHosts.isNotEmpty(),
                             onClick = { onProFlagsChange(sharpen, !deband, stabilize, normalizeAudio) },
                             label = { Text("Deband (PC)") },
                         )
                         FilterChip(
                             selected = stabilize,
-                            enabled = !isLocalSource || pairedPcHosts.isNotEmpty(),
+                            enabled = (!isLocalSource && !sourceHostIsAndroid) || pairedPcHosts.isNotEmpty(),
                             onClick = { onProFlagsChange(sharpen, deband, !stabilize, normalizeAudio) },
                             label = { Text("Stabilize (PC)") },
                         )
                         FilterChip(
                             selected = normalizeAudio,
-                            enabled = !isLocalSource || pairedPcHosts.isNotEmpty(),
+                            enabled = (!isLocalSource && !sourceHostIsAndroid) || pairedPcHosts.isNotEmpty(),
                             onClick = { onProFlagsChange(sharpen, deband, stabilize, !normalizeAudio) },
                             label = { Text("Loudnorm (PC)") },
                         )
@@ -593,7 +612,7 @@ fun StudioEditorPanel(
                                         startMs = startMs,
                                         endMs = if (endMs < durationMs) endMs else 0L,
                                     ),
-                                    if (isLocalSource) executionTarget else JobExecutionTarget.PC_REMOTE,
+                                    executionTarget,
                                     selectedOffloadHost,
                                 )
                             },
@@ -605,7 +624,7 @@ fun StudioEditorPanel(
                         }
 
                         OutlinedButton(
-                            enabled = !isLocalSource || pairedPcHosts.isNotEmpty(),
+                            enabled = (!isLocalSource && !sourceHostIsAndroid) || pairedPcHosts.isNotEmpty(),
                             onClick = {
                                 onExportGif(
                                     GifExportRequest(
@@ -627,7 +646,7 @@ fun StudioEditorPanel(
                         ) {
                             Icon(Icons.Rounded.GifBox, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text(if (isLocalSource) "GIF (PC Offload)" else "Export GIF")
+                            Text(if (isLocalSource || sourceHostIsAndroid) "GIF (PC Offload)" else "Export GIF")
                         }
                     }
                 }
@@ -640,7 +659,12 @@ fun StudioEditorPanel(
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(selected = saveMode == "copy", onClick = { onSaveModeChange("copy") }, label = { Text("Save Copy") })
-                    FilterChip(selected = saveMode == "overwrite", onClick = { onSaveModeChange("overwrite") }, label = { Text("Overwrite") })
+                    FilterChip(
+                        selected = saveMode == "overwrite",
+                        enabled = isLocalSource || executionTarget == JobExecutionTarget.PC_REMOTE,
+                        onClick = { onSaveModeChange("overwrite") },
+                        label = { Text("Overwrite") },
+                    )
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -672,7 +696,7 @@ fun StudioEditorPanel(
                     Button(onClick = { onSubmitEdit(req, executionTarget, selectedOffloadHost, true) }) {
                         Icon(Icons.Rounded.PlayArrow, null, Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Render")
+                        Text(if (executionTarget == JobExecutionTarget.ON_DEVICE) "Render Here" else "Render on PC")
                     }
                 }
             }

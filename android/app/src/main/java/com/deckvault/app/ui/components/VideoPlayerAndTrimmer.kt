@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Rational
+import android.view.TextureView
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -95,6 +96,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -146,7 +148,7 @@ import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media as VlcMedia
 import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
 import org.videolan.libvlc.interfaces.IMedia
-import org.videolan.libvlc.util.VLCVideoLayout
+import org.videolan.libvlc.interfaces.IVLCVout
 import com.deckvault.app.R
 import com.deckvault.app.data.DeckVaultApi
 import com.deckvault.app.data.LocalStorageRepository
@@ -206,6 +208,8 @@ fun VideoPlayerAndTrimmerOverlay(
     framePreviewUrls: List<String>,
     api: DeckVaultApi,
     isLocalSource: Boolean,
+    sourceHostName: String = "",
+    sourceHostIsAndroid: Boolean = false,
     pairedPcHosts: List<SavedHost>,
     defaultOffloadHost: SavedHost?,
     initialResumePositionMs: Long,
@@ -327,8 +331,11 @@ fun VideoPlayerAndTrimmerOverlay(
     var studioNormalize by remember(file.path) { mutableStateOf(false) }
     var studioSaveMode by remember(file.path) { mutableStateOf("copy") }
     var studioOffloadHost by remember { mutableStateOf(defaultOffloadHost ?: pairedPcHosts.firstOrNull()) }
-    var studioTarget by remember {
-        mutableStateOf(if (isLocalSource) JobExecutionTarget.ON_DEVICE else JobExecutionTarget.PC_REMOTE)
+    var studioTarget by remember(file.path, isLocalSource, sourceHostIsAndroid) {
+        mutableStateOf(
+            if (isLocalSource || sourceHostIsAndroid) JobExecutionTarget.ON_DEVICE
+            else JobExecutionTarget.PC_REMOTE
+        )
     }
 
     // Subtitle picker launcher
@@ -406,7 +413,8 @@ fun VideoPlayerAndTrimmerOverlay(
         libVlc to VlcMediaPlayer(libVlc)
     }
     var vlcAssetFd by remember { mutableStateOf<AssetFileDescriptor?>(null) }
-    var attachedVlcLayout by remember { mutableStateOf<VLCVideoLayout?>(null) }
+    var attachedVlcTexture by remember { mutableStateOf<TextureView?>(null) }
+    var attachedVlcPlayer by remember { mutableStateOf<VlcMediaPlayer?>(null) }
     var vlcAutoPausedInitial by remember(file.path, activeEngine) { mutableStateOf(false) }
 
     var liveTranscodeBaseMs by remember(file.path) { mutableLongStateOf(0L) }
@@ -744,8 +752,10 @@ fun VideoPlayerAndTrimmerOverlay(
             val savedPos = currentPosMs.coerceAtLeast(0L)
             if (savedPos > 0L) onSaveResumePosition(file.path, savedPos)
             runCatching { vlcPlayer.setEventListener(null) }
+            runCatching { vlcPlayer.vlcVout.detachViews() }
             runCatching { vlcPlayer.detachViews() }
-            attachedVlcLayout = null
+            attachedVlcTexture = null
+            attachedVlcPlayer = null
             runCatching { vlcPlayer.stop() }
             runCatching { vlcPlayer.release() }
             runCatching { libVlc.release() }
@@ -1218,28 +1228,30 @@ fun VideoPlayerAndTrimmerOverlay(
             } else {
                 null
             }
-            val effectiveAspect = if (studioExpanded && studioCropActive) PlayerAspectMode.FIT else aspectMode
-            val targetRatio = when {
-                studioExpanded && studioCropActive -> naturalRatio
-                effectiveAspect.fixedRatio != null -> effectiveAspect.fixedRatio
-                effectiveAspect == PlayerAspectMode.FIT -> naturalRatio
-                else -> null
-            }
-            val (fitWPx, fitHPx) = if (targetRatio != null) {
-                if (stageW / stageH > targetRatio) (stageH * targetRatio) to stageH
-                else stageW to (stageW / targetRatio)
-            } else {
-                stageW to stageH
+            val cropOverlayActive = studioExpanded && studioCropActive
+            val effectiveAspect = if (cropOverlayActive) PlayerAspectMode.FIT else aspectMode
+            val (fitWPx, fitHPx) = when {
+                effectiveAspect == PlayerAspectMode.FILL && naturalRatio != null -> {
+                    if (stageW / stageH > naturalRatio) stageW to (stageW / naturalRatio)
+                    else (stageH * naturalRatio) to stageH
+                }
+                effectiveAspect.fixedRatio != null -> {
+                    val r = effectiveAspect.fixedRatio
+                    if (stageW / stageH > r) (stageH * r) to stageH else stageW to (stageW / r)
+                }
+                effectiveAspect == PlayerAspectMode.FIT && naturalRatio != null -> {
+                    if (stageW / stageH > naturalRatio) (stageH * naturalRatio) to stageH
+                    else stageW to (stageW / naturalRatio)
+                }
+                else -> stageW to stageH
             }
             val density = LocalDensity.current
             val fitWDp = with(density) { fitWPx.toDp() }
             val fitHDp = with(density) { fitHPx.toDp() }
 
             val videoBoxMod = Modifier
-                .let { base ->
-                    val ratio = effectiveAspect.fixedRatio
-                    if (ratio != null) base.aspectRatio(ratio) else base.fillMaxSize()
-                }
+                .align(Alignment.Center)
+                .size(width = fitWDp, height = fitHDp)
                 .graphicsLayer {
                     scaleX = zoomScale * (if (mirrorPreview || studioFlipH) -1f else 1f)
                     scaleY = zoomScale * (if (studioFlipV) -1f else 1f)
@@ -1254,56 +1266,107 @@ fun VideoPlayerAndTrimmerOverlay(
             Box(modifier = videoBoxMod) {
                 if (activeEngine == VideoEngineMode.VLC && vlcSession != null) {
                     val vp = vlcSession.second
-                    AndroidView(
-                        factory = { ctx ->
-                            VLCVideoLayout(ctx).apply {
-                                keepScreenOn = true
-                            }
-                        },
-                        update = { layout ->
-                            if (attachedVlcLayout !== layout) {
-                                attachedVlcLayout = layout
-                                runCatching { vp.detachViews() }
-                                // textureView = true mode in LibVLC is selected by passing textureView flag false (SurfaceView = true, TextureView = false)
-                                vp.attachViews(layout, null, true, false)
-                            }
-                            vp.videoScale = effectiveAspect.vlcScale
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    val wInt = fitWPx.roundToInt().coerceAtLeast(1)
+                    val hInt = fitHPx.roundToInt().coerceAtLeast(1)
+                    key(vlcSession) {
+                        AndroidView(
+                            factory = { ctx ->
+                                TextureView(ctx).apply {
+                                    keepScreenOn = true
+                                    addOnLayoutChangeListener { _, l, t, r, b, _, _, _, _ ->
+                                        val lw = r - l
+                                        val lh = b - t
+                                        if (lw > 0 && lh > 0) {
+                                            runCatching { vp.vlcVout.setWindowSize(lw, lh) }
+                                        }
+                                    }
+                                }
+                            },
+                            update = { tv ->
+                                if (attachedVlcTexture !== tv || attachedVlcPlayer !== vp) {
+                                    attachedVlcTexture = tv
+                                    attachedVlcPlayer = vp
+                                    runCatching { vp.vlcVout.detachViews() }
+                                    runCatching { vp.detachViews() }
+                                    val layoutListener = IVLCVout.OnNewVideoLayoutListener { _, vw, vh, visW, visH, sarNum, sarDen ->
+                                        val rawW = if (visW > 0) visW else vw
+                                        val rawH = if (visH > 0) visH else vh
+                                        if (rawW > 0 && rawH > 0) {
+                                            val sarAdjustedW = if (sarNum > 0 && sarDen > 0 && sarNum != sarDen) {
+                                                ((rawW.toDouble() * sarNum.toDouble()) / sarDen.toDouble()).roundToInt().coerceAtLeast(1)
+                                            } else {
+                                                rawW
+                                            }
+                                            mainHandler.post {
+                                                if (naturalVideoWidth != sarAdjustedW || naturalVideoHeight != rawH) {
+                                                    naturalVideoWidth = sarAdjustedW
+                                                    naturalVideoHeight = rawH
+                                                }
+                                                val curW = tv.width.takeIf { it > 0 } ?: wInt
+                                                val curH = tv.height.takeIf { it > 0 } ?: hInt
+                                                if (curW > 0 && curH > 0) {
+                                                    runCatching { vp.vlcVout.setWindowSize(curW, curH) }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    vp.vlcVout.setVideoView(tv)
+                                    vp.vlcVout.attachViews(layoutListener)
+                                    if (tv.width > 0 && tv.height > 0) {
+                                        runCatching { vp.vlcVout.setWindowSize(tv.width, tv.height) }
+                                    }
+                                }
+                                if (wInt > 0 && hInt > 0) {
+                                    runCatching { vp.vlcVout.setWindowSize(wInt, hInt) }
+                                }
+                                runCatching {
+                                    vp.scale = 0f
+                                    vp.aspectRatio = if (
+                                        effectiveAspect == PlayerAspectMode.STRETCH ||
+                                        effectiveAspect.fixedRatio != null ||
+                                        naturalRatio != null
+                                    ) {
+                                        "$wInt:$hInt"
+                                    } else {
+                                        null
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 } else if (exoPlayer != null) {
+                    val exoResizeMode = if (naturalRatio != null || effectiveAspect == PlayerAspectMode.STRETCH || effectiveAspect.fixedRatio != null) {
+                        AspectRatioFrameLayout.RESIZE_MODE_FILL
+                    } else {
+                        AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    }
                     AndroidView(
                         factory = { ctx ->
                             (android.view.LayoutInflater.from(ctx)
                                 .inflate(R.layout.deckvault_texture_player_view, null) as PlayerView).apply {
                                 this.player = exoPlayer
                                 useController = false
-                                resizeMode = effectiveAspect.resizeMode
+                                resizeMode = exoResizeMode
                                 keepScreenOn = true
                             }
                         },
                         update = { pv ->
                             if (pv.player !== exoPlayer) pv.player = exoPlayer
-                            pv.resizeMode = effectiveAspect.resizeMode
+                            pv.resizeMode = exoResizeMode
                         },
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
 
-                if (studioExpanded && studioCropActive) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .size(width = fitWDp, height = fitHDp),
-                    ) {
-                        VisualCropOverlay(
-                            crop = studioCrop,
-                            sourceWidth = naturalVideoWidth,
-                            sourceHeight = naturalVideoHeight,
-                            onCropChange = { studioCrop = it },
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
+                if (cropOverlayActive) {
+                    VisualCropOverlay(
+                        crop = studioCrop,
+                        sourceWidth = naturalVideoWidth,
+                        sourceHeight = naturalVideoHeight,
+                        onCropChange = { studioCrop = it },
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
             }
 
@@ -1549,6 +1612,8 @@ fun VideoPlayerAndTrimmerOverlay(
             normalizeAudio = studioNormalize,
             saveMode = studioSaveMode,
             isLocalSource = isLocalSource,
+            sourceHostName = sourceHostName,
+            sourceHostIsAndroid = sourceHostIsAndroid,
             pairedPcHosts = pairedPcHosts,
             selectedOffloadHost = studioOffloadHost,
             executionTarget = studioTarget,
@@ -1578,8 +1643,12 @@ fun VideoPlayerAndTrimmerOverlay(
                 studioDeband = db
                 studioStabilize = st
                 studioNormalize = nm
-                if (isLocalSource && (sh > 0.2f || db || st || nm) && studioOffloadHost != null) {
-                    studioTarget = JobExecutionTarget.PC_OFFLOAD
+                if ((sh > 0.2f || db || st || nm)) {
+                    if (!isLocalSource && !sourceHostIsAndroid) {
+                        studioTarget = JobExecutionTarget.PC_REMOTE
+                    } else if (studioOffloadHost != null) {
+                        studioTarget = JobExecutionTarget.PC_OFFLOAD
+                    }
                 }
             },
             onSaveModeChange = { studioSaveMode = it },

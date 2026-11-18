@@ -12,8 +12,8 @@ android {
         applicationId = "com.deckvault.app"
                 minSdk = 28
         targetSdk = 36
-        versionCode = 11
-        versionName = "1.4.3"
+        versionCode = 12
+        versionName = "1.4.4"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

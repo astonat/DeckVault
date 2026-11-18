@@ -72,6 +72,8 @@ fun MediaOptimizerDialog(
     file: FileItem,
     initialTab: OptimizerTab,
     isLocalSource: Boolean,
+    sourceHostName: String = "",
+    sourceHostIsAndroid: Boolean = false,
     pairedPcHosts: List<SavedHost>,
     defaultPcHost: SavedHost?,
     estimateFn: suspend (CompressEstimateRequest) -> CompressEstimateResponse?,
@@ -86,8 +88,8 @@ fun MediaOptimizerDialog(
     var executionTarget by remember {
         mutableStateOf(
             when {
-                !isLocalSource -> JobExecutionTarget.PC_REMOTE
-                else -> JobExecutionTarget.ON_DEVICE
+                isLocalSource || sourceHostIsAndroid -> JobExecutionTarget.ON_DEVICE
+                else -> JobExecutionTarget.PC_REMOTE
             }
         )
     }
@@ -111,10 +113,10 @@ fun MediaOptimizerDialog(
     var deband by remember { mutableStateOf(false) }
     var stabilize by remember { mutableStateOf(false) }
 
-    // Auto-select PC Offload if user picks a PC-only enhancement on local tablet media
+    // Auto-select PC Offload if user picks a PC-only enhancement on local/Android media
     val usesPcProFeature = (upscaleMode != "cas" || denoiseMode != "off" || fps60 || deband || stabilize)
-    LaunchedEffect(activeTab, usesPcProFeature, isLocalSource) {
-        if (isLocalSource && activeTab == OptimizerTab.UPSCALE && usesPcProFeature && selectedOffloadHost != null) {
+    LaunchedEffect(activeTab, usesPcProFeature, isLocalSource, sourceHostIsAndroid) {
+        if ((isLocalSource || sourceHostIsAndroid) && activeTab == OptimizerTab.UPSCALE && usesPcProFeature && selectedOffloadHost != null) {
             executionTarget = JobExecutionTarget.PC_OFFLOAD
         }
     }
@@ -210,25 +212,25 @@ fun MediaOptimizerDialog(
                         }
                     }
 
-                    // Execution Engine Card (Local vs PC Offload)
-                    if (isLocalSource) {
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = surfaces.cardSurface,
-                            border = BorderStroke(1.dp, surfaces.hairlineBorder),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text("Processing Engine", style = MaterialTheme.typography.labelLarge, color = surfaces.textPrimary)
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                ) {
+                    // Execution Engine Card (Local vs PC Offload vs Remote PC)
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = surfaces.cardSurface,
+                        border = BorderStroke(1.dp, surfaces.hairlineBorder),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Processing Engine", style = MaterialTheme.typography.labelLarge, color = surfaces.textPrimary)
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            ) {
+                                if (isLocalSource || sourceHostIsAndroid) {
                                     FilterChip(
                                         selected = executionTarget == JobExecutionTarget.ON_DEVICE,
                                         onClick = { executionTarget = JobExecutionTarget.ON_DEVICE },
                                         leadingIcon = { Icon(Icons.Rounded.Tablet, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                                        label = { Text("This Tablet (Offline)") },
+                                        label = { Text(if (isLocalSource) "This Device (Offline)" else "Pull & Process Here") },
                                     )
                                     pairedPcHosts.forEach { pc ->
                                         val selectedPc = executionTarget == JobExecutionTarget.PC_OFFLOAD && selectedOffloadHost?.hostId == pc.hostId
@@ -242,20 +244,40 @@ fun MediaOptimizerDialog(
                                             label = { Text("Offload to ${pc.displayName}") },
                                         )
                                     }
-                                }
-                                if (pairedPcHosts.isEmpty()) {
-                                    Text(
-                                        "Pair your Windows PC over Wi-Fi to offload heavy FFmpeg filters (Anime, Denoise, 60fps, Stabilize) & return the result automatically.",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = surfaces.textSecondary,
+                                } else {
+                                    val hostLabel = sourceHostName.ifBlank { "PC Host" }
+                                    FilterChip(
+                                        selected = executionTarget == JobExecutionTarget.PC_REMOTE,
+                                        onClick = { executionTarget = JobExecutionTarget.PC_REMOTE },
+                                        leadingIcon = { Icon(Icons.Rounded.Computer, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                        label = { Text("Run on $hostLabel") },
                                     )
-                                } else if (executionTarget == JobExecutionTarget.PC_OFFLOAD) {
-                                    Text(
-                                        "File uploads to ${selectedOffloadHost?.displayName}, processes via desktop FFmpeg queue, and downloads straight back to your tablet/SD card folder.",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary,
+                                    FilterChip(
+                                        selected = executionTarget == JobExecutionTarget.ON_DEVICE,
+                                        onClick = { executionTarget = JobExecutionTarget.ON_DEVICE; saveMode = "copy" },
+                                        leadingIcon = { Icon(Icons.Rounded.Tablet, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                        label = { Text("Pull & Save on Device") },
                                     )
                                 }
+                            }
+                            if ((isLocalSource || sourceHostIsAndroid) && pairedPcHosts.isEmpty()) {
+                                Text(
+                                    "Pair your Windows PC over Wi-Fi to offload heavy FFmpeg filters (Anime, Denoise, 60fps, Stabilize) & return the result automatically.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = surfaces.textSecondary,
+                                )
+                            } else if (executionTarget == JobExecutionTarget.PC_OFFLOAD) {
+                                Text(
+                                    "File sends to ${selectedOffloadHost?.displayName}, processes via desktop FFmpeg queue, and saves back to this device.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            } else if (!isLocalSource && executionTarget == JobExecutionTarget.PC_REMOTE) {
+                                Text(
+                                    "Runs directly via ${sourceHostName.ifBlank { "PC Host" }} CPU/GPU FFmpeg with full filter support.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
                             }
                         }
                     }
@@ -519,6 +541,8 @@ fun MediaOptimizerDialog(
 fun MergeVideosDialog(
     clips: List<FileItem>,
     isLocalSource: Boolean,
+    sourceHostName: String = "",
+    sourceHostIsAndroid: Boolean = false,
     pairedPcHosts: List<SavedHost>,
     defaultPcHost: SavedHost?,
     onSubmitMerge: (orderedClips: List<FileItem>, outputName: String, target: JobExecutionTarget, offloadHost: SavedHost?, runNow: Boolean) -> Unit,
@@ -527,7 +551,9 @@ fun MergeVideosDialog(
     val surfaces = LocalDeckSurfaces.current
     var outputName by remember { mutableStateOf("Merged_${clips.firstOrNull()?.name?.substringBeforeLast('.') ?: "Video"}.mp4") }
     var executionTarget by remember {
-        mutableStateOf(if (isLocalSource) JobExecutionTarget.ON_DEVICE else JobExecutionTarget.PC_REMOTE)
+        mutableStateOf(
+            if (isLocalSource || sourceHostIsAndroid) JobExecutionTarget.ON_DEVICE else JobExecutionTarget.PC_REMOTE
+        )
     }
     var selectedOffloadHost by remember { mutableStateOf(defaultPcHost ?: pairedPcHosts.firstOrNull()) }
 
@@ -578,13 +604,13 @@ fun MergeVideosDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                if (isLocalSource) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                    if (isLocalSource || sourceHostIsAndroid) {
                         FilterChip(
                             selected = executionTarget == JobExecutionTarget.ON_DEVICE,
                             onClick = { executionTarget = JobExecutionTarget.ON_DEVICE },
                             leadingIcon = { Icon(Icons.Rounded.Tablet, null, Modifier.size(16.dp)) },
-                            label = { Text("This Tablet") },
+                            label = { Text(if (isLocalSource) "This Device" else "Pull & Merge Here") },
                         )
                         pairedPcHosts.forEach { pc ->
                             FilterChip(
@@ -594,6 +620,20 @@ fun MergeVideosDialog(
                                 label = { Text("Offload: ${pc.displayName}") },
                             )
                         }
+                    } else {
+                        val hostLabel = sourceHostName.ifBlank { "PC Host" }
+                        FilterChip(
+                            selected = executionTarget == JobExecutionTarget.PC_REMOTE,
+                            onClick = { executionTarget = JobExecutionTarget.PC_REMOTE },
+                            leadingIcon = { Icon(Icons.Rounded.Computer, null, Modifier.size(16.dp)) },
+                            label = { Text("Merge on $hostLabel") },
+                        )
+                        FilterChip(
+                            selected = executionTarget == JobExecutionTarget.ON_DEVICE,
+                            onClick = { executionTarget = JobExecutionTarget.ON_DEVICE },
+                            leadingIcon = { Icon(Icons.Rounded.Tablet, null, Modifier.size(16.dp)) },
+                            label = { Text("Pull & Save on Device") },
+                        )
                     }
                 }
 

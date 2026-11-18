@@ -643,6 +643,8 @@ private fun DeckVaultRoot(
                     framePreviewUrls = frameUrls,
                     api = vm.api,
                     isLocalSource = activeHost.isLocalDevice,
+                    sourceHostName = activeHost.displayName,
+                    sourceHostIsAndroid = activeHost.os.equals("Android", ignoreCase = true),
                     pairedPcHosts = vm.pairedPcHosts(),
                     defaultOffloadHost = vm.pairedPcHosts().firstOrNull(),
                     initialResumePositionMs = prefs.videoResumePositionsMs[videoFile.path] ?: 0L,
@@ -821,6 +823,8 @@ private fun DeckVaultRoot(
                     file = optFile,
                     initialTab = ui.optimizerTab,
                     isLocalSource = activeHost?.isLocalDevice == true,
+                    sourceHostName = activeHost?.displayName.orEmpty(),
+                    sourceHostIsAndroid = activeHost?.os?.equals("Android", ignoreCase = true) == true,
                     pairedPcHosts = vm.pairedPcHosts(),
                     defaultPcHost = vm.pairedPcHosts().firstOrNull(),
                     estimateFn = { req -> vm.estimateCompression(req) },
@@ -839,6 +843,8 @@ private fun DeckVaultRoot(
                 MergeVideosDialog(
                     clips = ui.mergeCandidates,
                     isLocalSource = activeHost?.isLocalDevice == true,
+                    sourceHostName = activeHost?.displayName.orEmpty(),
+                    sourceHostIsAndroid = activeHost?.os?.equals("Android", ignoreCase = true) == true,
                     pairedPcHosts = vm.pairedPcHosts(),
                     defaultPcHost = vm.pairedPcHosts().firstOrNull(),
                     onSubmitMerge = { clips, outName, target, offloadHost, runNow ->
