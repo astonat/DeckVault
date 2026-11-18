@@ -8,6 +8,7 @@ import com.deckvault.app.model.EditStudioRequest
 import com.deckvault.app.model.JobsSnapshotResponse
 import com.deckvault.app.model.OffloadStageResponse
 import com.deckvault.app.model.SavedHost
+import com.deckvault.app.model.StoryboardInfoResponse
 import com.deckvault.app.model.ThemeSurfaceStyle
 import com.deckvault.app.model.UpscaleRequest
 import com.deckvault.app.model.UserPreferences
@@ -111,5 +112,10 @@ class DeckVaultModelsTest {
         assertEquals(richPrefs, roundTripped)
         assertTrue(AccentPalette.entries.size >= 11)
         assertEquals(3, ThemeSurfaceStyle.entries.size)
+
+        val sbJson = """{"cols":4,"rows":4,"frameCount":16,"cellWidth":320,"cellHeight":180,"durationMs":125400}"""
+        val sbDec = json.decodeFromString(StoryboardInfoResponse.serializer(), sbJson)
+        assertEquals(125400L, sbDec.durationMs)
+        assertEquals(0, sbDec.width)
     }
 }

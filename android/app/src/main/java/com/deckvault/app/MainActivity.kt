@@ -502,6 +502,10 @@ private fun DeckVaultRoot(
                                 onOpenSettings = { vm.openSettingsModal() },
                                 onUpdatePrefs = { vm.updatePreferences(it) },
                                 needsAllFilesPermission = ui.needsAllFilesPermission,
+                                savedHosts = prefs.hosts,
+                                quickFolders = ui.quickFolders,
+                                onSelectHost = { vm.selectHost(it) },
+                                onOpenHostManager = { vm.openHostsModal() },
                                 onGrantAllFilesAccess = openAllFilesGrantScreen,
                                 onOptimizeFile = { file, tab -> vm.openOptimizer(file, tab) },
                                 onDeleteSingleFile = { file, recycle -> vm.deleteSingleFileWithMode(file, recycle) },
@@ -605,6 +609,10 @@ private fun DeckVaultRoot(
                         onOpenSettings = { vm.openSettingsModal() },
                         onUpdatePrefs = { vm.updatePreferences(it) },
                         needsAllFilesPermission = ui.needsAllFilesPermission,
+                        savedHosts = prefs.hosts,
+                        quickFolders = ui.quickFolders,
+                        onSelectHost = { vm.selectHost(it) },
+                        onOpenHostManager = { vm.openHostsModal() },
                         onGrantAllFilesAccess = openAllFilesGrantScreen,
                         onOptimizeFile = { file, tab -> vm.openOptimizer(file, tab) },
                         onDeleteSingleFile = { file, recycle -> vm.deleteSingleFileWithMode(file, recycle) },
@@ -884,9 +892,13 @@ private fun DeckVaultRoot(
                     jobs = ui.queueJobs,
                     onOpenQueue = { vm.openQueueSheet() },
                     modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(end = 16.dp, bottom = 16.dp)
-                        .fillMaxWidth(0.46f),
+                        .align(if (isCompactScreen) Alignment.BottomCenter else Alignment.BottomEnd)
+                        .padding(
+                            start = if (isCompactScreen) 12.dp else 0.dp,
+                            end = if (isCompactScreen) 12.dp else 16.dp,
+                            bottom = 16.dp,
+                        )
+                        .fillMaxWidth(if (isCompactScreen) 0.94f else 0.46f),
                 )
             }
 

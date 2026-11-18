@@ -2,6 +2,20 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.4.3] - 2026-11-18
+
+### Android AVI/TS Studio Video Fix, TS Seekbar/Duration Fix & Flagship Phone Portrait UI
+- **Fixed Black Video Preview on `.avi` & `.ts` in Edit Studio (`VideoPlayerAndTrimmer.kt`)**:
+  - Switched LibVLC `VLCVideoLayout` rendering from `SurfaceView` (`attachViews(..., true)`) to `TextureView` (`attachViews(..., false)`) so video renders natively inside Compose hardware layers with full rotation, flip, zoom, and color `RenderEffect` support and zero paused surface blackouts.
+  - Eliminated Compose `movableContentOf` AndroidView reparenting by keeping the Video Stage inside one fixed layout slot across Cinema, Split Stage, Side Rail, and Peek modes.
+- **Fixed `.ts` Missing / Stuck `0s–1s` Seekbar (`VideoPlayerAndTrimmer.kt`, `LocalStorageRepository.kt`, `MainViewModel.kt`, `AndroidPeerServer.kt`)**:
+  - Added `android.media.MediaExtractor` track duration + end-PTS scan fallback in `probeVideoMeta` for `.ts`/`.mts`/`.m2ts` containers when `MediaMetadataRetriever` returns `0`.
+  - Added `/api/video/storyboard-info` in `AndroidPeerServer` + async background duration probing (`MainViewModel.openVideo` via local `MediaExtractor` or remote `/api/video/storyboard-info`) that updates duration, resolution, and Studio filmstrip frames live.
+  - Wired LibVLC `Event.PositionChanged` + dynamic `(time / position)` duration derivation + `setPosition(fraction)` scrubbing whenever `vlcPlayer.length <= 0`, plus a real percentage seekbar fallback instead of clamping to fake `00:01`.
+- **Responsive Flagship Phone & Z Fold Cover Screen Portrait Layout (`MediaBrowserPane.kt`, `MainActivity.kt`, `AllDrivesDashboard.kt`)**:
+  - Replaced cramped multi-item single-row headers and squished segmented buttons on `< 600.dp` phones with a clean compact app bar, 1-tap horizontal **Device Switcher Pill Bar** (`This Phone`, paired PCs/tablets, `+ Pair`), flexible `weight(1f)` search + compact `Grid/List` toggle, unclipped filter chips, actionable empty states (`Browse Folders`, `All Drives`, `Clear Filters`, quick folders), and full-width mobile queue mini bar.
+- *(Desktop Companion `DeckVault.exe` remains untouched on `v1.4.1` and 100% compatible.)*
+
 ## [v1.4.2] - 2026-11-18
 
 ### Android Hybrid Video Studio, Fitted 8-Handle Cropper & Full-Color Material 3 Themes

@@ -830,6 +830,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private var videoMetaProbeJob: Job? = null
+
     fun openVideo(file: FileItem, openTrimmer: Boolean) {
         _ui.update {
             it.copy(
@@ -838,6 +840,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 lastTrimResult = null,
                 trimError = null,
             )
+        }
+        videoMetaProbeJob?.cancel()
+        if ((file.meta?.durationMs ?: 0L) <= 0L) {
+            val host = activeHost()
+            videoMetaProbeJob = viewModelScope.launch {
+                val resolved: VideoMeta? = runCatching {
+                    if (host.isLocalDevice) {
+                        withContext(Dispatchers.IO) { localRepo.probeVideoMeta(file.path) }
+                    } else {
+                        val sb = api.getStoryboardInfo(host, file.path)
+                        if (sb.durationMs > 0L || sb.width > 0) {
+                            (file.meta ?: VideoMeta()).copy(
+                                durationMs = sb.durationMs.coerceAtLeast(file.meta?.durationMs ?: 0L),
+                                width = if (sb.width > 0) sb.width else (file.meta?.width ?: 0),
+                                height = if (sb.height > 0) sb.height else (file.meta?.height ?: 0),
+                            )
+                        } else null
+                    }
+                }.getOrNull()
+                if (resolved != null && (resolved.durationMs > 0L || resolved.width > 0)) {
+                    _ui.update { state ->
+                        val curActive = state.activeVideoFile
+                        val updatedActive = if (curActive?.path == file.path) {
+                            curActive.copy(meta = resolved)
+                        } else curActive
+                        val updatedFiles = state.files.map { f ->
+                            if (f.path == file.path) f.copy(meta = resolved) else f
+                        }
+                        state.copy(activeVideoFile = updatedActive, files = updatedFiles)
+                    }
+                }
+            }
         }
     }
 

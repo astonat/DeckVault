@@ -349,20 +349,28 @@ fun VisualFilmstripRangeTrimmer(
             }
         }
 
-        RangeSlider(
-            value = startVal..endVal,
-            onValueChange = { rng ->
-                val s = rng.start.roundToInt().toLong()
-                val e = rng.endInclusive.roundToInt().toLong().coerceAtLeast(s + 250L)
-                onRangeChange(s, e)
-            },
-            valueRange = 0f..safeDur,
-        )
+        if (durationMs > 0L) {
+            RangeSlider(
+                value = startVal..endVal,
+                onValueChange = { rng ->
+                    val s = rng.start.roundToInt().toLong()
+                    val e = rng.endInclusive.roundToInt().toLong().coerceAtLeast(s + 250L)
+                    onRangeChange(s, e)
+                },
+                valueRange = 0f..safeDur,
+            )
 
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("In: ${Formatters.formatDurationPrecise(startMs)}", style = MaterialTheme.typography.labelSmall, color = surfaces.textPrimary)
-            Text("Clip: ${Formatters.formatDurationPrecise((endMs - startMs).coerceAtLeast(0L))}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-            Text("Out: ${Formatters.formatDurationPrecise(endMs)}", style = MaterialTheme.typography.labelSmall, color = surfaces.textPrimary)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("In: ${Formatters.formatDurationPrecise(startMs)}", style = MaterialTheme.typography.labelSmall, color = surfaces.textPrimary)
+                Text("Clip: ${Formatters.formatDurationPrecise((endMs - startMs).coerceAtLeast(0L))}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                Text("Out: ${Formatters.formatDurationPrecise(endMs)}", style = MaterialTheme.typography.labelSmall, color = surfaces.textPrimary)
+            }
+        } else {
+            Text(
+                "Detecting TS stream length — you can still scrub above, crop, rotate & apply color edits.",
+                style = MaterialTheme.typography.labelSmall,
+                color = surfaces.textSecondary,
+            )
         }
     }
 }

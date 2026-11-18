@@ -602,6 +602,18 @@ data class OffloadStageResponse(
     val sizeBytes: Long = 0L,
 )
 
+@Serializable
+data class StoryboardInfoResponse(
+    val cols: Int = 4,
+    val rows: Int = 4,
+    val frameCount: Int = 16,
+    val cellWidth: Int = 320,
+    val cellHeight: Int = 180,
+    val durationMs: Long = 0L,
+    val width: Int = 0,
+    val height: Int = 0,
+)
+
 enum class JobExecutionTarget(val label: String) {
     ON_DEVICE("This Tablet (Offline)"),
     PC_REMOTE("Run on PC Host"),

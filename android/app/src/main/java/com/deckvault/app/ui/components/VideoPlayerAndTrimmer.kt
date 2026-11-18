@@ -95,7 +95,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -254,6 +253,7 @@ fun VideoPlayerAndTrimmerOverlay(
     var isBuffering by remember(file.path) { mutableStateOf(true) }
     var durationMs by remember(file.path) { mutableLongStateOf(file.meta?.durationMs ?: 0L) }
     var currentPosMs by remember(file.path) { mutableLongStateOf(initialResumePositionMs) }
+    var vlcPositionFrac by remember(file.path) { mutableFloatStateOf(0f) }
     var resumeApplied by remember(file.path) { mutableStateOf(false) }
     var vlcAudioTracks by remember(file.path) { mutableStateOf<List<PlayerTrackOption>>(emptyList()) }
     var vlcSubTracks by remember(file.path) { mutableStateOf<List<PlayerTrackOption>>(emptyList()) }
@@ -261,6 +261,7 @@ fun VideoPlayerAndTrimmerOverlay(
     // Scrub & gesture HUD feedback
     var isSliderDragging by remember { mutableStateOf(false) }
     var sliderDragMs by remember { mutableLongStateOf(0L) }
+    var sliderDragFrac by remember { mutableFloatStateOf(0f) }
     var gestureHudTitle by remember { mutableStateOf<String?>(null) }
     var gestureHudSub by remember { mutableStateOf<String?>(null) }
     var gestureHudFraction by remember { mutableFloatStateOf(-1f) }
@@ -447,8 +448,33 @@ fun VideoPlayerAndTrimmerOverlay(
     fun engineSeekRaw(targetMs: Long) {
         val safe = targetMs.coerceAtLeast(0L)
         when (activeEngine) {
-            VideoEngineMode.VLC -> runCatching { vlcSession?.second?.setTime(safe, false) }
+            VideoEngineMode.VLC -> runCatching {
+                val vp = vlcSession?.second ?: return@runCatching
+                val len = vp.length
+                if (len > 0L) {
+                    vp.setTime(safe, false)
+                } else if (durationMs > 0L && vp.isSeekable) {
+                    val frac = (safe.toFloat() / durationMs.toFloat()).coerceIn(0f, 0.999f)
+                    vp.setPosition(frac, false)
+                    vlcPositionFrac = frac
+                } else {
+                    vp.setTime(safe, false)
+                }
+            }
             VideoEngineMode.EXO -> exoPlayer?.seekTo(safe)
+        }
+    }
+
+    fun smartSeekToFraction(frac: Float) {
+        val cleanFrac = frac.coerceIn(0f, 0.999f)
+        if (durationMs > 0L) {
+            val tgt = (cleanFrac * durationMs).toLong()
+            engineSeekRaw(tgt)
+            currentPosMs = tgt
+            vlcPositionFrac = cleanFrac
+        } else if (activeEngine == VideoEngineMode.VLC) {
+            runCatching { vlcSession?.second?.setPosition(cleanFrac, false) }
+            vlcPositionFrac = cleanFrac
         }
     }
 
@@ -619,6 +645,7 @@ fun VideoPlayerAndTrimmerOverlay(
             val evType = ev.type
             val evTime = ev.timeChanged
             val evLen = ev.lengthChanged
+            val evPos = ev.positionChanged
             val evBuf = ev.buffering
             mainHandler.post {
                 if (vlcPlayer.isReleased) return@post
@@ -666,9 +693,28 @@ fun VideoPlayerAndTrimmerOverlay(
                             if (studioEndMs <= 0L) studioEndMs = evLen
                         }
                     }
+                    VlcMediaPlayer.Event.PositionChanged -> {
+                        if (!isSliderDragging && evPos in 0f..1f) {
+                            vlcPositionFrac = evPos
+                            if (durationMs > 0L && (vlcPlayer.length <= 0L || vlcPlayer.time <= 0L)) {
+                                currentPosMs = (evPos * durationMs).toLong()
+                            }
+                        }
+                    }
                     VlcMediaPlayer.Event.TimeChanged -> {
                         if (!isSliderDragging && evTime >= 0L) {
-                            currentPosMs = evTime
+                            if (durationMs <= 0L || evTime <= durationMs + 3000L) {
+                                currentPosMs = evTime
+                            }
+                            val p = runCatching { vlcPlayer.position }.getOrDefault(0f)
+                            if (p in 0f..1f) {
+                                vlcPositionFrac = p
+                                if (durationMs <= 0L && p > 0.02f && evTime in 2_000L..43_200_000L) {
+                                    val est = (evTime / p).toLong().coerceAtLeast(evTime)
+                                    durationMs = est
+                                    if (studioEndMs <= 0L) studioEndMs = est
+                                }
+                            }
                         }
                     }
                     VlcMediaPlayer.Event.ESAdded, VlcMediaPlayer.Event.ESDeleted, VlcMediaPlayer.Event.ESSelected, VlcMediaPlayer.Event.Vout -> {
@@ -819,20 +865,51 @@ fun VideoPlayerAndTrimmerOverlay(
         }
     }
 
+    // Sync metadata when background FFprobe/MediaExtractor resolves missing duration/resolution (e.g. .ts)
+    LaunchedEffect(file.path, file.meta?.durationMs, file.meta?.width, file.meta?.height) {
+        val mDur = file.meta?.durationMs ?: 0L
+        if (mDur > 0L && durationMs <= 0L) {
+            durationMs = mDur
+            if (studioEndMs <= 0L) studioEndMs = mDur
+        }
+        val mw = file.meta?.width ?: 0
+        val mh = file.meta?.height ?: 0
+        if (mw > 0 && naturalVideoWidth <= 0) naturalVideoWidth = mw
+        if (mh > 0 && naturalVideoHeight <= 0) naturalVideoHeight = mh
+    }
+
     // Poll position + A-B loop check
     LaunchedEffect(exoPlayer, vlcSession, activeEngine, loopStartMs, loopEndMs) {
         while (true) {
             if (!isSliderDragging) {
-                val pos = engineCurrentLogicalPosMs()
-                currentPosMs = pos
                 val dur = engineDurationMs()
                 if (dur > 0L) {
                     durationMs = dur
                     if (studioEndMs <= 0L) studioEndMs = dur
                 }
+                if (activeEngine == VideoEngineMode.VLC) {
+                    val vp = vlcSession?.second
+                    val rawLen = runCatching { vp?.length ?: 0L }.getOrDefault(0L)
+                    val posFrac = runCatching { vp?.position ?: 0f }.getOrDefault(0f).coerceIn(0f, 1f)
+                    if (posFrac > 0f || !isPlaying) vlcPositionFrac = posFrac
+                    val rawTime = runCatching { vp?.time ?: -1L }.getOrDefault(-1L)
+                    if (durationMs <= 0L && posFrac > 0.02f && rawTime in 2_000L..43_200_000L) {
+                        val est = (rawTime / posFrac).toLong().coerceAtLeast(rawTime)
+                        durationMs = est
+                        if (studioEndMs <= 0L) studioEndMs = est
+                    }
+                    currentPosMs = when {
+                        durationMs > 0L && rawLen > 0L && rawTime in 0L..(durationMs + 3000L) -> rawTime
+                        durationMs > 0L && posFrac > 0f -> (posFrac * durationMs).toLong()
+                        rawTime in 0L..43_200_000L && (durationMs <= 0L || rawTime <= durationMs + 3000L) -> rawTime
+                        else -> currentPosMs
+                    }
+                } else {
+                    currentPosMs = engineCurrentLogicalPosMs()
+                }
                 val a = loopStartMs
                 val b = loopEndMs
-                if (a != null && b != null && b > a + 300L && pos >= b && engineIsPlaying()) {
+                if (a != null && b != null && b > a + 300L && currentPosMs >= b && engineIsPlaying()) {
                     smartSeekTo(a)
                 }
             }
@@ -921,50 +998,8 @@ fun VideoPlayerAndTrimmerOverlay(
     val prevItem = if (currentIdx > 0) playlist[currentIdx - 1] else null
     val nextItem = if (currentIdx >= 0 && currentIdx + 1 < playlist.size) playlist[currentIdx + 1] else null
 
-    val movableVideoSurface = remember(file.path, activeEngine, exoPlayer, vlcSession) {
-        movableContentOf {
-            val effectiveAspect = if (studioExpanded && studioCropActive) PlayerAspectMode.FIT else aspectMode
-            if (activeEngine == VideoEngineMode.VLC && vlcSession != null) {
-                val vp = vlcSession.second
-                AndroidView(
-                    factory = { ctx ->
-                        VLCVideoLayout(ctx).apply {
-                            keepScreenOn = true
-                        }
-                    },
-                    update = { layout ->
-                        if (attachedVlcLayout !== layout) {
-                            attachedVlcLayout = layout
-                            runCatching { vp.detachViews() }
-                            vp.attachViews(layout, null, true, true)
-                        }
-                        vp.videoScale = effectiveAspect.vlcScale
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else if (exoPlayer != null) {
-                AndroidView(
-                    factory = { ctx ->
-                        (android.view.LayoutInflater.from(ctx)
-                            .inflate(R.layout.deckvault_texture_player_view, null) as PlayerView).apply {
-                            this.player = exoPlayer
-                            useController = false
-                            resizeMode = effectiveAspect.resizeMode
-                            keepScreenOn = true
-                        }
-                    },
-                    update = { pv ->
-                        if (pv.player !== exoPlayer) pv.player = exoPlayer
-                        pv.resizeMode = effectiveAspect.resizeMode
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-        }
-    }
-
     val renderVideoStage: @Composable (Modifier) -> Unit = { stageMod ->
-        // VIDEO CANVAS WITH GESTURES & FITTED CROP OVERLAY
+        // VIDEO CANVAS WITH GESTURES & FITTED CROP OVERLAY (TextureView + non-reparented stage!)
         BoxWithConstraints(
             contentAlignment = Alignment.Center,
             modifier = stageMod
@@ -997,23 +1032,37 @@ fun VideoPlayerAndTrimmerOverlay(
                         },
                         onDoubleTap = { offset ->
                             if (isLocked || studioCropActive) return@detectTapGestures
-                            val dur = engineDurationMs()
+                            val dur = engineDurationMs().takeIf { it > 0L } ?: durationMs
                             val stepMs = seekStepSeconds.coerceAtLeast(5) * 1000L
                             val basePos = engineCurrentLogicalPosMs()
                             when {
                                 offset.x < boxWidthPx * 0.34f -> {
-                                    val tgt = (basePos - stepMs).coerceAtLeast(0L)
-                                    smartSeekTo(tgt)
-                                    gestureHudTitle = "<< -${seekStepSeconds}s"
-                                    gestureHudSub = Formatters.formatDuration(tgt)
+                                    if (dur <= 0L && activeEngine == VideoEngineMode.VLC) {
+                                        val nextF = (vlcPositionFrac - 0.05f).coerceIn(0f, 1f)
+                                        smartSeekToFraction(nextF)
+                                        gestureHudTitle = "<< -5%"
+                                        gestureHudSub = "${(nextF * 100).roundToInt()}%"
+                                    } else {
+                                        val tgt = (basePos - stepMs).coerceAtLeast(0L)
+                                        smartSeekTo(tgt)
+                                        gestureHudTitle = "<< -${seekStepSeconds}s"
+                                        gestureHudSub = Formatters.formatDuration(tgt)
+                                    }
                                     gestureHudFraction = -1f
                                     hudNonce++
                                 }
                                 offset.x > boxWidthPx * 0.66f -> {
-                                    val tgt = (basePos + stepMs).let { if (dur > 0) it.coerceAtMost(dur) else it }
-                                    smartSeekTo(tgt)
-                                    gestureHudTitle = "+${seekStepSeconds}s >>"
-                                    gestureHudSub = Formatters.formatDuration(tgt)
+                                    if (dur <= 0L && activeEngine == VideoEngineMode.VLC) {
+                                        val nextF = (vlcPositionFrac + 0.05f).coerceIn(0f, 0.99f)
+                                        smartSeekToFraction(nextF)
+                                        gestureHudTitle = "+5% >>"
+                                        gestureHudSub = "${(nextF * 100).roundToInt()}%"
+                                    } else {
+                                        val tgt = (basePos + stepMs).let { if (dur > 0) it.coerceAtMost(dur) else it }
+                                        smartSeekTo(tgt)
+                                        gestureHudTitle = "+${seekStepSeconds}s >>"
+                                        gestureHudSub = Formatters.formatDuration(tgt)
+                                    }
                                     gestureHudFraction = -1f
                                     hudNonce++
                                 }
@@ -1203,7 +1252,43 @@ fun VideoPlayerAndTrimmerOverlay(
                 }
 
             Box(modifier = videoBoxMod) {
-                movableVideoSurface()
+                if (activeEngine == VideoEngineMode.VLC && vlcSession != null) {
+                    val vp = vlcSession.second
+                    AndroidView(
+                        factory = { ctx ->
+                            VLCVideoLayout(ctx).apply {
+                                keepScreenOn = true
+                            }
+                        },
+                        update = { layout ->
+                            if (attachedVlcLayout !== layout) {
+                                attachedVlcLayout = layout
+                                runCatching { vp.detachViews() }
+                                // textureView = true mode in LibVLC is selected by passing textureView flag false (SurfaceView = true, TextureView = false)
+                                vp.attachViews(layout, null, true, false)
+                            }
+                            vp.videoScale = effectiveAspect.vlcScale
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else if (exoPlayer != null) {
+                    AndroidView(
+                        factory = { ctx ->
+                            (android.view.LayoutInflater.from(ctx)
+                                .inflate(R.layout.deckvault_texture_player_view, null) as PlayerView).apply {
+                                this.player = exoPlayer
+                                useController = false
+                                resizeMode = effectiveAspect.resizeMode
+                                keepScreenOn = true
+                            }
+                        },
+                        update = { pv ->
+                            if (pv.player !== exoPlayer) pv.player = exoPlayer
+                            pv.resizeMode = effectiveAspect.resizeMode
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
 
                 if (studioExpanded && studioCropActive) {
                     Box(
@@ -1516,8 +1601,10 @@ fun VideoPlayerAndTrimmerOverlay(
     }
 
     val renderSlimStudioTransport: @Composable (Boolean) -> Unit = { showExpandBtn ->
+        val hasDur = durationMs > 0L
         val safeDur = durationMs.coerceAtLeast(1000L).toFloat()
         val displayPos = if (isSliderDragging) sliderDragMs else currentPosMs
+        val displayFrac = if (isSliderDragging) sliderDragFrac else vlcPositionFrac
         val tabName = when (studioTab) {
             1 -> "Crop"
             2 -> "Color"
@@ -1537,7 +1624,8 @@ fun VideoPlayerAndTrimmerOverlay(
                 IconButton(
                     onClick = {
                         enginePause()
-                        smartSeekTo((engineCurrentLogicalPosMs() - 33L).coerceAtLeast(0L))
+                        if (hasDur) smartSeekTo((engineCurrentLogicalPosMs() - 33L).coerceAtLeast(0L))
+                        else smartSeekToFraction((vlcPositionFrac - 0.02f).coerceIn(0f, 1f))
                     },
                     modifier = Modifier.size(32.dp),
                 ) {
@@ -1559,30 +1647,52 @@ fun VideoPlayerAndTrimmerOverlay(
                 IconButton(
                     onClick = {
                         enginePause()
-                        smartSeekTo(engineCurrentLogicalPosMs() + 33L)
+                        if (hasDur) smartSeekTo(engineCurrentLogicalPosMs() + 33L)
+                        else smartSeekToFraction((vlcPositionFrac + 0.02f).coerceIn(0f, 0.999f))
                     },
                     modifier = Modifier.size(32.dp),
                 ) {
                     Text("+1f", color = surfaces.textSecondary, style = MaterialTheme.typography.labelSmall)
                 }
-                Slider(
-                    value = displayPos.toFloat().coerceIn(0f, safeDur),
-                    onValueChange = { nextVal ->
-                        isSliderDragging = true
-                        sliderDragMs = nextVal.roundToInt().toLong()
-                    },
-                    onValueChangeFinished = {
-                        smartSeekTo(sliderDragMs)
-                        isSliderDragging = false
-                    },
-                    valueRange = 0f..safeDur,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    "${Formatters.formatDuration(displayPos)}/${Formatters.formatDuration(durationMs)}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = surfaces.textSecondary,
-                )
+                if (hasDur) {
+                    Slider(
+                        value = displayPos.toFloat().coerceIn(0f, safeDur),
+                        onValueChange = { nextVal ->
+                            isSliderDragging = true
+                            sliderDragMs = nextVal.roundToInt().toLong()
+                        },
+                        onValueChangeFinished = {
+                            smartSeekTo(sliderDragMs)
+                            isSliderDragging = false
+                        },
+                        valueRange = 0f..safeDur,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "${Formatters.formatDuration(displayPos)}/${Formatters.formatDuration(durationMs)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = surfaces.textSecondary,
+                    )
+                } else {
+                    Slider(
+                        value = displayFrac.coerceIn(0f, 1f),
+                        onValueChange = { nextVal ->
+                            isSliderDragging = true
+                            sliderDragFrac = nextVal.coerceIn(0f, 1f)
+                        },
+                        onValueChangeFinished = {
+                            smartSeekToFraction(sliderDragFrac)
+                            isSliderDragging = false
+                        },
+                        valueRange = 0f..1f,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "${(displayFrac * 100f).roundToInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = surfaces.textSecondary,
+                    )
+                }
                 if (showExpandBtn) {
                     AssistChip(
                         onClick = { studioPeekCollapsed = false },
@@ -1606,35 +1716,64 @@ fun VideoPlayerAndTrimmerOverlay(
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 10.dp),
             ) {
+                    val hasDur = durationMs > 0L
                     val safeDur = durationMs.coerceAtLeast(1000L).toFloat()
                     val displayPos = if (isSliderDragging) sliderDragMs else currentPosMs
+                    val displayFrac = if (isSliderDragging) sliderDragFrac else vlcPositionFrac
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text(Formatters.formatDuration(displayPos), style = MaterialTheme.typography.labelMedium, color = Color.White)
-                        Slider(
-                            value = displayPos.toFloat().coerceIn(0f, safeDur),
-                            onValueChange = { nextVal ->
-                                isSliderDragging = true
-                                sliderDragMs = nextVal.roundToInt().toLong()
-                                interactionNonce++
-                            },
-                            onValueChangeFinished = {
-                                smartSeekTo(sliderDragMs)
-                                isSliderDragging = false
-                                interactionNonce++
-                            },
-                            valueRange = 0f..safeDur,
-                            colors = SliderDefaults.colors(
-                                thumbColor = MaterialTheme.colorScheme.primary,
-                                activeTrackColor = MaterialTheme.colorScheme.primary,
-                                inactiveTrackColor = Color.White.copy(alpha = 0.26f),
-                            ),
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text(Formatters.formatDuration(durationMs), style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.78f))
+                        if (hasDur) {
+                            Text(Formatters.formatDuration(displayPos), style = MaterialTheme.typography.labelMedium, color = Color.White)
+                            Slider(
+                                value = displayPos.toFloat().coerceIn(0f, safeDur),
+                                onValueChange = { nextVal ->
+                                    isSliderDragging = true
+                                    sliderDragMs = nextVal.roundToInt().toLong()
+                                    interactionNonce++
+                                },
+                                onValueChangeFinished = {
+                                    smartSeekTo(sliderDragMs)
+                                    isSliderDragging = false
+                                    interactionNonce++
+                                },
+                                valueRange = 0f..safeDur,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = MaterialTheme.colorScheme.primary,
+                                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.26f),
+                                ),
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(Formatters.formatDuration(durationMs), style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.78f))
+                        } else {
+                            val leftLabel = if (displayPos > 0L) Formatters.formatDuration(displayPos) else "${(displayFrac * 100f).roundToInt()}%"
+                            val rightLabel = if (vlcPositionFrac > 0f || isSliderDragging) "${(displayFrac * 100f).roundToInt()}%" else "Stream"
+                            Text(leftLabel, style = MaterialTheme.typography.labelMedium, color = Color.White)
+                            Slider(
+                                value = displayFrac.coerceIn(0f, 1f),
+                                onValueChange = { nextVal ->
+                                    isSliderDragging = true
+                                    sliderDragFrac = nextVal.coerceIn(0f, 1f)
+                                    interactionNonce++
+                                },
+                                onValueChangeFinished = {
+                                    smartSeekToFraction(sliderDragFrac)
+                                    isSliderDragging = false
+                                    interactionNonce++
+                                },
+                                valueRange = 0f..1f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = MaterialTheme.colorScheme.primary,
+                                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.26f),
+                                ),
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(rightLabel, style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.78f))
+                        }
                     }
 
                     Row(
@@ -1816,9 +1955,7 @@ fun VideoPlayerAndTrimmerOverlay(
             }
         }
 
-    // Root Adaptive Player Container:
-    // - Full-bleed floating controls during Cinema playback
-    // - Hybrid Studio Stage (Split Stage on Z Fold Unfolded / Phone Portrait, Side Rail on Tablet Landscape, 1-Tap Peek)
+    // Root Adaptive Player Container (Single Permanent Video Stage Slot — never reparents TextureView/PlayerView!):
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -1826,65 +1963,61 @@ fun VideoPlayerAndTrimmerOverlay(
     ) {
         val rootMaxHeight = maxHeight
         val useSideRail = studioExpanded && !studioPeekCollapsed && maxWidth >= 840.dp && maxWidth > rootMaxHeight * 1.15f
-        when {
-            !studioExpanded -> {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    renderVideoStage(Modifier.fillMaxSize())
-                    AnimatedVisibility(
-                        visible = showControls && !isLocked,
-                        enter = fadeIn(),
-                        exit = fadeOut(),
-                        modifier = Modifier.align(Alignment.TopCenter),
-                    ) {
-                        renderTopBar(false)
-                    }
-                    AnimatedVisibility(
-                        visible = showControls && !isLocked,
-                        enter = fadeIn(),
-                        exit = fadeOut(),
-                        modifier = Modifier.align(Alignment.BottomCenter),
-                    ) {
-                        renderCinemaBottomBar()
-                    }
-                }
+        Column(modifier = Modifier.fillMaxSize()) {
+            if (studioExpanded) {
+                renderTopBar(true)
             }
-            studioPeekCollapsed -> {
-                Column(modifier = Modifier.fillMaxSize().navigationBarsPadding()) {
-                    renderTopBar(true)
-                    renderVideoStage(Modifier.weight(1f).fillMaxWidth())
-                    renderSlimStudioTransport(true)
-                }
-            }
-            useSideRail -> {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    renderTopBar(true)
-                    Row(modifier = Modifier.weight(1f).fillMaxWidth().navigationBarsPadding()) {
-                        Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                            renderVideoStage(Modifier.weight(1f).fillMaxWidth())
-                            renderSlimStudioTransport(false)
+            Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        renderVideoStage(Modifier.fillMaxSize())
+                        if (!studioExpanded) {
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = showControls && !isLocked,
+                                enter = fadeIn(),
+                                exit = fadeOut(),
+                                modifier = Modifier.align(Alignment.TopCenter),
+                            ) {
+                                renderTopBar(false)
+                            }
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = showControls && !isLocked,
+                                enter = fadeIn(),
+                                exit = fadeOut(),
+                                modifier = Modifier.align(Alignment.BottomCenter),
+                            ) {
+                                renderCinemaBottomBar()
+                            }
                         }
-                        Box(
+                    }
+                    if (studioExpanded) {
+                        Column(
                             modifier = Modifier
-                                .width(356.dp)
-                                .fillMaxHeight()
-                                .padding(top = 6.dp, end = 8.dp, bottom = 8.dp),
+                                .fillMaxWidth()
+                                .then(if (useSideRail) Modifier else Modifier.navigationBarsPadding()),
                         ) {
-                            renderStudioPanel(true)
+                            renderSlimStudioTransport(studioPeekCollapsed)
+                            if (!studioPeekCollapsed && !useSideRail) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = (rootMaxHeight * 0.43f).coerceAtLeast(220.dp)),
+                                ) {
+                                    renderStudioPanel(false)
+                                }
+                            }
                         }
                     }
                 }
-            }
-            else -> {
-                Column(modifier = Modifier.fillMaxSize().navigationBarsPadding()) {
-                    renderTopBar(true)
-                    renderVideoStage(Modifier.weight(1f).fillMaxWidth())
-                    renderSlimStudioTransport(false)
+                if (studioExpanded && !studioPeekCollapsed && useSideRail) {
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = (rootMaxHeight * 0.43f).coerceAtLeast(220.dp)),
+                            .width(356.dp)
+                            .fillMaxHeight()
+                            .navigationBarsPadding()
+                            .padding(top = 6.dp, end = 8.dp, bottom = 8.dp),
                     ) {
-                        renderStudioPanel(false)
+                        renderStudioPanel(true)
                     }
                 }
             }

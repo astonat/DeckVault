@@ -25,6 +25,7 @@ import com.deckvault.app.model.RenameRequest
 import com.deckvault.app.model.RootsResponse
 import com.deckvault.app.model.SavedHost
 import com.deckvault.app.model.SearchResponse
+import com.deckvault.app.model.StoryboardInfoResponse
 import com.deckvault.app.model.TransferRequest
 import com.deckvault.app.model.TransferResponse
 import com.deckvault.app.model.TreeResponse
@@ -185,6 +186,16 @@ class DeckVaultApi {
             .build()
         executeJson(trimClient, req, TrimResponse.serializer())
     }
+
+    suspend fun getStoryboardInfo(host: SavedHost, path: String, cols: Int = 4, rows: Int = 4): StoryboardInfoResponse =
+        withContext(Dispatchers.IO) {
+            val url = buildUrl(host, "/api/video/storyboard-info")
+                .addQueryParameter("path", path)
+                .addQueryParameter("cols", cols.toString())
+                .addQueryParameter("rows", rows.toString())
+                .build()
+            executeAuthedGet(host, url, StoryboardInfoResponse.serializer())
+        }
 
     suspend fun deleteFiles(host: SavedHost, paths: List<String>, recycle: Boolean): DeleteResponse =
         withContext(Dispatchers.IO) {

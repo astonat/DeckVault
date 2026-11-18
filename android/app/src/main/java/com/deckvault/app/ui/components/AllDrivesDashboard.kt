@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -89,11 +90,12 @@ fun AllDrivesDashboard(
     val totalUsed = (totalCapacity - totalFree).coerceAtLeast(0L)
     val onlineCount = snapshots.count { it.online }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(surfaces.background),
     ) {
+        val compact = maxWidth < 500.dp
         Column(modifier = Modifier.fillMaxSize()) {
             // Top bar
             Surface(
@@ -102,17 +104,24 @@ fun AllDrivesDashboard(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 10.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = if (compact) 12.dp else 18.dp, vertical = 12.dp),
                 ) {
                     Icon(Icons.Rounded.Storage, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("All Devices & Drives", style = MaterialTheme.typography.titleLarge, color = surfaces.textPrimary)
                         Text(
-                            "$onlineCount/${snapshots.size} devices online  •  ${allDrives.size} drives  •  " +
-                                "${Formatters.formatBytes(totalFree)} free of ${Formatters.formatBytes(totalCapacity)}",
+                            "All Devices & Drives",
+                            style = if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                            color = surfaces.textPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            "$onlineCount/${snapshots.size} online • ${allDrives.size} drives • ${Formatters.formatBytes(totalFree)} free",
                             style = MaterialTheme.typography.bodySmall,
                             color = surfaces.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                     if (isRefreshing) {
@@ -122,10 +131,16 @@ fun AllDrivesDashboard(
                             Icon(Icons.Rounded.Refresh, contentDescription = "Refresh all devices")
                         }
                     }
-                    OutlinedButton(onClick = onOpenHostsModal, shape = RoundedCornerShape(50)) {
+                    OutlinedButton(
+                        onClick = onOpenHostsModal,
+                        shape = RoundedCornerShape(50),
+                        contentPadding = PaddingValues(horizontal = if (compact) 10.dp else 14.dp, vertical = 6.dp),
+                    ) {
                         Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Pair")
+                        if (!compact) {
+                            Spacer(Modifier.width(4.dp))
+                            Text("Pair")
+                        }
                     }
                     IconButton(onClick = onClose) {
                         Icon(Icons.Rounded.Close, contentDescription = "Close")

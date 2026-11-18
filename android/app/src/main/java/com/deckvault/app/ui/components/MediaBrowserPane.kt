@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -36,11 +39,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.automirrored.rounded.ViewList
+import androidx.compose.material.icons.rounded.AddLink
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Compress
+import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.Delete
@@ -49,11 +54,14 @@ import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DriveFileRenameOutline
 import androidx.compose.material.icons.rounded.FileUpload
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.InsertDriveFile
+import androidx.compose.material.icons.rounded.Laptop
 import androidx.compose.material.icons.rounded.Merge
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Queue
 import androidx.compose.material.icons.rounded.Search
@@ -81,9 +89,6 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -109,6 +114,7 @@ import com.deckvault.app.model.CardAspect
 import com.deckvault.app.model.FileItem
 import com.deckvault.app.model.FolderItem
 import com.deckvault.app.model.MediaFilter
+import com.deckvault.app.model.QuickFolder
 import com.deckvault.app.model.SavedHost
 import com.deckvault.app.model.SortBy
 import com.deckvault.app.model.ThemeSurfaceStyle
@@ -119,7 +125,7 @@ import com.deckvault.app.ui.theme.OledColors
 import com.deckvault.app.ui.util.Formatters
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun MediaBrowserPane(
     host: SavedHost?,
@@ -159,6 +165,10 @@ fun MediaBrowserPane(
     onOpenSettings: () -> Unit,
     onUpdatePrefs: ((UserPreferences) -> UserPreferences) -> Unit,
     modifier: Modifier = Modifier,
+    savedHosts: List<SavedHost> = emptyList(),
+    quickFolders: List<QuickFolder> = emptyList(),
+    onSelectHost: (SavedHost) -> Unit = {},
+    onOpenHostManager: () -> Unit = {},
     needsAllFilesPermission: Boolean = false,
     onGrantAllFilesAccess: () -> Unit = {},
     onOptimizeFile: (FileItem, OptimizerTab) -> Unit = { _, _ -> },
@@ -177,8 +187,15 @@ fun MediaBrowserPane(
     val surfaces = LocalDeckSurfaces.current
     val maxFileBytes = remember(files) { files.maxOfOrNull { it.sizeBytes }?.coerceAtLeast(1L) ?: 1L }
 
-    Box(modifier = modifier.fillMaxSize().background(OledColors.PitchBlack)) {
-        Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 10.dp)) {
+    BoxWithConstraints(modifier = modifier.fillMaxSize().background(OledColors.PitchBlack)) {
+        val isCompactPhone = maxWidth < 600.dp
+        val isVeryNarrow = maxWidth < 390.dp
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = if (isCompactPhone) 10.dp else 12.dp, vertical = if (isCompactPhone) 8.dp else 10.dp),
+        ) {
             if (needsAllFilesPermission && host?.isLocalDevice == true) {
                 Surface(
                     shape = RoundedCornerShape(14.dp),
@@ -191,7 +208,7 @@ fun MediaBrowserPane(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                     ) {
-                        Icon(androidx.compose.material.icons.Icons.Rounded.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Rounded.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                         Text(
                             "Grant All Files Access to browse & manage all device folders directly.",
                             style = MaterialTheme.typography.bodySmall,
@@ -204,335 +221,584 @@ fun MediaBrowserPane(
                     }
                 }
             }
-            // Top Expressive Header Bar
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                if (showOpenFoldersButton) {
-                    Surface(
-                        onClick = onOpenFoldersDrawer,
-                        shape = RoundedCornerShape(14.dp),
-                        color = OledColors.ElevatedSurface,
-                        border = BorderStroke(1.dp, OledColors.HairlineBorder),
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+
+            if (isCompactPhone) {
+                // FLAGSHIP PHONE / Z FOLD COVER SCREEN RESPONSIVE HEADER (Zero overflow, zero squishing)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (showOpenFoldersButton) {
+                        Surface(
+                            onClick = onOpenFoldersDrawer,
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
                         ) {
-                            Icon(Icons.Rounded.Folder, contentDescription = "Folders", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                            Text("Folders", style = MaterialTheme.typography.labelLarge, color = OledColors.TextPrimary)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                modifier = Modifier.padding(horizontal = if (isVeryNarrow) 8.dp else 10.dp, vertical = 8.dp),
+                            ) {
+                                Icon(Icons.Rounded.Folder, contentDescription = "Folders", tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(18.dp))
+                                if (!isVeryNarrow) {
+                                    Text("Folders", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                                }
+                            }
                         }
                     }
-                }
 
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = if (isSpaceHogsMode) "Largest Space Hogs" else folderName.ifBlank { host?.displayName ?: "Files & Media" },
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                                color = OledColors.TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (isSpaceHogsMode) {
+                                Surface(
+                                    onClick = onExitSpaceHogs,
+                                    shape = RoundedCornerShape(50),
+                                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                                ) {
+                                    Text(
+                                        "Exit",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                    )
+                                }
+                            }
+                        }
                         Text(
-                            text = if (isSpaceHogsMode) "Largest Space Hogs" else folderName.ifBlank { "Files & Media" },
-                            style = MaterialTheme.typography.titleLarge,
-                            color = OledColors.TextPrimary,
+                            text = buildString {
+                                if (totalFolderSizeBytes >= 0 && !isSpaceHogsMode) {
+                                    append(Formatters.formatBytes(totalFolderSizeBytes))
+                                } else if (currentPath.isNotBlank()) {
+                                    append(currentPath)
+                                }
+                                if (files.isNotEmpty()) {
+                                    if (isNotEmpty()) append(" • ")
+                                    append("${files.size} items")
+                                }
+                            }.ifBlank { host?.displayName ?: "Browse storage" },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = OledColors.TextSecondary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        if (isSpaceHogsMode) {
-                            Surface(
-                                onClick = onExitSpaceHogs,
-                                shape = RoundedCornerShape(50),
-                                color = MaterialTheme.colorScheme.tertiaryContainer,
-                            ) {
-                                Text(
-                                    "Back to Folder",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                )
-                            }
-                        }
                     }
-                    Text(
-                        text = buildString {
-                            if (currentPath.isNotBlank()) append(currentPath)
-                            if (totalFolderSizeBytes >= 0 && !isSpaceHogsMode) {
-                                if (isNotEmpty()) append("  •  ")
-                                append(Formatters.formatBytes(totalFolderSizeBytes))
-                            }
-                            if (files.isNotEmpty()) {
-                                if (isNotEmpty()) append("  •  ")
-                                append("${files.size} items")
-                            }
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = OledColors.TextSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
 
-                // Render Queue Button (visible on all screen sizes including Fold/Phone)
-                Surface(
-                    onClick = onOpenQueue,
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (activeQueueCount > 0) MaterialTheme.colorScheme.primaryContainer else OledColors.CardSurface,
-                    border = BorderStroke(1.dp, if (activeQueueCount > 0) MaterialTheme.colorScheme.primary else OledColors.HairlineBorder),
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                    ) {
-                        Icon(
-                            androidx.compose.material.icons.Icons.Rounded.Queue,
-                            contentDescription = "Queue",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Text(
-                            if (activeQueueCount > 0) "Queue ($activeQueueCount)" else "Queue",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = OledColors.TextPrimary,
-                        )
-                    }
-                }
-
-                // All Drives & Devices Dashboard Button
-                Surface(
-                    onClick = onOpenAllDrives,
-                    shape = RoundedCornerShape(14.dp),
-                    color = OledColors.CardSurface,
-                    border = BorderStroke(1.dp, OledColors.HairlineBorder),
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                    ) {
-                        Icon(
-                            Icons.Rounded.Storage,
-                            contentDescription = "All Drives",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Text("Drives", style = MaterialTheme.typography.labelLarge, color = OledColors.TextPrimary)
-                    }
-                }
-
-                // Gallery / List View Switcher
-                SingleChoiceSegmentedButtonRow {
-                    ViewMode.entries.forEachIndexed { idx, mode ->
-                        SegmentedButton(
-                            selected = prefs.viewMode == mode,
-                            onClick = { onUpdatePrefs { it.copy(viewMode = mode) } },
-                            shape = SegmentedButtonDefaults.itemShape(index = idx, count = ViewMode.entries.size),
-                            colors = SegmentedButtonDefaults.colors(
-                                activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                activeContentColor = MaterialTheme.colorScheme.primary,
-                                inactiveContainerColor = OledColors.CardSurface,
-                                inactiveContentColor = OledColors.TextSecondary,
-                            ),
-                            icon = {},
-                        ) {
-                            Icon(
-                                imageVector = if (mode == ViewMode.GALLERY) Icons.Rounded.GridView else Icons.AutoMirrored.Rounded.ViewList,
-                                contentDescription = mode.label,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        }
-                    }
-                }
-
-                // Sort Button
-                Box {
                     Surface(
-                        onClick = { showSortMenu = true },
-                        shape = RoundedCornerShape(14.dp),
-                        color = OledColors.CardSurface,
-                        border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                        onClick = onOpenQueue,
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (activeQueueCount > 0) MaterialTheme.colorScheme.primaryContainer else OledColors.CardSurface,
+                        border = BorderStroke(1.dp, if (activeQueueCount > 0) MaterialTheme.colorScheme.primary else OledColors.HairlineBorder),
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
                         ) {
-                            Icon(Icons.AutoMirrored.Rounded.Sort, contentDescription = "Sort", tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(18.dp))
-                            Text(
-                                text = "${prefs.sortBy.label} ${if (prefs.sortDescending) "↓" else "↑"}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = OledColors.TextPrimary,
-                            )
+                            Icon(Icons.Rounded.Queue, contentDescription = "Queue", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            if (activeQueueCount > 0) {
+                                Text("$activeQueueCount", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                            }
                         }
                     }
-                    DropdownMenu(
-                        expanded = showSortMenu,
-                        onDismissRequest = { showSortMenu = false },
-                        containerColor = OledColors.ElevatedSurface,
-                    ) {
-                        SortBy.entries.forEach { option ->
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        text = if (prefs.sortBy == option) {
-                                            "${option.label} (${if (prefs.sortDescending) "Desc" else "Asc"})"
-                                        } else option.label,
-                                        color = if (prefs.sortBy == option) MaterialTheme.colorScheme.primary else OledColors.TextPrimary,
-                                    )
-                                },
-                                onClick = {
-                                    showSortMenu = false
-                                    onUpdatePrefs {
-                                        if (it.sortBy == option) it.copy(sortDescending = !it.sortDescending)
-                                        else it.copy(sortBy = option, sortDescending = option != SortBy.NAME)
-                                    }
-                                },
-                            )
-                        }
-                    }
-                }
-
-                // Send Files from This Device to Current Folder
-                if (host != null && currentPath.isNotBlank() && !isSpaceHogsMode) {
                     Surface(
-                        onClick = onUploadFromDevice,
+                        onClick = onOpenAllDrives,
                         shape = RoundedCornerShape(12.dp),
                         color = OledColors.CardSurface,
                         border = BorderStroke(1.dp, OledColors.HairlineBorder),
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.FileUpload,
-                            contentDescription = "Send from this device",
-                            tint = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.padding(8.dp).size(19.dp),
-                        )
+                        Icon(Icons.Rounded.Storage, contentDescription = "All Drives", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(8.dp).size(18.dp))
+                    }
+                    Surface(
+                        onClick = onOpenSettings,
+                        shape = RoundedCornerShape(12.dp),
+                        color = OledColors.CardSurface,
+                        border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                    ) {
+                        Icon(Icons.Rounded.Settings, contentDescription = "Settings", tint = OledColors.TextSecondary, modifier = Modifier.padding(8.dp).size(18.dp))
                     }
                 }
 
-                // Customize Gallery Button
-                Surface(
-                    onClick = { showCustomizeSheet = true },
-                    shape = RoundedCornerShape(12.dp),
-                    color = OledColors.CardSurface,
-                    border = BorderStroke(1.dp, OledColors.HairlineBorder),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Tune,
-                        contentDescription = "Customize View",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(8.dp).size(19.dp),
-                    )
-                }
-
-                // Full Settings Button
-                Surface(
-                    onClick = onOpenSettings,
-                    shape = RoundedCornerShape(12.dp),
-                    color = OledColors.CardSurface,
-                    border = BorderStroke(1.dp, OledColors.HairlineBorder),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Settings,
-                        contentDescription = "Settings",
-                        tint = OledColors.TextSecondary,
-                        modifier = Modifier.padding(8.dp).size(19.dp),
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-
-            // Search + Recursive Toggle + Media Filter Chips Row
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = onSearchQueryChange,
-                    placeholder = {
-                        Text(
-                            if (recursiveSearch) "Search all subfolders..." else "Filter folder...",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    },
-                    leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                    trailingIcon = {
-                        if (searchQuery.isNotEmpty()) {
-                            IconButton(onClick = { onSearchQueryChange("") }) {
-                                Icon(Icons.Rounded.Close, contentDescription = "Clear", modifier = Modifier.size(16.dp))
+                // 1-Tap Device Switcher Strip on Phones
+                if (savedHosts.isNotEmpty() || showOpenFoldersButton) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    ) {
+                        savedHosts.forEach { sh ->
+                            val active = sh.hostId == host?.hostId
+                            val isLap = sh.displayName.contains("laptop", ignoreCase = true)
+                            Surface(
+                                onClick = { onSelectHost(sh) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (active) MaterialTheme.colorScheme.primaryContainer else OledColors.CardSurface,
+                                border = BorderStroke(1.dp, if (active) MaterialTheme.colorScheme.primary else OledColors.HairlineBorder),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = when {
+                                            sh.isLocalDevice -> Icons.Rounded.PhoneAndroid
+                                            isLap -> Icons.Rounded.Laptop
+                                            else -> Icons.Rounded.Computer
+                                        },
+                                        contentDescription = null,
+                                        tint = if (active) MaterialTheme.colorScheme.onPrimaryContainer else OledColors.TextSecondary,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                    Text(
+                                        text = if (sh.isLocalDevice) "This Phone" else sh.displayName,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else OledColors.TextPrimary,
+                                        maxLines = 1,
+                                    )
+                                }
                             }
                         }
-                    },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = OledColors.CardSurface,
-                        unfocusedContainerColor = OledColors.CardSurface,
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = OledColors.HairlineBorder,
-                        focusedTextColor = OledColors.TextPrimary,
-                        unfocusedTextColor = OledColors.TextPrimary,
-                    ),
-                    modifier = Modifier.width(195.dp).height(48.dp),
-                )
+                        Surface(
+                            onClick = onOpenHostManager,
+                            shape = RoundedCornerShape(10.dp),
+                            color = OledColors.ElevatedSurface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                            ) {
+                                Icon(Icons.Rounded.AddLink, contentDescription = "Pair Device", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp))
+                                Text("Pair", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    }
+                }
 
-                FilterChip(
-                    selected = recursiveSearch,
-                    onClick = onToggleRecursiveSearch,
-                    leadingIcon = {
-                        Icon(
-                            Icons.Rounded.SubdirectoryArrowRight,
-                            contentDescription = null,
-                            modifier = Modifier.size(15.dp),
-                        )
-                    },
-                    label = {
-                        Text(
-                            if (recursiveSearch) "All Subfolders" else "This Folder",
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    },
-                    shape = RoundedCornerShape(12.dp),
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                        selectedLeadingIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                        containerColor = OledColors.CardSurface,
-                        labelColor = OledColors.TextSecondary,
-                    ),
-                    border = FilterChipDefaults.filterChipBorder(
-                        enabled = true,
-                        selected = recursiveSearch,
-                        borderColor = OledColors.HairlineBorder,
-                        selectedBorderColor = MaterialTheme.colorScheme.secondary,
-                    ),
-                )
+                Spacer(Modifier.height(6.dp))
 
+                // Phone Search + Un-crushed View/Sort/Tune Bar
                 Row(
-                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = onSearchQueryChange,
+                        placeholder = {
+                            Text(
+                                if (recursiveSearch) "Search subfolders..." else "Filter folder...",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        },
+                        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(17.dp)) },
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { onSearchQueryChange("") }) {
+                                    Icon(Icons.Rounded.Close, contentDescription = "Clear", modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = OledColors.CardSurface,
+                            unfocusedContainerColor = OledColors.CardSurface,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = OledColors.HairlineBorder,
+                            focusedTextColor = OledColors.TextPrimary,
+                            unfocusedTextColor = OledColors.TextPrimary,
+                        ),
+                        modifier = Modifier.weight(1f).height(46.dp),
+                    )
+
+                    ViewModePillSwitcher(
+                        selected = prefs.viewMode,
+                        onSelect = { mode -> onUpdatePrefs { it.copy(viewMode = mode) } },
+                    )
+
+                    Box {
+                        Surface(
+                            onClick = { showSortMenu = true },
+                            shape = RoundedCornerShape(12.dp),
+                            color = OledColors.CardSurface,
+                            border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 9.dp),
+                            ) {
+                                Icon(Icons.AutoMirrored.Rounded.Sort, contentDescription = "Sort", tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(17.dp))
+                                Text(if (prefs.sortDescending) "↓" else "↑", style = MaterialTheme.typography.labelMedium, color = OledColors.TextPrimary)
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = showSortMenu,
+                            onDismissRequest = { showSortMenu = false },
+                            containerColor = OledColors.ElevatedSurface,
+                        ) {
+                            SortBy.entries.forEach { option ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = if (prefs.sortBy == option) {
+                                                "${option.label} (${if (prefs.sortDescending) "Desc" else "Asc"})"
+                                            } else option.label,
+                                            color = if (prefs.sortBy == option) MaterialTheme.colorScheme.primary else OledColors.TextPrimary,
+                                        )
+                                    },
+                                    onClick = {
+                                        showSortMenu = false
+                                        onUpdatePrefs {
+                                            if (it.sortBy == option) it.copy(sortDescending = !it.sortDescending)
+                                            else it.copy(sortBy = option, sortDescending = option != SortBy.NAME)
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+
+                    if (host != null && currentPath.isNotBlank() && !isSpaceHogsMode) {
+                        Surface(
+                            onClick = onUploadFromDevice,
+                            shape = RoundedCornerShape(12.dp),
+                            color = OledColors.CardSurface,
+                            border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                        ) {
+                            Icon(Icons.Rounded.FileUpload, contentDescription = "Upload", tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(9.dp).size(18.dp))
+                        }
+                    }
+
+                    Surface(
+                        onClick = { showCustomizeSheet = true },
+                        shape = RoundedCornerShape(12.dp),
+                        color = OledColors.CardSurface,
+                        border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                    ) {
+                        Icon(Icons.Rounded.Tune, contentDescription = "Customize View", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(9.dp).size(18.dp))
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                // Phone Scope & Media Type Filter Strip (never clipped!)
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    FilterChip(
+                        selected = recursiveSearch,
+                        onClick = onToggleRecursiveSearch,
+                        leadingIcon = { Icon(Icons.Rounded.SubdirectoryArrowRight, null, Modifier.size(15.dp)) },
+                        label = { Text(if (recursiveSearch) "Subfolders" else "This Folder", style = MaterialTheme.typography.labelMedium) },
+                        shape = RoundedCornerShape(10.dp),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                            containerColor = OledColors.CardSurface,
+                            labelColor = OledColors.TextSecondary,
+                        ),
+                    )
                     MediaFilter.entries.forEach { mf ->
                         val selected = prefs.mediaFilter == mf
                         FilterChip(
                             selected = selected,
                             onClick = { onUpdatePrefs { it.copy(mediaFilter = mf) } },
                             label = { Text(mf.label, style = MaterialTheme.typography.labelMedium) },
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(10.dp),
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
                                 selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
                                 containerColor = OledColors.CardSurface,
                                 labelColor = OledColors.TextSecondary,
                             ),
-                            border = FilterChipDefaults.filterChipBorder(
-                                enabled = true,
-                                selected = selected,
-                                borderColor = OledColors.HairlineBorder,
-                                selectedBorderColor = MaterialTheme.colorScheme.primary,
-                            ),
                         )
+                    }
+                }
+            } else {
+                // TABLET & Z FOLD UNFOLDED WIDE HEADER
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (showOpenFoldersButton) {
+                        Surface(
+                            onClick = onOpenFoldersDrawer,
+                            shape = RoundedCornerShape(14.dp),
+                            color = OledColors.ElevatedSurface,
+                            border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Icon(Icons.Rounded.Folder, contentDescription = "Folders", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                Text("Folders", style = MaterialTheme.typography.labelLarge, color = OledColors.TextPrimary)
+                            }
+                        }
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = if (isSpaceHogsMode) "Largest Space Hogs" else folderName.ifBlank { "Files & Media" },
+                                style = MaterialTheme.typography.titleLarge,
+                                color = OledColors.TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (isSpaceHogsMode) {
+                                Surface(
+                                    onClick = onExitSpaceHogs,
+                                    shape = RoundedCornerShape(50),
+                                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                                ) {
+                                    Text(
+                                        "Back to Folder",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            text = buildString {
+                                if (currentPath.isNotBlank()) append(currentPath)
+                                if (totalFolderSizeBytes >= 0 && !isSpaceHogsMode) {
+                                    if (isNotEmpty()) append("  •  ")
+                                    append(Formatters.formatBytes(totalFolderSizeBytes))
+                                }
+                                if (files.isNotEmpty()) {
+                                    if (isNotEmpty()) append("  •  ")
+                                    append("${files.size} items")
+                                }
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = OledColors.TextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+
+                    Surface(
+                        onClick = onOpenQueue,
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (activeQueueCount > 0) MaterialTheme.colorScheme.primaryContainer else OledColors.CardSurface,
+                        border = BorderStroke(1.dp, if (activeQueueCount > 0) MaterialTheme.colorScheme.primary else OledColors.HairlineBorder),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        ) {
+                            Icon(Icons.Rounded.Queue, contentDescription = "Queue", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Text(
+                                if (activeQueueCount > 0) "Queue ($activeQueueCount)" else "Queue",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = OledColors.TextPrimary,
+                            )
+                        }
+                    }
+
+                    Surface(
+                        onClick = onOpenAllDrives,
+                        shape = RoundedCornerShape(14.dp),
+                        color = OledColors.CardSurface,
+                        border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        ) {
+                            Icon(Icons.Rounded.Storage, contentDescription = "All Drives", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Text("Drives", style = MaterialTheme.typography.labelLarge, color = OledColors.TextPrimary)
+                        }
+                    }
+
+                    ViewModePillSwitcher(
+                        selected = prefs.viewMode,
+                        onSelect = { mode -> onUpdatePrefs { it.copy(viewMode = mode) } },
+                    )
+
+                    Box {
+                        Surface(
+                            onClick = { showSortMenu = true },
+                            shape = RoundedCornerShape(14.dp),
+                            color = OledColors.CardSurface,
+                            border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            ) {
+                                Icon(Icons.AutoMirrored.Rounded.Sort, contentDescription = "Sort", tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(18.dp))
+                                Text(
+                                    text = "${prefs.sortBy.label} ${if (prefs.sortDescending) "↓" else "↑"}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = OledColors.TextPrimary,
+                                )
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = showSortMenu,
+                            onDismissRequest = { showSortMenu = false },
+                            containerColor = OledColors.ElevatedSurface,
+                        ) {
+                            SortBy.entries.forEach { option ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = if (prefs.sortBy == option) {
+                                                "${option.label} (${if (prefs.sortDescending) "Desc" else "Asc"})"
+                                            } else option.label,
+                                            color = if (prefs.sortBy == option) MaterialTheme.colorScheme.primary else OledColors.TextPrimary,
+                                        )
+                                    },
+                                    onClick = {
+                                        showSortMenu = false
+                                        onUpdatePrefs {
+                                            if (it.sortBy == option) it.copy(sortDescending = !it.sortDescending)
+                                            else it.copy(sortBy = option, sortDescending = option != SortBy.NAME)
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+
+                    if (host != null && currentPath.isNotBlank() && !isSpaceHogsMode) {
+                        Surface(
+                            onClick = onUploadFromDevice,
+                            shape = RoundedCornerShape(12.dp),
+                            color = OledColors.CardSurface,
+                            border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                        ) {
+                            Icon(Icons.Rounded.FileUpload, contentDescription = "Send from this device", tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(8.dp).size(19.dp))
+                        }
+                    }
+
+                    Surface(
+                        onClick = { showCustomizeSheet = true },
+                        shape = RoundedCornerShape(12.dp),
+                        color = OledColors.CardSurface,
+                        border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                    ) {
+                        Icon(Icons.Rounded.Tune, contentDescription = "Customize View", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(8.dp).size(19.dp))
+                    }
+
+                    Surface(
+                        onClick = onOpenSettings,
+                        shape = RoundedCornerShape(12.dp),
+                        color = OledColors.CardSurface,
+                        border = BorderStroke(1.dp, OledColors.HairlineBorder),
+                    ) {
+                        Icon(Icons.Rounded.Settings, contentDescription = "Settings", tint = OledColors.TextSecondary, modifier = Modifier.padding(8.dp).size(19.dp))
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = onSearchQueryChange,
+                        placeholder = {
+                            Text(
+                                if (recursiveSearch) "Search all subfolders..." else "Filter folder...",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        },
+                        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { onSearchQueryChange("") }) {
+                                    Icon(Icons.Rounded.Close, contentDescription = "Clear", modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = OledColors.CardSurface,
+                            unfocusedContainerColor = OledColors.CardSurface,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = OledColors.HairlineBorder,
+                            focusedTextColor = OledColors.TextPrimary,
+                            unfocusedTextColor = OledColors.TextPrimary,
+                        ),
+                        modifier = Modifier.widthIn(min = 160.dp, max = 220.dp).height(48.dp),
+                    )
+
+                    FilterChip(
+                        selected = recursiveSearch,
+                        onClick = onToggleRecursiveSearch,
+                        leadingIcon = { Icon(Icons.Rounded.SubdirectoryArrowRight, contentDescription = null, modifier = Modifier.size(15.dp)) },
+                        label = { Text(if (recursiveSearch) "All Subfolders" else "This Folder", style = MaterialTheme.typography.labelMedium) },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                            selectedLeadingIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                            containerColor = OledColors.CardSurface,
+                            labelColor = OledColors.TextSecondary,
+                        ),
+                        border = FilterChipDefaults.filterChipBorder(
+                            enabled = true,
+                            selected = recursiveSearch,
+                            borderColor = OledColors.HairlineBorder,
+                            selectedBorderColor = MaterialTheme.colorScheme.secondary,
+                        ),
+                    )
+
+                    Row(
+                        modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        MediaFilter.entries.forEach { mf ->
+                            val selected = prefs.mediaFilter == mf
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onUpdatePrefs { it.copy(mediaFilter = mf) } },
+                                label = { Text(mf.label, style = MaterialTheme.typography.labelMedium) },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    containerColor = OledColors.CardSurface,
+                                    labelColor = OledColors.TextSecondary,
+                                ),
+                                border = FilterChipDefaults.filterChipBorder(
+                                    enabled = true,
+                                    selected = selected,
+                                    borderColor = OledColors.HairlineBorder,
+                                    selectedBorderColor = MaterialTheme.colorScheme.primary,
+                                ),
+                            )
+                        }
                     }
                 }
             }
@@ -544,7 +810,15 @@ fun MediaBrowserPane(
                 host == null -> {
                     EmptyStateBox(
                         title = "Pair Your PC or Laptop",
-                        subtitle = "Run DeckVault Companion on your Windows PC and laptop, then tap Switch / Pair to connect over Wi-Fi.",
+                        subtitle = "Run DeckVault Companion on your Windows PC and laptop, then tap Pair above to connect over Wi-Fi.",
+                        showQuickActions = true,
+                        isCompactPhone = isCompactPhone,
+                        hasActiveFilters = false,
+                        quickFolders = emptyList(),
+                        onOpenFolders = onOpenFoldersDrawer,
+                        onOpenAllDrives = onOpenAllDrives,
+                        onClearFilters = {},
+                        onSelectFolder = onSelectFolder,
                     )
                 }
                 isLoading && files.isEmpty() && folders.isEmpty() -> {
@@ -553,15 +827,32 @@ fun MediaBrowserPane(
                     }
                 }
                 files.isEmpty() && folders.isEmpty() -> {
+                    val hasFilters = searchQuery.isNotBlank() || prefs.mediaFilter != MediaFilter.ALL || recursiveSearch
                     EmptyStateBox(
                         title = "Nothing matches here",
-                        subtitle = "Try clearing filters or picking another folder from the left panel.",
+                        subtitle = if (showOpenFoldersButton || isCompactPhone) {
+                            "Try clearing filters, switching devices above, or picking a quick folder below."
+                        } else {
+                            "Try clearing filters or picking another folder from the left panel."
+                        },
+                        showQuickActions = showOpenFoldersButton || isCompactPhone || hasFilters,
+                        isCompactPhone = isCompactPhone,
+                        hasActiveFilters = hasFilters,
+                        quickFolders = quickFolders,
+                        onOpenFolders = onOpenFoldersDrawer,
+                        onOpenAllDrives = onOpenAllDrives,
+                        onClearFilters = {
+                            if (searchQuery.isNotBlank()) onSearchQueryChange("")
+                            if (prefs.mediaFilter != MediaFilter.ALL) onUpdatePrefs { it.copy(mediaFilter = MediaFilter.ALL) }
+                            if (recursiveSearch) onToggleRecursiveSearch()
+                        },
+                        onSelectFolder = onSelectFolder,
                     )
                 }
                 prefs.viewMode == ViewMode.GALLERY -> {
                     BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         val cols = if (prefs.gridColumns <= 0) {
-                            (maxWidth.value / 210f).roundToInt().coerceIn(2, 7)
+                            if (maxWidth < 460.dp) 2 else (maxWidth.value / 210f).roundToInt().coerceIn(2, 7)
                         } else {
                             prefs.gridColumns.coerceIn(1, 8)
                         }
@@ -1528,13 +1819,104 @@ private fun ToggleRow(label: String, checked: Boolean, onCheckedChange: (Boolean
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun EmptyStateBox(title: String, subtitle: String) {
+private fun EmptyStateBox(
+    title: String,
+    subtitle: String,
+    showQuickActions: Boolean = false,
+    isCompactPhone: Boolean = false,
+    hasActiveFilters: Boolean = false,
+    quickFolders: List<QuickFolder> = emptyList(),
+    onOpenFolders: () -> Unit = {},
+    onOpenAllDrives: () -> Unit = {},
+    onClearFilters: () -> Unit = {},
+    onSelectFolder: (String) -> Unit = {},
+) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(24.dp),
+        ) {
             Text(title, style = MaterialTheme.typography.titleLarge, color = OledColors.TextPrimary)
-            Spacer(Modifier.height(8.dp))
-            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = OledColors.TextSecondary)
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = OledColors.TextSecondary,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            if (showQuickActions) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (hasActiveFilters) {
+                        Button(onClick = onClearFilters, shape = RoundedCornerShape(12.dp)) {
+                            Text("Clear Filters")
+                        }
+                    }
+                    OutlinedButton(onClick = onOpenFolders, shape = RoundedCornerShape(12.dp)) {
+                        Icon(Icons.Rounded.FolderOpen, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (isCompactPhone) "Browse Folders" else "Folders")
+                    }
+                    OutlinedButton(onClick = onOpenAllDrives, shape = RoundedCornerShape(12.dp)) {
+                        Icon(Icons.Rounded.Storage, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("All Drives")
+                    }
+                }
+            }
+            if (quickFolders.isNotEmpty()) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(top = 4.dp),
+                ) {
+                    quickFolders.take(6).forEach { qf ->
+                        FilterChip(
+                            selected = false,
+                            onClick = { onSelectFolder(qf.path) },
+                            leadingIcon = { Icon(Icons.Rounded.Folder, null, Modifier.size(14.dp)) },
+                            label = { Text(qf.name, style = MaterialTheme.typography.labelMedium) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ViewModePillSwitcher(
+    selected: ViewMode,
+    onSelect: (ViewMode) -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = OledColors.CardSurface,
+        border = BorderStroke(1.dp, OledColors.HairlineBorder),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(2.dp),
+        ) {
+            ViewMode.entries.forEach { mode ->
+                val isSel = mode == selected
+                Surface(
+                    onClick = { onSelect(mode) },
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (isSel) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                ) {
+                    Icon(
+                        imageVector = if (mode == ViewMode.GALLERY) Icons.Rounded.GridView else Icons.AutoMirrored.Rounded.ViewList,
+                        contentDescription = mode.label,
+                        tint = if (isSel) MaterialTheme.colorScheme.onPrimaryContainer else OledColors.TextSecondary,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp).size(18.dp),
+                    )
+                }
+            }
         }
     }
 }

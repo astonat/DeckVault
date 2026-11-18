@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -764,40 +766,80 @@ class LocalStorageRepository(private val context: Context) {
     }
 
     fun probeVideoMeta(rawPath: String): VideoMeta? {
-        metaCache.get(rawPath)?.let { return it }
+        metaCache.get(rawPath)?.takeIf { it.durationMs > 0L }?.let { return it }
         val file = if (!isContentUriPath(rawPath)) runCatching { resolveSafePath(rawPath) }.getOrNull() else null
         val keyPath = file?.canonicalPath ?: rawPath
         val sz = file?.length() ?: -1L
         if (sz >= 0L) {
-            metaDb.getByPathAndSize(keyPath, sz)?.let {
+            metaDb.getByPathAndSize(keyPath, sz)?.takeIf { it.durationMs > 0L }?.let {
                 metaCache.put(rawPath, it)
                 metaCache.put(keyPath, it)
                 return it
             }
         }
-        return runCatching {
+        var dur = 0L
+        var w = 0
+        var h = 0
+        var br = 0L
+        runCatching {
             val mmr = MediaMetadataRetriever()
             try {
                 if (file == null) mmr.setDataSource(context, Uri.parse(rawPath))
                 else mmr.setDataSource(keyPath)
-                val dur = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                val w = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-                val h = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-                val br = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull() ?: 0L
-                val meta = VideoMeta(
-                    durationMs = dur,
-                    width = w,
-                    height = h,
-                    bitrate = br,
-                )
-                metaCache.put(rawPath, meta)
-                metaCache.put(keyPath, meta)
-                if (file != null) metaDb.put(keyPath, file.lastModified(), sz, meta)
-                meta
+                dur = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                w = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                h = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                br = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull() ?: 0L
             } finally {
                 runCatching { mmr.release() }
             }
-        }.getOrNull()
+        }
+        if (dur <= 0L || w <= 0 || h <= 0) {
+            runCatching {
+                val extractor = MediaExtractor()
+                try {
+                    if (file == null) extractor.setDataSource(context, Uri.parse(rawPath), null)
+                    else extractor.setDataSource(keyPath)
+                    var videoTrackIdx = -1
+                    for (idx in 0 until extractor.trackCount) {
+                        val fmt = extractor.getTrackFormat(idx)
+                        val mime = fmt.getString(MediaFormat.KEY_MIME).orEmpty()
+                        if (dur <= 0L && fmt.containsKey(MediaFormat.KEY_DURATION)) {
+                            val dMs = fmt.getLong(MediaFormat.KEY_DURATION) / 1000L
+                            if (dMs > dur) dur = dMs
+                        }
+                        if (mime.startsWith("video/")) {
+                            if (videoTrackIdx < 0) videoTrackIdx = idx
+                            if (w <= 0 && fmt.containsKey(MediaFormat.KEY_WIDTH)) w = fmt.getInteger(MediaFormat.KEY_WIDTH)
+                            if (h <= 0 && fmt.containsKey(MediaFormat.KEY_HEIGHT)) h = fmt.getInteger(MediaFormat.KEY_HEIGHT)
+                        }
+                    }
+                    if (dur <= 0L && file != null && extractor.trackCount > 0) {
+                        val tIdx = if (videoTrackIdx >= 0) videoTrackIdx else 0
+                        extractor.selectTrack(tIdx)
+                        val firstUs = extractor.sampleTime.coerceAtLeast(0L)
+                        extractor.seekTo(86_400_000_000L, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                        val lastUs = extractor.sampleTime
+                        if (lastUs > firstUs) {
+                            dur = (lastUs - firstUs) / 1000L
+                        }
+                    }
+                } finally {
+                    runCatching { extractor.release() }
+                }
+            }
+        }
+        if (dur <= 0L && w <= 0 && h <= 0) return null
+        val meta = VideoMeta(
+            durationMs = dur.coerceAtLeast(0L),
+            width = w.coerceAtLeast(0),
+            height = h.coerceAtLeast(0),
+            bitrate = br.coerceAtLeast(0L),
+        )
+        metaCache.put(rawPath, meta)
+        metaCache.put(keyPath, meta)
+        if (file != null && meta.durationMs > 0L) metaDb.put(keyPath, file.lastModified(), sz, meta)
+        return meta
     }
 
     private fun getCachedOrQuickVideoMeta(path: String): VideoMeta? = metaCache.get(path) ?: probeVideoMeta(path)

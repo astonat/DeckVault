@@ -520,6 +520,24 @@ class AndroidPeerServer(private val context: Context) {
                 }
                 sendFileBytes(output, sb, "image/jpeg", headers, headOnly, keepAlive, cacheSeconds = 604_800)
             }
+            "/api/video/storyboard-info" -> {
+                val rawPath = qs["path"].orEmpty()
+                val cols = (qs["cols"]?.toIntOrNull() ?: 4).coerceIn(2, 6)
+                val rows = (qs["rows"]?.toIntOrNull() ?: 4).coerceIn(2, 6)
+                val targetKey = if (LocalStorageRepository.isContentUriPath(rawPath)) rawPath else resolveSafePath(rawPath).canonicalPath
+                val meta = localRepo.probeVideoMeta(targetKey)
+                val info = com.deckvault.app.model.StoryboardInfoResponse(
+                    cols = cols,
+                    rows = rows,
+                    frameCount = cols * rows,
+                    cellWidth = 320,
+                    cellHeight = 180,
+                    durationMs = meta?.durationMs ?: 0L,
+                    width = meta?.width ?: 0,
+                    height = meta?.height ?: 0,
+                )
+                sendJson(output, 200, json.encodeToString(info), headOnly, keepAlive)
+            }
             "/api/video/frame" -> {
                 val rawPath = qs["path"].orEmpty()
                 val ms = qs["ms"]?.toLongOrNull() ?: 0L
