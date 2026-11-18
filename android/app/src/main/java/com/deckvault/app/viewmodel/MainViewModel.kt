@@ -158,6 +158,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var loadedHostId: String? = null
     private var pendingNavigatePath: String? = null
     private var searchJob: Job? = null
+    private var folderNavJob: Job? = null
+    private var browseGeneration: Long = 0L
 
     private val localTasks = ConcurrentHashMap<String, LocalTaskSpec>()
     private val localQueueChannel = Channel<String>(Channel.UNLIMITED)
@@ -390,6 +392,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun connectAndLoadHost(host: SavedHost, prefs: UserPreferences) {
+        val connectGen = ++browseGeneration
         _ui.update {
             it.copy(
                 isLoading = true,
@@ -403,6 +406,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         runCatching {
             resolveRoots(host)
         }.onSuccess { roots ->
+            if (connectGen != browseGeneration) return
             val overridePath = pendingNavigatePath
             pendingNavigatePath = null
             val initialPath = overridePath?.takeIf { it.isNotBlank() }
@@ -424,13 +428,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _ui.update { it.copy(isLoading = false) }
             }
         }.onFailure { err ->
-            handleStorageFailure(err, "${host.displayName}: ${err.message}")
+            if (err is kotlinx.coroutines.CancellationException) throw err
+            if (connectGen == browseGeneration) {
+                handleStorageFailure(err, "${host.displayName}: ${err.message}")
+            }
         }
     }
 
     fun navigateFolder(path: String) {
         val host = activeHost()
-        viewModelScope.launch {
+        folderNavJob?.cancel()
+        folderNavJob = viewModelScope.launch {
             _ui.update { it.copy(isSpaceHogsMode = false, selectedPaths = emptySet()) }
             loadFolder(host, path, preferences.value)
         }
@@ -535,6 +543,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun loadFolder(host: SavedHost, path: String, prefs: UserPreferences) {
+        val myGen = ++browseGeneration
         _ui.update {
             it.copy(
                 isLoading = true,
@@ -547,43 +556,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val recursive = _ui.value.recursiveSearch && query.isNotBlank()
 
         runCatching {
-            val listResp = resolveListFolder(host, path, prefs, if (recursive) "" else query)
-            val treeResp = runCatching { resolveTree(host, path, treeSort) }.getOrNull()
-            val recursiveFiles = if (recursive) {
-                val searched = if (host.isLocalDevice) {
-                    localRepo.searchFiles(query, path, prefs.mediaFilter, 100).files
-                } else {
-                    api.search(host, path, query).files
+            coroutineScope {
+                val treeDef = async { runCatching { resolveTree(host, path, treeSort) }.getOrNull() }
+                val listDef = async { resolveListFolder(host, path, prefs, if (recursive) "" else query) }
+                val recDef = if (recursive) {
+                    async {
+                        val searched = if (host.isLocalDevice) {
+                            localRepo.searchFiles(query, path, prefs.mediaFilter, 100).files
+                        } else {
+                            api.search(host, path, query).files
+                        }
+                        val comparator = when (prefs.sortBy.apiKey) {
+                            "size" -> compareBy<FileItem> { it.sizeBytes }
+                            "date" -> compareBy<FileItem> { it.modifiedMs }
+                            "type" -> compareBy<FileItem> { it.extension.lowercase() }.thenBy { it.name.lowercase() }
+                            else -> compareBy<FileItem> { it.name.lowercase() }
+                        }
+                        if (prefs.sortDescending) searched.sortedWith(comparator.reversed()) else searched.sortedWith(comparator)
+                    }
+                } else null
+
+                val listResp = listDef.await()
+                val recursiveFiles = recDef?.await()
+                if (myGen == browseGeneration) {
+                    _ui.update {
+                        it.copy(
+                            isLoading = false,
+                            currentPath = listResp.path,
+                            folderName = listResp.name,
+                            parentPath = listResp.parentPath,
+                            currentFolderSizeBytes = listResp.totalSizeBytes,
+                            isIndexing = listResp.indexer.scanning,
+                            listFolders = if (recursiveFiles != null) emptyList() else listResp.folders,
+                            files = recursiveFiles ?: listResp.files,
+                        )
+                    }
                 }
-                val comparator = when (prefs.sortBy.apiKey) {
-                    "size" -> compareBy<FileItem> { it.sizeBytes }
-                    "date" -> compareBy<FileItem> { it.modifiedMs }
-                    "type" -> compareBy<FileItem> { it.extension.lowercase() }.thenBy { it.name.lowercase() }
-                    else -> compareBy<FileItem> { it.name.lowercase() }
+                val treeResp = treeDef.await()
+                if (myGen == browseGeneration && treeResp != null) {
+                    _ui.update { it.copy(treeFolders = treeResp.children) }
                 }
-                if (prefs.sortDescending) searched.sortedWith(comparator.reversed()) else searched.sortedWith(comparator)
-            } else null
-            Triple(listResp, treeResp, recursiveFiles)
-        }.onSuccess { (listResp, treeResp, recursiveFiles) ->
-            _ui.update {
-                it.copy(
-                    isLoading = false,
-                    currentPath = listResp.path,
-                    folderName = listResp.name,
-                    parentPath = listResp.parentPath,
-                    currentFolderSizeBytes = listResp.totalSizeBytes,
-                    isIndexing = listResp.indexer.scanning,
-                    listFolders = if (recursiveFiles != null) emptyList() else listResp.folders,
-                    files = recursiveFiles ?: listResp.files,
-                    treeFolders = treeResp?.children ?: emptyList(),
-                )
             }
         }.onFailure { err ->
-            handleStorageFailure(err, err.message ?: "Failed to load folder")
+            if (err is kotlinx.coroutines.CancellationException) throw err
+            if (myGen == browseGeneration) {
+                handleStorageFailure(err, err.message ?: "Failed to load folder")
+            }
         }
     }
 
     private fun handleStorageFailure(err: Throwable, fallbackMsg: String) {
+        if (err is kotlinx.coroutines.CancellationException) return
         when (err) {
             is AllFilesPermissionRequiredException -> {
                 _ui.update {

@@ -1,5 +1,6 @@
 package com.deckvault.app
 
+import android.Manifest
 import android.content.Intent
 import android.graphics.Color as AndroidColor
 import android.net.Uri
@@ -91,7 +92,12 @@ import androidx.window.layout.WindowInfoTracker
 import androidx.window.layout.WindowLayoutInfo
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
+import coil3.disk.DiskCache
+import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.request.crossfade
+import okio.Path.Companion.toOkioPath
+import java.io.File
 import com.deckvault.app.data.DeckVaultLocalFetcherFactory
 import com.deckvault.app.model.FoldLayoutMode
 import com.deckvault.app.peer.DeckVaultPeerService
@@ -152,7 +158,28 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Wire Coil 3 to both Local Direct Thumbnail Fetcher & DeckVault OkHttp Client
+            val mediaPermLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.RequestMultiplePermissions(),
+            ) {
+                vm.onPermissionChanged()
+            }
+
+            LaunchedEffect(Unit) {
+                if (!vm.localRepo.hasMediaReadAccess()) {
+                    val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        arrayOf(
+                            Manifest.permission.READ_MEDIA_VIDEO,
+                            Manifest.permission.READ_MEDIA_IMAGES,
+                            Manifest.permission.READ_MEDIA_AUDIO,
+                        )
+                    } else {
+                        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+                    }
+                    mediaPermLauncher.launch(perms)
+                }
+            }
+
+            // Wire Coil 3 to Local Direct Thumbnail Fetcher + Tuned OkHttp + Fast Memory/Disk Cache
             LaunchedEffect(Unit) {
                 SingletonImageLoader.setSafe { ctx ->
                     ImageLoader.Builder(ctx)
@@ -160,6 +187,18 @@ class MainActivity : ComponentActivity() {
                             add(DeckVaultLocalFetcherFactory(vm.localRepo))
                             add(OkHttpNetworkFetcherFactory(callFactory = { vm.api.okHttpClient }))
                         }
+                        .memoryCache {
+                            MemoryCache.Builder()
+                                .maxSizePercent(ctx, 0.22)
+                                .build()
+                        }
+                        .diskCache {
+                            DiskCache.Builder()
+                                .directory(File(ctx.cacheDir, "coil_image_cache").toOkioPath())
+                                .maxSizeBytes(160L * 1024 * 1024)
+                                .build()
+                        }
+                        .crossfade(100)
                         .build()
                 }
             }

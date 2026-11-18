@@ -835,7 +835,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       <div style="font-size:12px;color:var(--muted)">Enter the 6-digit PIN shown on DeckVault Companion to connect from this browser.</div>
       <input class="input" id="lanPinInput" inputmode="numeric" maxlength="6" placeholder="6-digit PIN"/>
       <button class="pill-btn primary" onclick="pairLanBrowser()">Unlock</button>
-      <a href="/DeckVault.apk" style="color:var(--primary);font-size:12px;text-align:center;text-decoration:none">Download Android APK (v1.4.0)</a>
+      <a href="/DeckVault.apk" style="color:var(--primary);font-size:12px;text-align:center;text-decoration:none">Download Android APK (v1.4.1)</a>
       <div id="lanErr" style="color:var(--danger);font-size:12px"></div>
     </div>
   </div>
@@ -1719,23 +1719,34 @@ function renderBreadcrumbs(pathStr, label=""){
   });
 }
 
+let _navAbort = null;
+let _treeAbort = null;
 async function loadFolder(path, opts={}){
+  if(_navAbort){ try{ _navAbort.abort(); }catch{} }
+  if(_treeAbort){ try{ _treeAbort.abort(); }catch{} }
+  _navAbort = new AbortController();
+  const sig = _navAbort.signal;
   state.currentPath=path; state.spaceHogs=false; clearSelection(); renderDriveAndQuickStrips();
   const [sortBy, order] = prefs.sort.split(":");
   const q = document.getElementById("searchBox").value.trim();
   const qs = new URLSearchParams({path, sort:sortBy, order, filter:state.filter});
   if(q) qs.set("q", q);
-  const fetchOpts = opts.silent ? {silent:true} : {busyLabel:"Loading folder..."};
-  if(state.recursive && q){
-    const d = await hostApi(state.activeHostId, "/api/search?" + new URLSearchParams({path, q}).toString(), fetchOpts);
-    state.folders=[]; state.files=d.files||[]; state.parentPath="";
-    renderBreadcrumbs(path, `Deep Search: "${q}"`);
-    updateFooter(`${state.files.length} matches`);
-  }else{
-    const d = await hostApi(state.activeHostId, "/api/list?" + qs.toString(), fetchOpts);
-    state.folders=d.folders||[]; state.files=d.files||[]; state.parentPath=d.parentPath||"";
-    renderBreadcrumbs(d.path||path);
-    updateFooter(`${state.folders.length} folders • ${state.files.length} files • ${fmt(d.totalSizeBytes)}`);
+  const fetchOpts = opts.silent ? {silent:true, signal:sig} : {busyLabel:"Loading folder...", signal:sig};
+  try{
+    if(state.recursive && q){
+      const d = await hostApi(state.activeHostId, "/api/search?" + new URLSearchParams({path, q}).toString(), fetchOpts);
+      state.folders=[]; state.files=d.files||[]; state.parentPath="";
+      renderBreadcrumbs(path, `Deep Search: "${q}"`);
+      updateFooter(`${state.files.length} matches`);
+    }else{
+      const d = await hostApi(state.activeHostId, "/api/list?" + qs.toString(), fetchOpts);
+      state.folders=d.folders||[]; state.files=d.files||[]; state.parentPath=d.parentPath||"";
+      renderBreadcrumbs(d.path||path);
+      updateFooter(`${state.folders.length} folders • ${state.files.length} files • ${fmt(d.totalSizeBytes)}`);
+    }
+  }catch(e){
+    if(e?.name === "AbortError") return;
+    throw e;
   }
   loadTree(path);
   renderBrowser();
@@ -1754,8 +1765,9 @@ function updateFooter(leftTxt){
 }
 
 async function loadTree(path){
+  _treeAbort = new AbortController();
   try{
-    const t = await hostApi(state.activeHostId, "/api/tree?" + new URLSearchParams({path, sort:state.treeSort}).toString(), {silent:true});
+    const t = await hostApi(state.activeHostId, "/api/tree?" + new URLSearchParams({path, sort:state.treeSort}).toString(), {silent:true, signal:_treeAbort.signal});
     const box=document.getElementById("treeList"); box.innerHTML="";
     document.getElementById("treeCurInfo").textContent=state.parentPath ? "Subfolder" : "Drive Root";
     (t.children||[]).forEach(ch=>{
@@ -1782,7 +1794,9 @@ function renderFilters(){
 }
 
 function renderBrowser(){
-  const area=document.getElementById("browserArea"); area.innerHTML="";
+  const area=document.getElementById("browserArea");
+  area.querySelectorAll("img").forEach(im=>{ try{ im.removeAttribute("src"); }catch{} });
+  area.innerHTML="";
   document.body.classList.toggle("select-mode", !!state.selectMode);
   document.body.classList.toggle("has-selection", state.selected.size>0);
   if(state.folders.length>0 && !state.spaceHogs){
@@ -1821,7 +1835,7 @@ function renderBrowser(){
     el.draggable = true;
 
     if(prefs.viewMode==="gallery"){
-      const thHtml = thumbUrl ? `<img loading="lazy" src="${thumbUrl}" draggable="false"/>` : `<span style="color:var(--primary);font-weight:700;font-size:13px">${(f.extension||f.mediaType||"FILE").toUpperCase()}</span>`;
+      const thHtml = thumbUrl ? `<img loading="lazy" decoding="async" src="${thumbUrl}" draggable="false"/>` : `<span style="color:var(--primary);font-weight:700;font-size:13px">${(f.extension||f.mediaType||"FILE").toUpperCase()}</span>`;
       const dur = (prefs.showDuration && f.meta?.durationMs) ? `<span class="badge">${fmtDur(f.meta.durationMs)}</span>` : "";
       const resTxt = prefs.showResolution ? fmtRes(f.meta?.width, f.meta?.height) : "";
       const resBadge = resTxt ? `<span class="badge tl">${resTxt}</span>` : "";
@@ -1829,19 +1843,30 @@ function renderBrowser(){
       el.innerHTML=`<div class="sel-check" data-act="sel">${sel?"✓":""}</div><div class="thumb-wrap">${thHtml}${sbDiv}${resBadge}${dur}</div><div class="card-body">${prefs.showFilenames?`<div class="card-title" title="${f.name}">${f.name}</div>`:""}<div class="card-meta"><span>${prefs.showSizes?fmt(f.sizeBytes):""}</span><span>${(f.extension||"").toUpperCase()}</span></div><div class="card-actions"><button class="mini-btn" data-act="sel">${sel?"✓":"Select"}</button>${f.mediaType==="video"?`<button class="mini-btn" data-act="trim">Edit</button>`:""}<button class="mini-btn" data-act="move">Move</button><button class="mini-btn" data-act="more">•••</button></div></div>`;
       if(sbUrl){
         const tw = el.querySelector(".thumb-wrap"), sbh = el.querySelector(".sb-hover");
+        let sbArmed = false, sbTimer = null;
+        tw.onmouseenter = () => {
+          sbTimer = setTimeout(()=>{
+            sbArmed = true;
+            sbh.style.backgroundImage = `url("${sbUrl}")`;
+            sbh.style.backgroundSize = "400% 400%";
+          }, 220);
+        };
         tw.onmousemove = (mv) => {
+          if(!sbArmed) return;
           const rect = tw.getBoundingClientRect();
-          const frac = Math.max(0, Math.min(0.999, (mv.clientX - rect.left) / rect.width));
+          const frac = Math.max(0, Math.min(0.999, (mv.clientX - rect.left) / Math.max(1, rect.width)));
           const sidx = Math.floor(frac * 16), col = sidx % 4, row = Math.floor(sidx / 4);
           sbh.style.display = "block";
-          sbh.style.backgroundImage = `url("${sbUrl}")`;
-          sbh.style.backgroundSize = "400% 400%";
           sbh.style.backgroundPosition = `${col*(100/3)}% ${row*(100/3)}%`;
         };
-        tw.onmouseleave = () => { sbh.style.display = "none"; };
+        tw.onmouseleave = () => {
+          if(sbTimer){ clearTimeout(sbTimer); sbTimer = null; }
+          sbArmed = false;
+          sbh.style.display = "none";
+        };
       }
     }else{
-      const thHtml = thumbUrl ? `<img class="list-thumb" loading="lazy" src="${thumbUrl}" draggable="false"/>` : `<div class="list-thumb">${(f.extension||"FILE").toUpperCase()}</div>`;
+      const thHtml = thumbUrl ? `<img class="list-thumb" loading="lazy" decoding="async" src="${thumbUrl}" draggable="false"/>` : `<div class="list-thumb">${(f.extension||"FILE").toUpperCase()}</div>`;
       el.innerHTML=`<div class="sel-check" data-act="sel">${sel?"✓":""}</div>${thHtml}<div style="flex:1;min-width:0"><div class="card-title">${f.name}</div><div style="font-size:11px;color:var(--muted)">${fmt(f.sizeBytes)} ${f.meta?.durationMs?"• "+fmtDur(f.meta.durationMs):""} ${f.meta?.height?"• "+fmtRes(f.meta.width,f.meta.height):""}</div></div><button class="mini-btn" data-act="sel">${sel?"✓ Selected":"Select"}</button>${f.mediaType==="video"?`<button class="mini-btn" data-act="trim">Edit</button>`:""}<button class="mini-btn" data-act="move">Move</button><button class="mini-btn" data-act="more">•••</button>`;
     }
 
@@ -1924,8 +1949,8 @@ function renderInspector(){
   if(!f){ box.innerHTML=`<div style="color:var(--muted)">Single-click a file to inspect metadata, drag out to another app, or double-click to play / edit.</div>`; return; }
   const m = f.meta || {};
   const th = f.mediaType==="video"
-    ? `<img src="${hostMediaUrl(state.activeHostId,"/api/video/thumbnail",{path:f.path,w:420})}" style="width:100%;border-radius:11px;background:#000"/>`
-    : (f.mediaType==="image" ? `<img src="${hostMediaUrl(state.activeHostId,"/api/image",{path:f.path,w:420})}" style="width:100%;border-radius:11px;background:#000"/>` : "");
+    ? `<img decoding="async" src="${hostMediaUrl(state.activeHostId,"/api/video/thumbnail",{path:f.path,w:420})}" style="width:100%;border-radius:11px;background:#000"/>`
+    : (f.mediaType==="image" ? `<img decoding="async" src="${hostMediaUrl(state.activeHostId,"/api/image",{path:f.path,w:420})}" style="width:100%;border-radius:11px;background:#000"/>` : "");
   const canOpt = f.mediaType==="video" || f.mediaType==="image";
   box.innerHTML = `
     ${th}

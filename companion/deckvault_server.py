@@ -39,7 +39,7 @@ import uuid
 from desktop_ui import DESKTOP_APP_HTML
 
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
 DISCOVERY_MAGIC = b"DECKVAULT_DISCOVER_V1"
@@ -280,6 +280,8 @@ class ServerConfig:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.data: dict[str, Any] = {}
+        self._roots_cache: list[str] = []
+        self._roots_cache_ts: float = 0.0
         self.load_or_init()
 
     def load_or_init(self) -> None:
@@ -315,6 +317,7 @@ class ServerConfig:
 
     def save(self) -> None:
         with self._lock:
+            self._roots_cache_ts = 0.0
             tmp = CONFIG_PATH.with_suffix(".tmp")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2)
@@ -359,6 +362,11 @@ class ServerConfig:
         return total
 
     def get_roots(self) -> list[str]:
+        now = time.monotonic()
+        with self._lock:
+            if self._roots_cache and (now - self._roots_cache_ts) < 5.0:
+                return list(self._roots_cache)
+
         candidates: list[str] = [
             *(self.data.get("roots", []) or []),
             *detect_windows_drives(),
@@ -382,7 +390,11 @@ class ServerConfig:
             if key not in seen and os.path.exists(norm):
                 seen.add(key)
                 roots.append(norm)
-        return roots or detect_windows_drives()
+        final_roots = roots or detect_windows_drives()
+        with self._lock:
+            self._roots_cache = final_roots
+            self._roots_cache_ts = now
+        return list(final_roots)
 
     def resolve_safe_path(self, raw_path: str) -> str:
         """Normalize and ensure requested path resides inside an allowed root."""
@@ -404,20 +416,20 @@ class ServerConfig:
 
 
 class MetadataCache:
-    """Thread-safe SQLite cache for ffprobe video/image metadata."""
+    """Thread-safe SQLite cache for ffprobe video/image metadata (persistent WAL connection)."""
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._lock = threading.Lock()
+        self._conn = sqlite3.connect(self._db_path, timeout=15, check_same_thread=False)
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self._db_path, timeout=15)
-
     def _init_db(self) -> None:
-        from contextlib import closing
-        with self._lock, closing(self._connect()) as conn:
-            conn.execute("""
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+            self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS media_meta (
                     path TEXT PRIMARY KEY,
                     mtime_ns INTEGER NOT NULL,
@@ -431,12 +443,11 @@ class MetadataCache:
                     bitrate INTEGER NOT NULL
                 )
             """)
-            conn.commit()
+            self._conn.commit()
 
     def get(self, path: str, mtime_ns: int, size_bytes: int) -> dict[str, Any] | None:
-        from contextlib import closing
-        with self._lock, closing(self._connect()) as conn:
-            row = conn.execute(
+        with self._lock:
+            row = self._conn.execute(
                 """
                 SELECT duration_ms, width, height, fps, video_codec, audio_codec, bitrate
                 FROM media_meta
@@ -457,9 +468,8 @@ class MetadataCache:
         }
 
     def put(self, path: str, mtime_ns: int, size_bytes: int, meta: dict[str, Any]) -> None:
-        from contextlib import closing
-        with self._lock, closing(self._connect()) as conn:
-            conn.execute(
+        with self._lock:
+            self._conn.execute(
                 """
                 INSERT OR REPLACE INTO media_meta
                 (path, mtime_ns, size_bytes, duration_ms, width, height, fps, video_codec, audio_codec, bitrate)
@@ -478,13 +488,12 @@ class MetadataCache:
                     int(meta.get("bitrate", 0)),
                 ),
             )
-            conn.commit()
+            self._conn.commit()
 
     def invalidate(self, path: str) -> None:
-        from contextlib import closing
-        with self._lock, closing(self._connect()) as conn:
-            conn.execute("DELETE FROM media_meta WHERE path = ?", (path,))
-            conn.commit()
+        with self._lock:
+            self._conn.execute("DELETE FROM media_meta WHERE path = ?", (path,))
+            self._conn.commit()
 
 
 class DiskIndexer:
@@ -623,9 +632,30 @@ class MediaService:
         self.cache = cache
         self.ffmpeg = find_binary("ffmpeg")
         self.ffprobe = find_binary("ffprobe")
-        self._probe_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        self._probe_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        self._ffmpeg_sem = threading.BoundedSemaphore(2)
+        self._probe_sem = threading.BoundedSemaphore(3)
+        self._probe_pending: set[str] = set()
         self._render_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+
+    def queue_background_probe(self, path: str, st: os.stat_result) -> None:
+        key = f"{path}|{st.st_mtime_ns}|{st.st_size}"
+        with self._locks_guard:
+            if key in self._probe_pending or len(self._probe_pending) > 256:
+                return
+            self._probe_pending.add(key)
+
+        def _run() -> None:
+            try:
+                self.probe_video(path, st)
+            except Exception:
+                pass
+            finally:
+                with self._locks_guard:
+                    self._probe_pending.discard(key)
+
+        self._probe_pool.submit(_run)
 
     def _lock_for(self, key: str) -> threading.Lock:
         with self._locks_guard:
@@ -654,7 +684,8 @@ class MediaService:
             "-show_format", "-show_streams", path,
         ]
         try:
-            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=12, creationflags=SUBPROCESS_FLAGS)
+            with self._probe_sem:
+                out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=10, creationflags=SUBPROCESS_FLAGS)
             parsed = json.loads(out.decode("utf-8", errors="replace"))
         except Exception:
             return {"durationMs": 0, "width": 0, "height": 0, "fps": 0.0, "videoCodec": "", "audioCodec": "", "bitrate": 0}
@@ -707,32 +738,40 @@ class MediaService:
                 return out_path
 
             media_type = classify_media_type(path)
-            tmp_out = out_path.with_suffix(".tmp.jpg")
+            tmp_out = out_path.with_suffix(f".{threading.get_ident()}.tmp.jpg")
             if media_type == "image":
                 cmd = [
-                    self.ffmpeg, "-y", "-i", path,
+                    self.ffmpeg, "-y", "-threads", "1", "-i", path,
+                    "-an", "-sn", "-dn",
                     "-vf", f"scale='min({width},iw)':-2",
                     "-frames:v", "1", "-q:v", "4", str(tmp_out),
                 ]
             else:
-                meta = self.probe_video(path, st)
+                # Use cached metadata immediately without forcing synchronous ffprobe latency when already known
+                meta = self.cache.get(path, st.st_mtime_ns, st.st_size) or self.probe_video(path, st)
                 dur_s = max(0.0, meta["durationMs"] / 1000.0)
                 seek_s = min(dur_s * 0.12, 15.0) if dur_s > 1.5 else 0.0
                 cmd = [
-                    self.ffmpeg, "-y", "-ss", f"{seek_s:.3f}", "-i", path,
-                    "-an", "-sn", "-frames:v", "1",
+                    self.ffmpeg, "-y", "-threads", "1", "-skip_frame", "nokey",
+                    "-ss", f"{seek_s:.3f}", "-noaccurate_seek", "-i", path,
+                    "-an", "-sn", "-dn", "-frames:v", "1",
                     "-vf", f"scale='min({width},iw)':-2",
                     "-q:v", "4", str(tmp_out),
                 ]
-            subprocess.run(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                check=True, timeout=25, creationflags=SUBPROCESS_FLAGS,
-            )
-            os.replace(tmp_out, out_path)
+            try:
+                with self._ffmpeg_sem:
+                    subprocess.run(
+                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        check=True, timeout=20, creationflags=SUBPROCESS_FLAGS,
+                    )
+                os.replace(tmp_out, out_path)
+            finally:
+                if tmp_out.exists():
+                    tmp_out.unlink(missing_ok=True)
             return out_path
 
     def get_or_build_storyboard(self, path: str, cols: int = 4, rows: int = 4) -> tuple[Path, dict[str, Any]]:
-        """Build a fast 4x4 (16-frame) scrub sprite sheet using keyframe seeking."""
+        """Build a 4x4 scrub sprite sheet with bounded <=50 MB RAM via single-decoder extraction."""
         st = os.stat(path)
         sig = self._file_sig(path, st)
         cols = max(2, min(6, cols))
@@ -762,49 +801,69 @@ class MediaService:
                 return out_path, info
 
             dur_s = max(0.5, meta["durationMs"] / 1000.0)
-            tmp_out = out_path.with_suffix(".tmp.jpg")
+            tmp_out = out_path.with_suffix(f".{threading.get_ident()}.tmp.jpg")
+            try:
+                pil_ok = False
+                try:
+                    from PIL import Image
+                    pil_ok = True
+                except Exception:
+                    pil_ok = False
 
-            # Use multi-input fast keyframe seeking (-ss before -i) so a 4K 2-hour movie takes <1.5s!
-            cmd: list[str] = [self.ffmpeg, "-y"]
-            for i in range(total_frames):
-                frac = (i + 0.5) / total_frames
-                t_s = max(0.0, min(dur_s - 0.1, dur_s * frac))
-                cmd.extend(["-ss", f"{t_s:.3f}", "-noaccurate_seek", "-i", path])
-
-            filter_parts = []
-            stack_inputs = []
-            layout_entries = []
-            for i in range(total_frames):
-                r = i // cols
-                c = i % cols
-                filter_parts.append(
-                    f"[{i}:v]scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
-                    f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black[v{i}]"
-                )
-                stack_inputs.append(f"[v{i}]")
-                layout_entries.append(f"{c * cell_w}_{r * cell_h}")
-
-            filter_complex = (
-                ";".join(filter_parts)
-                + ";"
-                + "".join(stack_inputs)
-                + f"xstack=inputs={total_frames}:layout="
-                + "|".join(layout_entries)
-                + "[out]"
-            )
-
-            cmd.extend([
-                "-filter_complex", filter_complex,
-                "-map", "[out]",
-                "-frames:v", "1",
-                "-q:v", "5",
-                str(tmp_out),
-            ])
-            subprocess.run(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                check=True, timeout=45, creationflags=SUBPROCESS_FLAGS,
-            )
-            os.replace(tmp_out, out_path)
+                with self._ffmpeg_sem:
+                    if pil_ok:
+                        from PIL import Image
+                        sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), (0, 0, 0))
+                        got_any = False
+                        for i in range(total_frames):
+                            frac = (i + 0.5) / total_frames
+                            t_s = max(0.0, min(dur_s - 0.1, dur_s * frac))
+                            cmd = [
+                                self.ffmpeg, "-threads", "1", "-skip_frame", "nokey",
+                                "-ss", f"{t_s:.3f}", "-noaccurate_seek", "-i", path,
+                                "-an", "-sn", "-dn", "-frames:v", "1",
+                                "-vf", f"scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black",
+                                "-q:v", "5", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+                            ]
+                            try:
+                                res = subprocess.run(
+                                    cmd, capture_output=True, check=True, timeout=8,
+                                    creationflags=SUBPROCESS_FLAGS,
+                                )
+                                if res.stdout:
+                                    tile = Image.open(io.BytesIO(res.stdout)).convert("RGB")
+                                    r, c = i // cols, i % cols
+                                    sheet.paste(tile, (c * cell_w, r * cell_h))
+                                    tile.close()
+                                    got_any = True
+                            except Exception:
+                                continue
+                        if not got_any:
+                            raise RuntimeError("No storyboard frames extracted")
+                        sheet.save(tmp_out, format="JPEG", quality=82, optimize=False)
+                        sheet.close()
+                    else:
+                        step_s = max(0.25, dur_s / total_frames)
+                        vf = (
+                            f"fps=1/{step_s:.3f},"
+                            f"scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
+                            f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black,"
+                            f"tile={cols}x{rows}"
+                        )
+                        cmd = [
+                            self.ffmpeg, "-y", "-threads", "1", "-filter_threads", "1",
+                            "-skip_frame", "nokey", "-i", path,
+                            "-an", "-sn", "-dn", "-frames:v", "1",
+                            "-vf", vf, "-q:v", "5", str(tmp_out),
+                        ]
+                        subprocess.run(
+                            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            check=True, timeout=35, creationflags=SUBPROCESS_FLAGS,
+                        )
+                os.replace(tmp_out, out_path)
+            finally:
+                if tmp_out.exists():
+                    tmp_out.unlink(missing_ok=True)
             return out_path, info
 
     def extract_frame(self, path: str, ms: int, width: int = 640) -> Path:
@@ -818,19 +877,25 @@ class MediaService:
         if not self.ffmpeg:
             raise RuntimeError("ffmpeg not installed")
 
-        tmp_out = out_path.with_suffix(".tmp.jpg")
+        tmp_out = out_path.with_suffix(f".{threading.get_ident()}.tmp.jpg")
         seek_s = bucket_ms / 1000.0
         cmd = [
-            self.ffmpeg, "-y", "-ss", f"{seek_s:.3f}", "-i", path,
-            "-an", "-sn", "-frames:v", "1",
+            self.ffmpeg, "-y", "-threads", "1", "-skip_frame", "nokey",
+            "-ss", f"{seek_s:.3f}", "-i", path,
+            "-an", "-sn", "-dn", "-frames:v", "1",
             "-vf", f"scale='min({width},iw)':-2",
             "-q:v", "4", str(tmp_out),
         ]
-        subprocess.run(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            check=True, timeout=20, creationflags=SUBPROCESS_FLAGS,
-        )
-        os.replace(tmp_out, out_path)
+        try:
+            with self._ffmpeg_sem:
+                subprocess.run(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=True, timeout=20, creationflags=SUBPROCESS_FLAGS,
+                )
+            os.replace(tmp_out, out_path)
+        finally:
+            if tmp_out.exists():
+                tmp_out.unlink(missing_ok=True)
         return out_path
 
     @staticmethod
@@ -3800,6 +3865,7 @@ def make_handler(rt: CompanionRuntime):
                 cmd.extend(["-ss", f"{start_s:.3f}"])
             cmd.extend([
                 "-i", file_path,
+                "-threads", "4",
                 "-map", "0:v:0", "-map", "0:a?",
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=60",
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "22", "-pix_fmt", "yuv420p",
@@ -4164,9 +4230,10 @@ def make_handler(rt: CompanionRuntime):
             if not os.path.isdir(safe):
                 raise FileNotFoundError(safe)
 
-            parent_stats = rt.indexer.compute_immediate_if_missing(safe)
-            parent_size = max(1, parent_stats["size"])
+            parent_stats = rt.indexer.get_dir_stats(safe)
+            parent_size = max(1, parent_stats["size"]) if parent_stats else 1
             children = []
+            raw_dirs = []
             try:
                 with os.scandir(safe) as it:
                     for entry in it:
@@ -4174,32 +4241,37 @@ def make_handler(rt: CompanionRuntime):
                             continue
                         try:
                             if entry.is_dir(follow_symlinks=False):
-                                c_stats = rt.indexer.get_dir_stats(entry.path)
-                                sz = c_stats["size"] if c_stats else -1
-                                pct = round((sz / parent_size) * 100.0, 1) if sz >= 0 else 0.0
-                                has_sub = False
-                                try:
-                                    with os.scandir(entry.path) as sub_it:
-                                        has_sub = any(
-                                            s.is_dir(follow_symlinks=False)
-                                            for s in sub_it
-                                            if s.name not in DiskIndexer.SKIP_NAMES
-                                        )
-                                except OSError:
-                                    pass
-                                children.append({
-                                    "name": entry.name,
-                                    "path": entry.path,
-                                    "sizeBytes": sz,
-                                    "percentOfParent": min(100.0, pct),
-                                    "fileCount": c_stats["files"] if c_stats else -1,
-                                    "mediaCount": c_stats["media"] if c_stats else -1,
-                                    "hasSubfolders": has_sub,
-                                })
+                                raw_dirs.append(entry)
                         except OSError:
                             continue
             except OSError:
                 pass
+
+            fast_sub_check = len(raw_dirs) <= 48
+            for entry in raw_dirs:
+                c_stats = rt.indexer.get_dir_stats(entry.path)
+                sz = c_stats["size"] if c_stats else -1
+                pct = round((sz / parent_size) * 100.0, 1) if (sz >= 0 and parent_stats) else 0.0
+                has_sub = True
+                if fast_sub_check:
+                    try:
+                        with os.scandir(entry.path) as sub_it:
+                            has_sub = any(
+                                s.is_dir(follow_symlinks=False)
+                                for s in sub_it
+                                if s.name not in DiskIndexer.SKIP_NAMES
+                            )
+                    except OSError:
+                        has_sub = False
+                children.append({
+                    "name": entry.name,
+                    "path": entry.path,
+                    "sizeBytes": sz,
+                    "percentOfParent": min(100.0, pct),
+                    "fileCount": c_stats["files"] if c_stats else -1,
+                    "mediaCount": c_stats["media"] if c_stats else -1,
+                    "hasSubfolders": has_sub,
+                })
 
             if sort_by == "name":
                 children.sort(key=lambda d: d["name"].lower())
@@ -4208,7 +4280,7 @@ def make_handler(rt: CompanionRuntime):
 
             self._send_json(HTTPStatus.OK, {
                 "path": safe,
-                "sizeBytes": parent_stats["size"],
+                "sizeBytes": parent_stats["size"] if parent_stats else 0,
                 "children": children,
             })
 
@@ -4223,8 +4295,10 @@ def make_handler(rt: CompanionRuntime):
             if not os.path.isdir(safe):
                 raise FileNotFoundError(safe)
 
-            dir_stats = rt.indexer.compute_immediate_if_missing(safe)
-            parent_size = max(1, dir_stats["size"])
+            dir_stats = rt.indexer.get_dir_stats(safe)
+            if dir_stats is None and not rt.indexer.status().get("scanning"):
+                rt.indexer.start_background_scan(safe)
+            parent_size = max(1, dir_stats["size"]) if dir_stats else 1
             drive_root = os.path.splitdrive(safe)[0] + "\\"
             try:
                 usage = shutil.disk_usage(drive_root if os.path.exists(drive_root) else safe)
@@ -4237,6 +4311,8 @@ def make_handler(rt: CompanionRuntime):
             folders: list[dict[str, Any]] = []
             files: list[dict[str, Any]] = []
             uncached_videos: list[tuple[str, os.stat_result]] = []
+            immediate_bytes = 0
+            immediate_media = 0
 
             try:
                 with os.scandir(safe) as it:
@@ -4250,7 +4326,7 @@ def make_handler(rt: CompanionRuntime):
                             if entry.is_dir(follow_symlinks=False):
                                 c_stats = rt.indexer.get_dir_stats(entry.path)
                                 sz = c_stats["size"] if c_stats else -1
-                                pct = round((sz / parent_size) * 100.0, 1) if sz >= 0 else 0.0
+                                pct = round((sz / parent_size) * 100.0, 1) if (sz >= 0 and dir_stats) else 0.0
                                 folders.append({
                                     "name": name,
                                     "path": entry.path,
@@ -4262,6 +4338,9 @@ def make_handler(rt: CompanionRuntime):
                             elif entry.is_file(follow_symlinks=False):
                                 mtype = classify_media_type(name)
                                 st = entry.stat(follow_symlinks=False)
+                                immediate_bytes += st.st_size
+                                if mtype in ("video", "image"):
+                                    immediate_media += 1
                                 if media_filter == "video" and mtype != "video":
                                     continue
                                 if media_filter == "image" and mtype != "image":
@@ -4274,7 +4353,7 @@ def make_handler(rt: CompanionRuntime):
                                 cached_meta = None
                                 if mtype == "video":
                                     cached_meta = rt.cache.get(entry.path, st.st_mtime_ns, st.st_size)
-                                    if cached_meta is None and len(uncached_videos) < 40:
+                                    if cached_meta is None and len(uncached_videos) < 24:
                                         uncached_videos.append((entry.path, st))
 
                                 files.append({
@@ -4291,27 +4370,10 @@ def make_handler(rt: CompanionRuntime):
             except OSError as exc:
                 raise PermissionError(str(exc))
 
-            # Probe up to 16 uncached videos in this directory quickly in parallel (max ~1.2s)
+            # Queue uncached video metadata probes strictly asynchronously so folder opens in <10ms
             if uncached_videos and rt.media.ffprobe:
-                batch = uncached_videos[:16]
-                futures = {
-                    rt.media._probe_pool.submit(rt.media.probe_video, vp, vst): vp
-                    for vp, vst in batch
-                }
-                probed_map: dict[str, dict[str, Any]] = {}
-                done, _ = concurrent.futures.wait(futures.keys(), timeout=1.5)
-                for fut in done:
-                    vp = futures[fut]
-                    try:
-                        probed_map[vp] = fut.result()
-                    except Exception:
-                        pass
-                # Queue remaining videos silently in background
-                for vp, vst in uncached_videos[16:]:
-                    rt.media._probe_pool.submit(rt.media.probe_video, vp, vst)
-                for f_item in files:
-                    if f_item["meta"] is None and f_item["path"] in probed_map:
-                        f_item["meta"] = probed_map[f_item["path"]]
+                for vp, vst in uncached_videos:
+                    rt.media.queue_background_probe(vp, vst)
 
             reverse = order != "asc"
             folders.sort(
@@ -4343,9 +4405,9 @@ def make_handler(rt: CompanionRuntime):
                 "path": safe,
                 "name": os.path.basename(safe.rstrip("\\")) or safe,
                 "parentPath": parent_dir,
-                "totalSizeBytes": dir_stats["size"],
-                "fileCount": dir_stats["files"],
-                "mediaCount": dir_stats["media"],
+                "totalSizeBytes": dir_stats["size"] if dir_stats else immediate_bytes,
+                "fileCount": dir_stats["files"] if dir_stats else len(files),
+                "mediaCount": dir_stats["media"] if dir_stats else immediate_media,
                 "diskFreeBytes": disk_free,
                 "diskTotalBytes": disk_total,
                 "indexer": rt.indexer.status(),

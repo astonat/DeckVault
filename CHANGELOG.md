@@ -2,6 +2,17 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.4.1] - 2026-11-18
+
+### Performance, FFmpeg Memory Spike Fix & Smoothness (`DeckVault.exe` & Android `v1.4.1`)
+- **Eliminated 10 GB FFmpeg RAM Spike on Desktop**:
+  - Rewrote `MediaService.get_or_build_storyboard` (`companion/deckvault_server.py`) to extract frames sequentially using a single `-threads 1 -skip_frame nokey` decoder and stitch tiles in Pillow (`PIL`), replacing the previous `16`-input parallel FFmpeg `xstack` decoder graph (~30 MB peak RAM vs. 3–4 GB+ per storyboard).
+  - Bounded concurrent FFmpeg thumbnail/frame/storyboard jobs via `BoundedSemaphore(2)`, bounded `ffprobe` workers via `BoundedSemaphore(3)` + deduplicated queue, capped live playable H.264 stream threads (`-threads 4`), and switched `MetadataCache` to a persistent WAL SQLite connection.
+  - Made `_handle_list` and `_handle_tree` return immediately without blocking on recursive `DiskIndexer` scans or synchronous `1.5s` `ffprobe` batches, and added `AbortController` request cancellation + `220ms` hover-dwell debounce on storyboards + stale `<img>` teardown + `decoding="async"` in `companion/desktop_ui.py`.
+- **Android Access Error & Fast Browsing Fixes (`v1.4.1`)**:
+  - Automatically requests `READ_MEDIA_VIDEO`/`IMAGES`/`AUDIO` (`READ_EXTERNAL_STORAGE` on older Android) at startup when needed, prioritizes `All Device Videos` / `Photos` / `Audio` when `MANAGE_EXTERNAL_STORAGE` isn't yet granted, and synthesizes accessible storage root folders (`DCIM`, `Movies`, `Pictures`, `Download`, `Documents`, `Music`) + path-prefix/bucket `MediaStore` fallback instead of throwing access error snackbars on tablets when opening `Internal Storage` or `SD Card`.
+  - Replaced synchronous per-file `MediaMetadataRetriever` loops in `LocalStorageRepository.listDirectory` and `AndroidPeerServer /api/list` with a single fast batch `MediaStore` metadata cache prefetch (~10 ms), cached storage drive detection for `5s`, skipped deep subfolder scanning in large directories, added `Semaphore(2)` native codec bounds + Android Q+ hardware `loadThumbnail`, added parallel `resolveListFolder` + `resolveTree` with stale-job cancellation in `MainViewModel`, tuned OkHttp (`connectTimeout = 3s`, `maxRequestsPerHost = 12`) + Coil 3 `MemoryCache`/`DiskCache`, and added `contentType` reuse on `LazyVerticalGrid`/`LazyColumn`.
+
 ## [v1.4.0] - 2026-11-16
 
 ### Windows Desktop Studio (`DeckVault.exe` v1.4.0)

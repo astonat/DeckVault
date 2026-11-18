@@ -16,6 +16,7 @@ import android.os.StatFs
 import android.os.storage.StorageManager
 import android.provider.MediaStore
 import android.util.LruCache
+import android.util.Size
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import com.deckvault.app.model.DeleteResponse
@@ -42,6 +43,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.Semaphore
 import kotlin.math.max
 import kotlin.math.min
 
@@ -81,7 +83,29 @@ class LocalStorageRepository(private val context: Context) {
 
     private val thumbDir = File(context.cacheDir, "deckvault_local_thumbs").apply { mkdirs() }
     private val storyboardDir = File(context.cacheDir, "deckvault_local_storyboards").apply { mkdirs() }
-    private val metaCache = LruCache<String, VideoMeta>(500)
+    private val metaCache = LruCache<String, VideoMeta>(1200)
+    private val mmrSemaphore = Semaphore(2)
+    private val drivesLock = Any()
+
+    @Volatile
+    private var cachedDrives: List<DriveInfo> = emptyList()
+
+    @Volatile
+    private var cachedDrivesAtMs: Long = 0L
+
+    @Volatile
+    private var lastMediaStorePrefetchMs: Long = 0L
+
+    fun hasMediaReadAccess(): Boolean {
+        if (hasAllFilesAccess()) return true
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_AUDIO) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+    }
 
     fun hasAllFilesAccess(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -93,102 +117,126 @@ class LocalStorageRepository(private val context: Context) {
         }
     }
 
-    fun detectStorageDrives(): List<DriveInfo> {
-        data class VolumeCandidate(val canon: String, val file: File, val label: String, val isPrimary: Boolean)
-
-        val candidates = linkedMapOf<String, VolumeCandidate>()
-
-        fun addCandidate(dir: File?, labelHint: String?, isPrimary: Boolean) {
-            if (dir == null || !dir.exists()) return
-            val canon = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath }
-            if (canon == "/storage" || canon == "/storage/emulated") return
-            val existing = candidates[canon]
-            if (existing == null || (isPrimary && !existing.isPrimary)) {
-                val label = when {
-                    isPrimary -> "Internal Storage"
-                    !labelHint.isNullOrBlank() -> labelHint
-                    else -> "SD / External (${dir.name})"
-                }
-                candidates[canon] = VolumeCandidate(canon, dir, label, isPrimary)
-            }
+    fun detectStorageDrives(forceRefresh: Boolean = false): List<DriveInfo> {
+        val now = System.currentTimeMillis()
+        val cached = cachedDrives
+        if (!forceRefresh && cached.isNotEmpty() && (now - cachedDrivesAtMs) < 5_000L) {
+            return cached
         }
+        synchronized(drivesLock) {
+            val recheckNow = System.currentTimeMillis()
+            val cur = cachedDrives
+            if (!forceRefresh && cur.isNotEmpty() && (recheckNow - cachedDrivesAtMs) < 5_000L) {
+                return cur
+            }
+            data class VolumeCandidate(val canon: String, val file: File, val label: String, val isPrimary: Boolean)
 
-        // 1. StorageManager.storageVolumes gives authoritative Internal + SD Card + USB labels & roots
-        runCatching {
-            val sm = context.getSystemService(StorageManager::class.java)
-            sm?.storageVolumes?.forEach { vol ->
-                val state = vol.state
-                if (state == Environment.MEDIA_MOUNTED || state == Environment.MEDIA_MOUNTED_READ_ONLY) {
-                    val volDir: File? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        vol.directory
-                    } else {
-                        if (vol.isPrimary) Environment.getExternalStorageDirectory()
-                        else vol.uuid?.let { File("/storage/$it") }
-                    }
-                    val desc = runCatching { vol.getDescription(context) }.getOrNull().orEmpty()
+            val candidates = linkedMapOf<String, VolumeCandidate>()
+
+            fun addCandidate(dir: File?, labelHint: String?, isPrimary: Boolean) {
+                if (dir == null || !dir.exists()) return
+                val canon = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath }
+                if (canon == "/storage" || canon == "/storage/emulated") return
+                val existing = candidates[canon]
+                if (existing == null || (isPrimary && !existing.isPrimary)) {
                     val label = when {
-                        vol.isPrimary -> "Internal Storage"
-                        desc.isNotBlank() && !desc.equals("External storage", ignoreCase = true) ->
-                            if (desc.contains("SD", true) || desc.contains("USB", true)) desc else "SD Card ($desc)"
-                        else -> "SD Card (${volDir?.name ?: vol.uuid ?: "External"})"
+                        isPrimary -> "Internal Storage"
+                        !labelHint.isNullOrBlank() -> labelHint
+                        else -> "SD / External (${dir.name})"
                     }
-                    addCandidate(volDir, label, vol.isPrimary)
+                    candidates[canon] = VolumeCandidate(canon, dir, label, isPrimary)
                 }
             }
-        }
 
-        // 2. Primary storage fallback
-        addCandidate(Environment.getExternalStorageDirectory(), "Internal Storage", true)
-
-        // 3. getExternalFilesDirs ancestors (detects external SD & USB roots even on older OEMs)
-        context.getExternalFilesDirs(null).filterNotNull().forEach { appDir ->
-            var cur: File? = appDir
-            while (cur != null && cur.parentFile != null) {
-                if (cur.name.equals("Android", ignoreCase = true)) {
-                    val volRoot = cur.parentFile
-                    if (volRoot != null) {
-                        val isPrim = runCatching {
-                            volRoot.canonicalPath == Environment.getExternalStorageDirectory()?.canonicalPath
-                        }.getOrDefault(false)
-                        addCandidate(volRoot, if (isPrim) "Internal Storage" else "SD Card (${volRoot.name})", isPrim)
-                    }
-                    break
-                }
-                cur = cur.parentFile
-            }
-        }
-
-        // 4. Direct /storage/<uuid> scan fallback for mounted SD/USB volumes
-        runCatching {
-            File("/storage").listFiles()?.forEach { entry ->
-                val name = entry.name
-                if (entry.isDirectory && name != "self" && name != "emulated" && entry.exists()) {
-                    val sf = runCatching { StatFs(entry.absolutePath) }.getOrNull()
-                    if (sf != null && sf.totalBytes > 0L) {
-                        addCandidate(entry, "SD / USB ($name)", false)
+            // 1. StorageManager.storageVolumes gives authoritative Internal + SD Card + USB labels & roots
+            runCatching {
+                val sm = context.getSystemService(StorageManager::class.java)
+                sm?.storageVolumes?.forEach { vol ->
+                    val state = vol.state
+                    if (state == Environment.MEDIA_MOUNTED || state == Environment.MEDIA_MOUNTED_READ_ONLY) {
+                        val volDir: File? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            vol.directory
+                        } else {
+                            if (vol.isPrimary) Environment.getExternalStorageDirectory()
+                            else vol.uuid?.let { File("/storage/$it") }
+                        }
+                        val desc = runCatching { vol.getDescription(context) }.getOrNull().orEmpty()
+                        val label = when {
+                            vol.isPrimary -> "Internal Storage"
+                            desc.isNotBlank() && !desc.equals("External storage", ignoreCase = true) ->
+                                if (desc.contains("SD", true) || desc.contains("USB", true)) desc else "SD Card ($desc)"
+                            else -> "SD Card (${volDir?.name ?: vol.uuid ?: "External"})"
+                        }
+                        addCandidate(volDir, label, vol.isPrimary)
                     }
                 }
             }
-        }
 
-        return candidates.values
-            .sortedWith(compareBy<VolumeCandidate>({ if (it.isPrimary) 0 else 1 }, { it.label.lowercase(Locale.US) }))
-            .map { cand ->
-                val (total, free) = statVolume(cand.file)
-                DriveInfo(
-                    name = cand.label,
-                    path = cand.canon,
-                    totalBytes = total,
-                    usedBytes = (total - free).coerceAtLeast(0L),
-                    freeBytes = free,
-                    indexedSizeBytes = -1L,
-                )
+            // 2. Primary storage fallback
+            addCandidate(Environment.getExternalStorageDirectory(), "Internal Storage", true)
+
+            // 3. getExternalFilesDirs ancestors (detects external SD & USB roots even on older OEMs)
+            context.getExternalFilesDirs(null).filterNotNull().forEach { appDir ->
+                var curDir: File? = appDir
+                while (curDir != null && curDir.parentFile != null) {
+                    if (curDir.name.equals("Android", ignoreCase = true)) {
+                        val volRoot = curDir.parentFile
+                        if (volRoot != null) {
+                            val isPrim = runCatching {
+                                volRoot.canonicalPath == Environment.getExternalStorageDirectory()?.canonicalPath
+                            }.getOrDefault(false)
+                            addCandidate(volRoot, if (isPrim) "Internal Storage" else "SD Card (${volRoot.name})", isPrim)
+                        }
+                        break
+                    }
+                    curDir = curDir.parentFile
+                }
             }
+
+            // 4. Direct /storage/<uuid> scan fallback for mounted SD/USB volumes
+            runCatching {
+                File("/storage").listFiles()?.forEach { entry ->
+                    val name = entry.name
+                    if (entry.isDirectory && name != "self" && name != "emulated" && entry.exists()) {
+                        val sf = runCatching { StatFs(entry.absolutePath) }.getOrNull()
+                        if (sf != null && sf.totalBytes > 0L) {
+                            addCandidate(entry, "SD / USB ($name)", false)
+                        }
+                    }
+                }
+            }
+
+            val result = candidates.values
+                .sortedWith(compareBy<VolumeCandidate>({ if (it.isPrimary) 0 else 1 }, { it.label.lowercase(Locale.US) }))
+                .map { cand ->
+                    val (total, free) = statVolume(cand.file)
+                    DriveInfo(
+                        name = cand.label,
+                        path = cand.canon,
+                        totalBytes = total,
+                        usedBytes = (total - free).coerceAtLeast(0L),
+                        freeBytes = free,
+                        indexedSizeBytes = -1L,
+                    )
+                }
+            cachedDrives = result
+            cachedDrivesAtMs = System.currentTimeMillis()
+            return result
+        }
     }
 
     fun detectQuickFolders(): List<QuickFolder> {
-        val drives = detectStorageDrives()
+        val drives = detectStorageDrives(forceRefresh = true)
         val out = mutableListOf<QuickFolder>()
+        val allFilesOk = hasAllFilesAccess()
+
+        if (!allFilesOk) {
+            // Put MediaStore collections FIRST when All Files Access isn't granted so tablet boots with zero errors!
+            out.add(QuickFolder(name = "All Device Videos", path = MEDIASTORE_VIDEOS))
+            out.add(QuickFolder(name = "All Device Photos", path = MEDIASTORE_IMAGES))
+            out.add(QuickFolder(name = "All Device Audio", path = MEDIASTORE_AUDIO))
+        }
+
         val primary = drives.firstOrNull()?.let { File(it.path) } ?: Environment.getExternalStorageDirectory()
         if (primary != null && primary.exists()) {
             val primaryFolders = listOf(
@@ -222,10 +270,11 @@ class LocalStorageRepository(private val context: Context) {
             }
         }
 
-        // Universal MediaStore collections always work even without All Files permission
-        out.add(QuickFolder(name = "All Device Videos", path = MEDIASTORE_VIDEOS))
-        out.add(QuickFolder(name = "All Device Photos", path = MEDIASTORE_IMAGES))
-        out.add(QuickFolder(name = "All Device Audio", path = MEDIASTORE_AUDIO))
+        if (allFilesOk) {
+            out.add(QuickFolder(name = "All Device Videos", path = MEDIASTORE_VIDEOS))
+            out.add(QuickFolder(name = "All Device Photos", path = MEDIASTORE_IMAGES))
+            out.add(QuickFolder(name = "All Device Audio", path = MEDIASTORE_AUDIO))
+        }
 
         return out
     }
@@ -253,6 +302,46 @@ class LocalStorageRepository(private val context: Context) {
         return target
     }
 
+    fun prefetchMediaStoreVideoMeta(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && (now - lastMediaStorePrefetchMs) < 10_000L) return
+        lastMediaStorePrefetchMs = now
+        val cols = arrayOf(
+            MediaStore.Video.Media.DATA,
+            MediaStore.Video.Media.DURATION,
+            MediaStore.Video.Media.WIDTH,
+            MediaStore.Video.Media.HEIGHT,
+        )
+        runCatching {
+            context.contentResolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                cols,
+                null,
+                null,
+                "${MediaStore.Video.Media.DATE_MODIFIED} DESC",
+            )?.use { c ->
+                val dataIdx = c.getColumnIndex(MediaStore.Video.Media.DATA)
+                val durIdx = c.getColumnIndex(MediaStore.Video.Media.DURATION)
+                val wIdx = c.getColumnIndex(MediaStore.Video.Media.WIDTH)
+                val hIdx = c.getColumnIndex(MediaStore.Video.Media.HEIGHT)
+                var count = 0
+                while (c.moveToNext() && count < 1500) {
+                    val p = if (dataIdx >= 0) c.getString(dataIdx) else null
+                    if (p.isNullOrBlank()) continue
+                    val dur = if (durIdx >= 0) c.getLong(durIdx) else 0L
+                    val w = if (wIdx >= 0) c.getInt(wIdx) else 0
+                    val h = if (hIdx >= 0) c.getInt(hIdx) else 0
+                    if (dur > 0L || w > 0) {
+                        metaCache.put(p, VideoMeta(durationMs = dur, width = w, height = h))
+                    }
+                    count++
+                }
+            }
+        }
+    }
+
+    fun getCachedVideoMeta(rawPath: String): VideoMeta? = metaCache.get(rawPath)
+
     suspend fun listDirectory(
         rawPath: String,
         sortBy: SortBy = SortBy.SIZE,
@@ -263,7 +352,8 @@ class LocalStorageRepository(private val context: Context) {
             return@withContext queryMediaStoreCollection(rawPath, sortBy, descending, filter)
         }
 
-        val defaultRoot = detectStorageDrives().firstOrNull()?.path
+        val drives = detectStorageDrives()
+        val defaultRoot = drives.firstOrNull()?.path
             ?: Environment.getExternalStorageDirectory()?.canonicalPath
             ?: throw IOException("No device storage detected")
         val safe = resolveSafePath(rawPath.ifBlank { defaultRoot })
@@ -271,61 +361,93 @@ class LocalStorageRepository(private val context: Context) {
             throw IOException("Folder not found: ${safe.absolutePath}")
         }
 
+        val safeCanon = runCatching { safe.canonicalPath }.getOrElse { safe.absolutePath }
         val entries = safe.listFiles()
         if (entries == null) {
-            // Android 11+ without MANAGE_EXTERNAL_STORAGE cannot list raw directories; provide MediaStore slice if recognizable or clear permission prompt
+            // Android 11–16 without All Files Access cannot call listFiles() on raw folders; synthesize root folders + MediaStore cleanly
             if (!hasAllFilesAccess()) {
-                val fallbackItems = queryMediaStoreByFolderHint(safe.absolutePath, sortBy, descending, filter)
-                if (fallbackItems.isNotEmpty()) {
+                val isRootVol = drives.any { it.path == safeCanon }
+                val synthFolders = if (isRootVol) {
+                    listOf("DCIM", "Movies", "Pictures", "Download", "Documents", "Music")
+                        .map { File(safe, it) }
+                        .filter { it.exists() && it.isDirectory }
+                        .map { sub ->
+                            FolderItem(
+                                name = sub.name,
+                                path = runCatching { sub.canonicalPath }.getOrElse { sub.absolutePath },
+                                sizeBytes = -1L,
+                                fileCount = -1,
+                                mediaCount = -1,
+                                hasSubfolders = true,
+                            )
+                        }
+                } else emptyList()
+                val fallbackItems = queryMediaStoreByFolderHint(safeCanon, sortBy, descending, filter)
+                if (synthFolders.isNotEmpty() || fallbackItems.isNotEmpty() || hasMediaReadAccess()) {
+                    val (tot, free) = statVolume(safe)
                     return@withContext ListResponse(
-                        path = safe.canonicalPath,
-                        name = safe.name.ifBlank { safe.canonicalPath },
+                        path = safeCanon,
+                        name = drives.firstOrNull { it.path == safeCanon }?.name ?: safe.name.ifBlank { safeCanon },
                         parentPath = computeParentPath(safe),
                         totalSizeBytes = fallbackItems.sumOf { it.sizeBytes },
                         fileCount = fallbackItems.size,
                         mediaCount = fallbackItems.count { it.isVideo || it.isImage },
-                        diskFreeBytes = statVolume(safe).second,
-                        diskTotalBytes = statVolume(safe).first,
-                        folders = emptyList(),
+                        diskFreeBytes = free,
+                        diskTotalBytes = tot,
+                        folders = synthFolders,
                         files = fallbackItems,
                     )
                 }
-                throw AllFilesPermissionRequiredException(safe.canonicalPath)
+                throw AllFilesPermissionRequiredException(safeCanon)
             }
-            throw IOException("Cannot read directory: ${safe.canonicalPath}")
+            throw IOException("Cannot read directory: $safeCanon")
         }
+
+        // Batch-load MediaStore metadata once (~5-15ms) instead of spawning synchronous MediaMetadataRetriever per file!
+        prefetchMediaStoreVideoMeta()
 
         val folders = mutableListOf<FolderItem>()
         val files = mutableListOf<FileItem>()
         var totalFileBytes = 0L
         var mediaCount = 0
+        val fastFolderMode = entries.size > 40
 
         entries.forEach { entry ->
             if (entry.name == "." || entry.name == "..") return@forEach
             if (entry.name.startsWith(".") && entry.name != TRASH_DIR_NAME) return@forEach
             val canon = runCatching { entry.canonicalPath }.getOrElse { entry.absolutePath }
             if (entry.isDirectory) {
-                val children = entry.listFiles()
-                var immediateBytes = 0L
-                var immediateFiles = 0
-                var hasSubs = false
-                children?.forEach { child ->
-                    if (!child.name.startsWith(".")) {
-                        if (child.isDirectory) hasSubs = true
-                        else {
-                            immediateBytes += child.length()
-                            immediateFiles++
+                var immediateBytes = -1L
+                var immediateFiles = -1
+                var hasSubs = true
+                if (!fastFolderMode) {
+                    val children = entry.listFiles()
+                    if (children != null) {
+                        var sum = 0L
+                        var cnt = 0
+                        var subFlag = false
+                        children.forEach { child ->
+                            if (!child.name.startsWith(".")) {
+                                if (child.isDirectory) subFlag = true
+                                else {
+                                    sum += child.length()
+                                    cnt++
+                                }
+                            }
                         }
+                        immediateBytes = sum
+                        immediateFiles = cnt
+                        hasSubs = subFlag
                     }
                 }
                 folders.add(
                     FolderItem(
                         name = if (entry.name == TRASH_DIR_NAME) "Recycle Bin (.deckvault_trash)" else entry.name,
                         path = canon,
-                        sizeBytes = if (children != null) immediateBytes else -1L,
-                        fileCount = if (children != null) immediateFiles else -1,
+                        sizeBytes = immediateBytes,
+                        fileCount = immediateFiles,
                         mediaCount = -1,
-                        hasSubfolders = hasSubs || children == null,
+                        hasSubfolders = hasSubs,
                     )
                 )
             } else if (entry.isFile) {
@@ -334,9 +456,7 @@ class LocalStorageRepository(private val context: Context) {
                 val mtype = classifyMedia(entry.name)
                 if (mtype == "video" || mtype == "image") mediaCount++
                 if (matchesMediaFilter(mtype, sz, filter)) {
-                    val meta = if (mtype == "video" && files.size < 180) {
-                        getCachedOrQuickVideoMeta(canon)
-                    } else null
+                    val meta = if (mtype == "video") metaCache.get(canon) ?: metaCache.get(entry.absolutePath) else null
                     files.add(
                         FileItem(
                             name = entry.name,
@@ -352,14 +472,13 @@ class LocalStorageRepository(private val context: Context) {
             }
         }
 
-        // If inside a root/public folder without All Files Access and listFiles only saw folders/partial files, allow MediaStore items when needed
         val sortedFolders = folders.sortedWith(compareByDescending<FolderItem> { it.sizeBytes }.thenBy { it.name.lowercase(Locale.US) })
         val sortedFiles = sortFileItems(files, sortBy, descending)
         val (totalDisk, freeDisk) = statVolume(safe)
 
         ListResponse(
-            path = safe.canonicalPath,
-            name = volumeRootFor(safe)?.takeIf { it.path == safe.canonicalPath }?.name ?: safe.name.ifBlank { safe.canonicalPath },
+            path = safeCanon,
+            name = drives.firstOrNull { it.path == safeCanon }?.name ?: safe.name.ifBlank { safeCanon },
             parentPath = computeParentPath(safe),
             totalSizeBytes = totalFileBytes,
             fileCount = sortedFiles.size,
@@ -375,8 +494,39 @@ class LocalStorageRepository(private val context: Context) {
         if (isVirtualMediaStorePath(rawPath)) {
             return@withContext TreeResponse(path = rawPath, sizeBytes = 0L, children = emptyList())
         }
-        val listed = listDirectory(rawPath, SortBy.SIZE, true, MediaFilter.ALL)
-        TreeResponse(path = listed.path, sizeBytes = listed.totalSizeBytes, children = listed.folders)
+        val safe = resolveSafePath(rawPath)
+        val safeCanon = runCatching { safe.canonicalPath }.getOrElse { safe.absolutePath }
+        val entries = safe.listFiles()
+        if (entries == null) {
+            val drives = detectStorageDrives()
+            val isRootVol = drives.any { it.path == safeCanon }
+            val fallbackDirs = if (!hasAllFilesAccess() && isRootVol) {
+                listOf("DCIM", "Movies", "Pictures", "Download", "Documents", "Music")
+                    .map { File(safe, it) }
+                    .filter { it.exists() && it.isDirectory }
+                    .map { sub ->
+                        FolderItem(
+                            name = sub.name,
+                            path = runCatching { sub.canonicalPath }.getOrElse { sub.absolutePath },
+                            sizeBytes = -1L,
+                            hasSubfolders = true,
+                        )
+                    }
+            } else emptyList()
+            return@withContext TreeResponse(path = safeCanon, sizeBytes = 0L, children = fallbackDirs)
+        }
+        val childrenDirs = entries
+            .filter { it.isDirectory && !it.name.startsWith(".") }
+            .map { dir ->
+                FolderItem(
+                    name = dir.name,
+                    path = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath },
+                    sizeBytes = -1L,
+                    hasSubfolders = true,
+                )
+            }
+            .sortedBy { it.name.lowercase(Locale.US) }
+        TreeResponse(path = safeCanon, sizeBytes = 0L, children = childrenDirs)
     }
 
     suspend fun findLargest(rootPath: String?, limit: Int = 80): LargestResponse = withContext(Dispatchers.IO) {
@@ -440,41 +590,70 @@ class LocalStorageRepository(private val context: Context) {
         val outFile = File(thumbDir, "$key.jpg")
         if (outFile.exists() && outFile.length() > 0L) return outFile
 
-        return runCatching {
-            val mmr = MediaMetadataRetriever()
-            try {
-                mmr.setDataSource(file.canonicalPath)
-                val durMs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                val frameUs = if (durMs > 1500L) min(durMs * 150L, 4_000_000L) else 0L
-                val rawBmp = mmr.getFrameAtTime(frameUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    ?: mmr.frameAtTime
-                    ?: return@runCatching null
-                saveScaledJpeg(rawBmp, outFile, width, 84)
-                outFile
-            } finally {
-                runCatching { mmr.release() }
-            }
-        }.getOrNull()
+        mmrSemaphore.acquire()
+        return try {
+            if (outFile.exists() && outFile.length() > 0L) return outFile
+            val tmpFile = File(thumbDir, "$key.tmp.jpg")
+            runCatching {
+                val mmr = MediaMetadataRetriever()
+                try {
+                    mmr.setDataSource(file.canonicalPath)
+                    val durMs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                    val frameUs = if (durMs > 1500L) min(durMs * 150L, 4_000_000L) else 0L
+                    val rawBmp = mmr.getFrameAtTime(frameUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        ?: mmr.frameAtTime
+                        ?: return@runCatching null
+                    saveScaledJpeg(rawBmp, tmpFile, width, 84)
+                    if (!tmpFile.renameTo(outFile)) tmpFile.copyTo(outFile, overwrite = true)
+                    tmpFile.delete()
+                    outFile
+                } finally {
+                    runCatching { mmr.release() }
+                    tmpFile.delete()
+                }
+            }.getOrNull()
+        } finally {
+            mmrSemaphore.release()
+        }
     }
 
     private fun buildThumbForUri(uriStr: String, width: Int): File? {
         val key = sha256("uri:$uriStr:$width")
         val outFile = File(thumbDir, "$key.jpg")
         if (outFile.exists() && outFile.length() > 0L) return outFile
-        return runCatching {
+        mmrSemaphore.acquire()
+        return try {
+            if (outFile.exists() && outFile.length() > 0L) return outFile
+            val tmpFile = File(thumbDir, "$key.tmp.jpg")
             val uri = Uri.parse(uriStr)
-            val mmr = MediaMetadataRetriever()
-            try {
-                mmr.setDataSource(context, uri)
-                val rawBmp = mmr.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    ?: mmr.frameAtTime
-                    ?: return@runCatching null
-                saveScaledJpeg(rawBmp, outFile, width, 84)
-                outFile
-            } finally {
-                runCatching { mmr.release() }
+            // Fast Android Q+ hardware thumbnail lookup first (~10ms!)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val quickBmp = runCatching { context.contentResolver.loadThumbnail(uri, Size(width, width), null) }.getOrNull()
+                if (quickBmp != null) {
+                    saveScaledJpeg(quickBmp, tmpFile, width, 84)
+                    if (!tmpFile.renameTo(outFile)) tmpFile.copyTo(outFile, overwrite = true)
+                    tmpFile.delete()
+                    return outFile
+                }
             }
-        }.getOrNull()
+            runCatching {
+                val mmr = MediaMetadataRetriever()
+                try {
+                    mmr.setDataSource(context, uri)
+                    val rawBmp = mmr.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        ?: mmr.frameAtTime
+                        ?: return@runCatching null
+                    saveScaledJpeg(rawBmp, tmpFile, width, 84)
+                    if (!tmpFile.renameTo(outFile)) tmpFile.copyTo(outFile, overwrite = true)
+                    outFile
+                } finally {
+                    runCatching { mmr.release() }
+                    tmpFile.delete()
+                }
+            }.getOrNull()
+        } finally {
+            mmrSemaphore.release()
+        }
     }
 
     fun getOrBuildStoryboardFile(rawPath: String, cols: Int = 4, rows: Int = 4): File? {
@@ -1004,22 +1183,14 @@ class LocalStorageRepository(private val context: Context) {
         filter: MediaFilter,
     ): List<FileItem> {
         val folderName = File(folderPath).name
+        val cleanPath = folderPath.trimEnd('/')
         if (folderName.isBlank()) return emptyList()
-        val videos = queryMediaStoreUri(
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-            "video",
-            "${MediaStore.MediaColumns.BUCKET_DISPLAY_NAME} = ?",
-            arrayOf(folderName),
-            filter,
-        )
-        val images = queryMediaStoreUri(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            "image",
-            "${MediaStore.MediaColumns.BUCKET_DISPLAY_NAME} = ?",
-            arrayOf(folderName),
-            filter,
-        )
-        return sortFileItems(videos + images, sortBy, descending)
+        val sel = "${MediaStore.MediaColumns.DATA} LIKE ? OR ${MediaStore.MediaColumns.BUCKET_DISPLAY_NAME} = ?"
+        val args = arrayOf("$cleanPath/%", folderName)
+        val videos = queryMediaStoreUri(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "video", sel, args, filter)
+        val images = queryMediaStoreUri(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image", sel, args, filter)
+        val audio = queryMediaStoreUri(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, "audio", sel, args, filter)
+        return sortFileItems((videos + images + audio).distinctBy { it.path }, sortBy, descending)
     }
 
     private fun queryMediaStoreUri(
@@ -1075,8 +1246,8 @@ class LocalStorageRepository(private val context: Context) {
                     if (!matchesMediaFilter(defaultMediaType, sz, filter)) continue
 
                     val contentUri = ContentUris.withAppendedId(baseUri, id).toString()
-                    val resolvedPath = if (!diskPath.isNullOrBlank() && File(diskPath).canRead()) {
-                        runCatching { File(diskPath).canonicalPath }.getOrElse { diskPath }
+                    val resolvedPath = if (hasAllFilesAccess() && !diskPath.isNullOrBlank()) {
+                        diskPath
                     } else {
                         contentUri
                     }

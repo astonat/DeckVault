@@ -70,6 +70,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlin.math.max
@@ -99,6 +100,7 @@ class AndroidPeerServer(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val pool: ExecutorService = Executors.newCachedThreadPool()
     private val metaCache = ConcurrentHashMap<String, VideoMeta?>()
+    private val mediaSem = Semaphore(2)
     private val pullClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.MINUTES)
@@ -296,7 +298,7 @@ class AndroidPeerServer(private val context: Context) {
             if (method == "GET" && route == "/api/ping") {
                 val ping = PingResponse(
                     service = "DeckVault",
-                    version = "1.4.0",
+                    version = "1.4.1",
                     hostId = hostId,
                     deviceName = deviceName,
                     os = "Android",
@@ -374,19 +376,20 @@ class AndroidPeerServer(private val context: Context) {
                 val safe = resolveSafePath(qs["path"].orEmpty())
                 if (!safe.isDirectory) throw java.io.FileNotFoundException(safe.path)
                 val sort = qs["sort"] ?: "size"
-                val childrenDirs = (safe.listFiles() ?: emptyArray())
+                val rawDirs = (safe.listFiles() ?: emptyArray())
                     .filter { it.isDirectory && !it.name.startsWith(".") && it.name != "Android" }
-                    .map { dir ->
-                        val quickSum = quickFolderSizeBytes(dir)
-                        val hasSub = (dir.listFiles()?.any { it.isDirectory && !it.name.startsWith(".") } == true)
-                        FolderItem(
-                            name = dir.name,
-                            path = dir.canonicalPath,
-                            sizeBytes = quickSum,
-                            percentOfParent = 0.0,
-                            hasSubfolders = hasSub,
-                        )
-                    }
+                val fastMode = rawDirs.size > 24
+                val childrenDirs = rawDirs.map { dir ->
+                    val quickSum = if (fastMode) -1L else quickFolderSizeBytes(dir)
+                    val hasSub = if (fastMode) true else (dir.listFiles()?.any { it.isDirectory && !it.name.startsWith(".") } == true)
+                    FolderItem(
+                        name = dir.name,
+                        path = dir.canonicalPath,
+                        sizeBytes = quickSum,
+                        percentOfParent = 0.0,
+                        hasSubfolders = hasSub,
+                    )
+                }
                 val parentSize = max(1L, childrenDirs.sumOf { max(0L, it.sizeBytes) })
                 val sorted = childrenDirs.map {
                     it.copy(percentOfParent = if (it.sizeBytes > 0) min(100.0, (it.sizeBytes * 100.0) / parentSize) else 0.0)
@@ -394,7 +397,7 @@ class AndroidPeerServer(private val context: Context) {
                     if (sort == "name") list.sortedBy { it.name.lowercase(Locale.US) }
                     else list.sortedByDescending { it.sizeBytes }
                 }
-                val resp = TreeResponse(path = safe.canonicalPath, sizeBytes = quickFolderSizeBytes(safe), children = sorted)
+                val resp = TreeResponse(path = safe.canonicalPath, sizeBytes = max(0L, parentSize), children = sorted)
                 sendJson(output, 200, json.encodeToString(resp), headOnly)
             }
             "/api/list" -> {
@@ -405,14 +408,17 @@ class AndroidPeerServer(private val context: Context) {
                 val filter = qs["filter"] ?: "all"
                 val q = (qs["q"] ?: "").trim().lowercase(Locale.US)
 
+                localRepo.prefetchMediaStoreVideoMeta()
+
                 val entries = (safe.listFiles() ?: emptyArray()).filter { !it.name.startsWith(".") }
-                val folders = entries
-                    .filter { it.isDirectory && (q.isEmpty() || it.name.lowercase(Locale.US).contains(q)) }
+                val rawFolders = entries.filter { it.isDirectory && (q.isEmpty() || it.name.lowercase(Locale.US).contains(q)) }
+                val fastFolderMode = rawFolders.size > 24
+                val folders = rawFolders
                     .map { dir ->
                         FolderItem(
                             name = dir.name,
                             path = dir.canonicalPath,
-                            sizeBytes = quickFolderSizeBytes(dir),
+                            sizeBytes = if (fastFolderMode) -1L else quickFolderSizeBytes(dir),
                             hasSubfolders = true,
                         )
                     }
@@ -427,10 +433,20 @@ class AndroidPeerServer(private val context: Context) {
                     "large" -> files.filter { it.sizeBytes >= 100L * 1024 * 1024 }
                     else -> files
                 }
-                // Populate video/audio duration cleanly for first 40 listed media items
-                files = files.mapIndexed { idx, item ->
-                    if (idx < 40 && (item.isVideo || item.isAudio) && item.meta == null) {
-                        item.copy(meta = probeMediaMeta(File(item.path)))
+                // Resolve from MediaStore/memory cache instantly; queue up to 16 uncached media probes asynchronously
+                var queued = 0
+                files = files.map { item ->
+                    if ((item.isVideo || item.isAudio) && item.meta == null) {
+                        val cached = metaCache[item.path] ?: localRepo.getCachedVideoMeta(item.path)
+                        if (cached != null) {
+                            item.copy(meta = cached)
+                        } else {
+                            if (queued < 16) {
+                                queued++
+                                pool.execute { probeMediaMeta(File(item.path)) }
+                            }
+                            item
+                        }
                     } else item
                 }
                 val comparator: Comparator<FileItem> = when (sort) {
@@ -897,59 +913,79 @@ class AndroidPeerServer(private val context: Context) {
 
     private fun getOrBuildVideoThumb(file: File, width: Int): File {
         val dir = File(context.cacheDir, "peer_thumbs").apply { mkdirs() }
-        val out = File(dir, "${cacheKeyForFile(file, "t_$width")}.jpg")
+        val key = cacheKeyForFile(file, "t_$width")
+        val out = File(dir, "$key.jpg")
         if (out.exists() && out.length() > 100) return out
 
-        val mmr = MediaMetadataRetriever()
-        try {
-            mmr.setDataSource(file.absolutePath)
-            val durMs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-            val targetUs = ((durMs * 0.15).toLong().coerceIn(0L, max(0L, durMs - 100L))) * 1000L
-            val bmp = mmr.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                ?: mmr.frameAtTime
-                ?: throw IllegalStateException("Cannot extract video frame")
-            val scaled = scaleBitmapToWidth(bmp, width)
-            FileOutputStream(out).use { scaled.compress(Bitmap.CompressFormat.JPEG, 85, it) }
-            if (scaled !== bmp) scaled.recycle()
-            bmp.recycle()
+        mediaSem.acquire()
+        return try {
+            if (out.exists() && out.length() > 100) return out
+            val tmp = File(dir, "$key.tmp.jpg")
+            val mmr = MediaMetadataRetriever()
+            try {
+                mmr.setDataSource(file.absolutePath)
+                val durMs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val targetUs = ((durMs * 0.15).toLong().coerceIn(0L, max(0L, durMs - 100L))) * 1000L
+                val bmp = mmr.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    ?: mmr.frameAtTime
+                    ?: throw IllegalStateException("Cannot extract video frame")
+                val scaled = scaleBitmapToWidth(bmp, width)
+                FileOutputStream(tmp).use { scaled.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                if (scaled !== bmp) scaled.recycle()
+                bmp.recycle()
+                if (!tmp.renameTo(out)) tmp.copyTo(out, overwrite = true)
+            } finally {
+                runCatching { mmr.release() }
+                tmp.delete()
+            }
+            out
         } finally {
-            mmr.release()
+            mediaSem.release()
         }
-        return out
     }
 
     private fun getOrBuildStoryboard(file: File, cols: Int, rows: Int): File {
         val dir = File(context.cacheDir, "peer_storyboards").apply { mkdirs() }
-        val out = File(dir, "${cacheKeyForFile(file, "sb_${cols}x${rows}")}.jpg")
+        val key = cacheKeyForFile(file, "sb_${cols}x${rows}")
+        val out = File(dir, "$key.jpg")
         if (out.exists() && out.length() > 100) return out
 
-        val cellW = 320
-        val cellH = 180
-        val sheet = Bitmap.createBitmap(cols * cellW, rows * cellH, Bitmap.Config.RGB_565)
-        val canvas = Canvas(sheet).apply { drawColor(Color.BLACK) }
-        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+        mediaSem.acquire()
+        return try {
+            if (out.exists() && out.length() > 100) return out
+            val tmp = File(dir, "$key.tmp.jpg")
+            val cellW = 320
+            val cellH = 180
+            val sheet = Bitmap.createBitmap(cols * cellW, rows * cellH, Bitmap.Config.RGB_565)
+            val canvas = Canvas(sheet).apply { drawColor(Color.BLACK) }
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG)
 
-        val mmr = MediaMetadataRetriever()
-        try {
-            mmr.setDataSource(file.absolutePath)
-            val durMs = (mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 1000L).coerceAtLeast(1000L)
-            val total = cols * rows
-            for (idx in 0 until total) {
-                val frac = (idx + 0.5) / total.toDouble()
-                val us = (durMs * frac * 1000.0).toLong()
-                val frame = mmr.getFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: continue
-                val c = idx % cols
-                val r = idx / cols
-                val dst = Rect(c * cellW, r * cellH, (c + 1) * cellW, (r + 1) * cellH)
-                canvas.drawBitmap(frame, null, dst, paint)
-                frame.recycle()
+            val mmr = MediaMetadataRetriever()
+            try {
+                mmr.setDataSource(file.absolutePath)
+                val durMs = (mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 1000L).coerceAtLeast(1000L)
+                val total = cols * rows
+                for (idx in 0 until total) {
+                    val frac = (idx + 0.5) / total.toDouble()
+                    val us = (durMs * frac * 1000.0).toLong()
+                    val frame = mmr.getFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: continue
+                    val c = idx % cols
+                    val r = idx / cols
+                    val dst = Rect(c * cellW, r * cellH, (c + 1) * cellW, (r + 1) * cellH)
+                    canvas.drawBitmap(frame, null, dst, paint)
+                    frame.recycle()
+                }
+            } finally {
+                runCatching { mmr.release() }
             }
+            FileOutputStream(tmp).use { sheet.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+            sheet.recycle()
+            if (!tmp.renameTo(out)) tmp.copyTo(out, overwrite = true)
+            tmp.delete()
+            out
         } finally {
-            mmr.release()
+            mediaSem.release()
         }
-        FileOutputStream(out).use { sheet.compress(Bitmap.CompressFormat.JPEG, 80, it) }
-        sheet.recycle()
-        return out
     }
 
     private fun scaleBitmapToWidth(src: Bitmap, targetWidth: Int): Bitmap {

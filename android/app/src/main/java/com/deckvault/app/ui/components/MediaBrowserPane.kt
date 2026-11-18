@@ -577,7 +577,7 @@ fun MediaBrowserPane(
                                     InlineFolderStrip(folders = folders, onSelectFolder = onSelectFolder)
                                 }
                             }
-                            items(files, key = { it.path }) { file ->
+                            items(files, key = { it.path }, contentType = { it.mediaType }) { file ->
                                 GalleryMediaCard(
                                     host = host,
                                     api = api,
@@ -616,7 +616,7 @@ fun MediaBrowserPane(
                                 InlineFolderStrip(folders = folders, onSelectFolder = onSelectFolder)
                             }
                         }
-                        items(files, key = { it.path }) { file ->
+                        items(files, key = { it.path }, contentType = { it.mediaType }) { file ->
                             ListMediaRow(
                                 host = host,
                                 api = api,

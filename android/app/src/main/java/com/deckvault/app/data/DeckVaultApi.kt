@@ -42,6 +42,8 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType
@@ -64,8 +66,13 @@ class DeckVaultApi {
     }
 
     val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
+        .dispatcher(Dispatcher().apply {
+            maxRequests = 40
+            maxRequestsPerHost = 12
+        })
+        .connectionPool(ConnectionPool(12, 2, TimeUnit.MINUTES))
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
