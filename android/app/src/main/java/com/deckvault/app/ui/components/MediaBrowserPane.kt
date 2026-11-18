@@ -111,6 +111,7 @@ import com.deckvault.app.model.FolderItem
 import com.deckvault.app.model.MediaFilter
 import com.deckvault.app.model.SavedHost
 import com.deckvault.app.model.SortBy
+import com.deckvault.app.model.ThemeSurfaceStyle
 import com.deckvault.app.model.UserPreferences
 import com.deckvault.app.model.ViewMode
 import com.deckvault.app.ui.theme.LocalDeckSurfaces
@@ -1407,9 +1408,9 @@ private fun CustomizeViewSheetContent(
             }
         }
 
-        // Matte Theme Palette
+        // Material 3 Palette + Dark Surface Style
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Matte Theme", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+            Text("Material Theme", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -1424,10 +1425,30 @@ private fun CustomizeViewSheetContent(
             }
         }
 
-        // Toggles
-        ToggleRow("Pure #000000 Black Background", prefs.pureBlackBackground) { v ->
-            onUpdatePrefs { it.copy(pureBlackBackground = v) }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Surface Style", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+            ) {
+                ThemeSurfaceStyle.entries.forEach { style ->
+                    FilterChip(
+                        selected = prefs.surfaceStyle == style,
+                        onClick = {
+                            onUpdatePrefs {
+                                it.copy(
+                                    surfaceStyle = style,
+                                    pureBlackBackground = style != ThemeSurfaceStyle.TONAL_DARK,
+                                )
+                            }
+                        },
+                        label = { Text(style.label) },
+                    )
+                }
+            }
         }
+
+        // Toggles
         ToggleRow("Compact List Density", prefs.compactListMode) { v ->
             onUpdatePrefs { it.copy(compactListMode = v) }
         }

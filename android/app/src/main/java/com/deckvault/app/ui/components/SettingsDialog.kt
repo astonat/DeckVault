@@ -53,6 +53,7 @@ import com.deckvault.app.model.AccentPalette
 import com.deckvault.app.model.CardAspect
 import com.deckvault.app.model.FoldLayoutMode
 import com.deckvault.app.model.SavedHost
+import com.deckvault.app.model.ThemeSurfaceStyle
 import com.deckvault.app.model.UserPreferences
 import com.deckvault.app.model.ViewMode
 import com.deckvault.app.peer.PeerServiceStatus
@@ -122,10 +123,10 @@ fun SettingsDialog(
                         .padding(horizontal = 20.dp, vertical = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
-                    // 1. Appearance & Matte Themes
-                    SettingsSection(title = "Appearance & Theme") {
+                    // 1. Appearance & Full-Color Material 3 Themes
+                    SettingsSection(title = "Appearance & Material Theme") {
                         Text(
-                            text = "Matte Palette",
+                            text = "Color Palette",
                             style = MaterialTheme.typography.labelLarge,
                             color = surfaces.textSecondary,
                         )
@@ -142,11 +143,36 @@ fun SettingsDialog(
                             }
                         }
                         Spacer(Modifier.height(4.dp))
-                        SettingsToggleRow(
-                            title = "Pure #000000 OLED Black Background",
-                            subtitle = "Off uses a soft matte charcoal backdrop instead of true black",
-                            checked = prefs.pureBlackBackground,
-                            onCheckedChange = { v -> onUpdatePrefs { it.copy(pureBlackBackground = v) } },
+                        Text(
+                            text = "Dark Surface Style",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = surfaces.textSecondary,
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        ) {
+                            ThemeSurfaceStyle.entries.forEach { style ->
+                                FilterChip(
+                                    selected = prefs.surfaceStyle == style,
+                                    onClick = {
+                                        onUpdatePrefs {
+                                            it.copy(
+                                                surfaceStyle = style,
+                                                pureBlackBackground = style != ThemeSurfaceStyle.TONAL_DARK,
+                                            )
+                                        }
+                                    },
+                                    label = { Text(style.label, style = MaterialTheme.typography.labelMedium) },
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = matteChipColors(),
+                                )
+                            }
+                        }
+                        Text(
+                            text = prefs.surfaceStyle.subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = surfaces.textSecondary,
                         )
                     }
 
@@ -496,18 +522,30 @@ private fun PaletteSwatchCard(
 ) {
     val surfaces = LocalDeckSurfaces.current
     val swatchColor = when (palette) {
-        AccentPalette.PLAIN_BLACK -> Color(0xFFDCDCE2)
-        AccentPalette.MATTE_SLATE -> Color(0xFFAAB4CE)
-        AccentPalette.MATTE_SAGE -> Color(0xFF9FBEA8)
-        AccentPalette.MATTE_CLAY -> Color(0xFFD0A999)
-        AccentPalette.DYNAMIC_YOU -> Color(0xFFB5B9C4)
+        AccentPalette.DYNAMIC_YOU -> Color(0xFF8B9EFF)
+        AccentPalette.COBALT -> Color(0xFF60A5FA)
+        AccentPalette.EMERALD -> Color(0xFF34D399)
+        AccentPalette.AMETHYST -> Color(0xFFC084FC)
+        AccentPalette.CRIMSON -> Color(0xFFFB7185)
+        AccentPalette.AMBER -> Color(0xFFFBBF24)
+        AccentPalette.CYBER_TEAL -> Color(0xFF2DD4BF)
+        AccentPalette.MATTE_SLATE -> Color(0xFFB9C3DE)
+        AccentPalette.MATTE_SAGE -> Color(0xFFA8C2B2)
+        AccentPalette.MATTE_CLAY -> Color(0xFFD1B3A7)
+        AccentPalette.PLAIN_BLACK -> Color(0xFFE2E2E7)
     }
     val swatchBg = when (palette) {
+        AccentPalette.DYNAMIC_YOU -> Color(0xFF171B2E)
+        AccentPalette.COBALT -> Color(0xFF0F1D35)
+        AccentPalette.EMERALD -> Color(0xFF0C221A)
+        AccentPalette.AMETHYST -> Color(0xFF1B132E)
+        AccentPalette.CRIMSON -> Color(0xFF280F17)
+        AccentPalette.AMBER -> Color(0xFF241A0B)
+        AccentPalette.CYBER_TEAL -> Color(0xFF0D2024)
+        AccentPalette.MATTE_SLATE -> Color(0xFF141822)
+        AccentPalette.MATTE_SAGE -> Color(0xFF131B16)
+        AccentPalette.MATTE_CLAY -> Color(0xFF1B1513)
         AccentPalette.PLAIN_BLACK -> Color(0xFF000000)
-        AccentPalette.MATTE_SLATE -> Color(0xFF171922)
-        AccentPalette.MATTE_SAGE -> Color(0xFF161C18)
-        AccentPalette.MATTE_CLAY -> Color(0xFF1E1816)
-        AccentPalette.DYNAMIC_YOU -> Color(0xFF1B1C20)
     }
 
     Surface(

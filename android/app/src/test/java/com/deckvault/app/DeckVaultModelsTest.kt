@@ -1,5 +1,6 @@
 package com.deckvault.app
 
+import com.deckvault.app.model.AccentPalette
 import com.deckvault.app.model.CompressEstimateRequest
 import com.deckvault.app.model.CompressRequest
 import com.deckvault.app.model.CropBoxSpec
@@ -7,7 +8,9 @@ import com.deckvault.app.model.EditStudioRequest
 import com.deckvault.app.model.JobsSnapshotResponse
 import com.deckvault.app.model.OffloadStageResponse
 import com.deckvault.app.model.SavedHost
+import com.deckvault.app.model.ThemeSurfaceStyle
 import com.deckvault.app.model.UpscaleRequest
+import com.deckvault.app.model.UserPreferences
 import com.deckvault.app.ui.util.Formatters
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -86,5 +89,27 @@ class DeckVaultModelsTest {
         assertEquals("1.00 KB", Formatters.formatBytes(1024L))
         assertEquals("01:05", Formatters.formatDuration(65_000L))
         assertEquals("4K", Formatters.formatResolution(3840, 2160))
+    }
+
+    @Test
+    fun materialThemesAndPreferencesRoundTripBackwardsCompatibly() {
+        val legacyPrefsJson = """{"accentPalette":"MATTE_SLATE","pureBlackBackground":true,"gridColumns":4}"""
+        val decodedLegacy = json.decodeFromString(UserPreferences.serializer(), legacyPrefsJson)
+        assertEquals(AccentPalette.MATTE_SLATE, decodedLegacy.accentPalette)
+        assertEquals(ThemeSurfaceStyle.HYBRID_OLED, decodedLegacy.surfaceStyle)
+        assertEquals(4, decodedLegacy.gridColumns)
+
+        val richPrefs = UserPreferences(
+            accentPalette = AccentPalette.COBALT,
+            surfaceStyle = ThemeSurfaceStyle.OLED_NEON,
+            pureBlackBackground = true,
+        )
+        val roundTripped = json.decodeFromString(
+            UserPreferences.serializer(),
+            json.encodeToString(UserPreferences.serializer(), richPrefs),
+        )
+        assertEquals(richPrefs, roundTripped)
+        assertTrue(AccentPalette.entries.size >= 11)
+        assertEquals(3, ThemeSurfaceStyle.entries.size)
     }
 }

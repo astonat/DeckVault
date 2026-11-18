@@ -351,11 +351,23 @@ enum class CardAspect(val label: String, val ratio: Float) {
 }
 
 enum class AccentPalette(val label: String) {
-    PLAIN_BLACK("Plain Black"),
+    DYNAMIC_YOU("Material You"),
+    COBALT("Electric Cobalt"),
+    EMERALD("Emerald Forest"),
+    AMETHYST("Royal Amethyst"),
+    CRIMSON("Crimson Velvet"),
+    AMBER("Amber Sunburst"),
+    CYBER_TEAL("Cyber Teal"),
     MATTE_SLATE("Matte Slate"),
     MATTE_SAGE("Matte Sage"),
     MATTE_CLAY("Matte Clay"),
-    DYNAMIC_YOU("Dynamic You"),
+    PLAIN_BLACK("Plain Black"),
+}
+
+enum class ThemeSurfaceStyle(val label: String, val subtitle: String) {
+    TONAL_DARK("Tonal Dark", "Rich Material 3 color-tinted surfaces"),
+    HYBRID_OLED("OLED + Tonal", "Pure #000000 backdrop with tinted Material cards"),
+    OLED_NEON("OLED Neon", "Pure #000000 backdrop with vivid glowing accents"),
 }
 
 enum class FoldLayoutMode(val label: String) {
@@ -382,8 +394,9 @@ data class UserPreferences(
     val sortDescending: Boolean = true,
     val mediaFilter: MediaFilter = MediaFilter.ALL,
     val recycleByDefault: Boolean = true,
-    val accentPalette: AccentPalette = AccentPalette.MATTE_SLATE,
+    val accentPalette: AccentPalette = AccentPalette.DYNAMIC_YOU,
     val pureBlackBackground: Boolean = true,
+    val surfaceStyle: ThemeSurfaceStyle = ThemeSurfaceStyle.HYBRID_OLED,
     val foldLayoutMode: FoldLayoutMode = FoldLayoutMode.AUTO,
     val folderPaneWidthFraction: Float = 0.34f,
     val showDriveGaugesInPane: Boolean = true,

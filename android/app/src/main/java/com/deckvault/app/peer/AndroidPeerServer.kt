@@ -321,7 +321,7 @@ class AndroidPeerServer(private val context: Context) {
                 if (method == "GET" && route == "/api/ping") {
                     val ping = PingResponse(
                         service = "DeckVault",
-                        version = "1.4.1",
+                        version = com.deckvault.app.BuildConfig.VERSION_NAME,
                         hostId = hostId,
                         deviceName = deviceName,
                         os = "Android",

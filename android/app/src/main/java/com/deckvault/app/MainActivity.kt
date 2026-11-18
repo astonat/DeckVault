@@ -213,6 +213,7 @@ class MainActivity : ComponentActivity() {
             DeckVaultTheme(
                 accentPalette = prefs.accentPalette,
                 pureBlackBackground = prefs.pureBlackBackground,
+                surfaceStyle = prefs.surfaceStyle,
             ) {
                 DeckVaultRoot(
                     vm = vm,

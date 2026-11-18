@@ -31,13 +31,16 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -59,6 +62,8 @@ import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.Flip
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.FullscreenExit
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.Loop
@@ -76,6 +81,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -89,6 +95,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -106,6 +113,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -122,6 +130,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -295,7 +304,11 @@ fun VideoPlayerAndTrimmerOverlay(
 
     // Edit Studio state
     var studioExpanded by remember(file.path) { mutableStateOf(initialOpenStudio) }
+    var studioTab by remember(file.path) { mutableIntStateOf(0) }
+    var studioPeekCollapsed by remember(file.path) { mutableStateOf(false) }
     var studioCropActive by remember(file.path) { mutableStateOf(false) }
+    var naturalVideoWidth by remember(file.path) { mutableIntStateOf(file.meta?.width ?: 0) }
+    var naturalVideoHeight by remember(file.path) { mutableIntStateOf(file.meta?.height ?: 0) }
     var studioStartMs by remember(file.path) { mutableLongStateOf(0L) }
     var studioEndMs by remember(file.path) { mutableLongStateOf(file.meta?.durationMs ?: 0L) }
     var studioCrop by remember(file.path) { mutableStateOf(CropBoxSpec()) }
@@ -515,6 +528,14 @@ fun VideoPlayerAndTrimmerOverlay(
                 }
             }
 
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    val effW = (videoSize.width * videoSize.pixelWidthHeightRatio).roundToInt().coerceAtLeast(1)
+                    naturalVideoWidth = effW
+                    naturalVideoHeight = videoSize.height
+                }
+            }
+
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
                 if (playing) interactionNonce++
@@ -566,6 +587,20 @@ fun VideoPlayerAndTrimmerOverlay(
         val vlcPlayer = sess.second
 
         fun refreshVlcTracks() {
+            runCatching {
+                val vt = vlcPlayer.currentVideoTrack
+                if (vt != null && vt.width > 0 && vt.height > 0) {
+                    val rotated = vt.orientation == IMedia.VideoTrack.Orientation.LeftTop ||
+                        vt.orientation == IMedia.VideoTrack.Orientation.LeftBottom ||
+                        vt.orientation == IMedia.VideoTrack.Orientation.RightTop ||
+                        vt.orientation == IMedia.VideoTrack.Orientation.RightBottom
+                    val rawW = if (rotated) vt.height else vt.width
+                    val rawH = if (rotated) vt.width else vt.height
+                    val sar = if (vt.sarNum > 0 && vt.sarDen > 0) vt.sarNum.toFloat() / vt.sarDen.toFloat() else 1f
+                    naturalVideoWidth = (rawW * sar).roundToInt().coerceAtLeast(1)
+                    naturalVideoHeight = rawH.coerceAtLeast(1)
+                }
+            }
             val curAudio = runCatching { vlcPlayer.audioTrack }.getOrDefault(-1)
             vlcAudioTracks = runCatching {
                 vlcPlayer.audioTracks?.filter { it.id >= 0 }?.mapIndexed { idx, td ->
@@ -636,7 +671,7 @@ fun VideoPlayerAndTrimmerOverlay(
                             currentPosMs = evTime
                         }
                     }
-                    VlcMediaPlayer.Event.ESAdded, VlcMediaPlayer.Event.ESDeleted, VlcMediaPlayer.Event.ESSelected -> {
+                    VlcMediaPlayer.Event.ESAdded, VlcMediaPlayer.Event.ESDeleted, VlcMediaPlayer.Event.ESSelected, VlcMediaPlayer.Event.Vout -> {
                         refreshVlcTracks()
                     }
                     VlcMediaPlayer.Event.EndReached -> {
@@ -843,9 +878,12 @@ fun VideoPlayerAndTrimmerOverlay(
     }
 
     BackHandler {
-        if (studioExpanded) {
+        if (studioExpanded && studioPeekCollapsed) {
+            studioPeekCollapsed = false
+        } else if (studioExpanded) {
             studioExpanded = false
             studioCropActive = false
+            studioPeekCollapsed = false
         } else {
             onClose()
         }
@@ -883,16 +921,54 @@ fun VideoPlayerAndTrimmerOverlay(
     val prevItem = if (currentIdx > 0) playlist[currentIdx - 1] else null
     val nextItem = if (currentIdx >= 0 && currentIdx + 1 < playlist.size) playlist[currentIdx + 1] else null
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black),
-    ) {
-        // FULL-BLEED VIDEO CANVAS WITH GESTURES
-        Box(
+    val movableVideoSurface = remember(file.path, activeEngine, exoPlayer, vlcSession) {
+        movableContentOf {
+            val effectiveAspect = if (studioExpanded && studioCropActive) PlayerAspectMode.FIT else aspectMode
+            if (activeEngine == VideoEngineMode.VLC && vlcSession != null) {
+                val vp = vlcSession.second
+                AndroidView(
+                    factory = { ctx ->
+                        VLCVideoLayout(ctx).apply {
+                            keepScreenOn = true
+                        }
+                    },
+                    update = { layout ->
+                        if (attachedVlcLayout !== layout) {
+                            attachedVlcLayout = layout
+                            runCatching { vp.detachViews() }
+                            vp.attachViews(layout, null, true, true)
+                        }
+                        vp.videoScale = effectiveAspect.vlcScale
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else if (exoPlayer != null) {
+                AndroidView(
+                    factory = { ctx ->
+                        (android.view.LayoutInflater.from(ctx)
+                            .inflate(R.layout.deckvault_texture_player_view, null) as PlayerView).apply {
+                            this.player = exoPlayer
+                            useController = false
+                            resizeMode = effectiveAspect.resizeMode
+                            keepScreenOn = true
+                        }
+                    },
+                    update = { pv ->
+                        if (pv.player !== exoPlayer) pv.player = exoPlayer
+                        pv.resizeMode = effectiveAspect.resizeMode
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    }
+
+    val renderVideoStage: @Composable (Modifier) -> Unit = { stageMod ->
+        // VIDEO CANVAS WITH GESTURES & FITTED CROP OVERLAY
+        BoxWithConstraints(
             contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .fillMaxSize()
+            modifier = stageMod
+                .background(Color.Black)
                 .clipToBounds()
                 .onSizeChanged {
                     boxWidthPx = it.width.toFloat().coerceAtLeast(1f)
@@ -1086,9 +1162,33 @@ fun VideoPlayerAndTrimmerOverlay(
                     }
                 },
         ) {
+            val stageW = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+            val stageH = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+            val naturalRatio = if (naturalVideoWidth > 0 && naturalVideoHeight > 0) {
+                (naturalVideoWidth.toFloat() / naturalVideoHeight.toFloat()).coerceIn(0.2f, 5f)
+            } else {
+                null
+            }
+            val effectiveAspect = if (studioExpanded && studioCropActive) PlayerAspectMode.FIT else aspectMode
+            val targetRatio = when {
+                studioExpanded && studioCropActive -> naturalRatio
+                effectiveAspect.fixedRatio != null -> effectiveAspect.fixedRatio
+                effectiveAspect == PlayerAspectMode.FIT -> naturalRatio
+                else -> null
+            }
+            val (fitWPx, fitHPx) = if (targetRatio != null) {
+                if (stageW / stageH > targetRatio) (stageH * targetRatio) to stageH
+                else stageW to (stageW / targetRatio)
+            } else {
+                stageW to stageH
+            }
+            val density = LocalDensity.current
+            val fitWDp = with(density) { fitWPx.toDp() }
+            val fitHDp = with(density) { fitHPx.toDp() }
+
             val videoBoxMod = Modifier
                 .let { base ->
-                    val ratio = aspectMode.fixedRatio
+                    val ratio = effectiveAspect.fixedRatio
                     if (ratio != null) base.aspectRatio(ratio) else base.fillMaxSize()
                 }
                 .graphicsLayer {
@@ -1103,49 +1203,22 @@ fun VideoPlayerAndTrimmerOverlay(
                 }
 
             Box(modifier = videoBoxMod) {
-                if (activeEngine == VideoEngineMode.VLC && vlcSession != null) {
-                    val vp = vlcSession.second
-                    AndroidView(
-                        factory = { ctx ->
-                            VLCVideoLayout(ctx).apply {
-                                keepScreenOn = true
-                            }
-                        },
-                        update = { layout ->
-                            if (attachedVlcLayout !== layout) {
-                                attachedVlcLayout = layout
-                                runCatching { vp.detachViews() }
-                                vp.attachViews(layout, null, true, true)
-                            }
-                            vp.videoScale = aspectMode.vlcScale
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                } else if (exoPlayer != null) {
-                    AndroidView(
-                        factory = { ctx ->
-                            (android.view.LayoutInflater.from(ctx)
-                                .inflate(R.layout.deckvault_texture_player_view, null) as PlayerView).apply {
-                                this.player = exoPlayer
-                                useController = false
-                                resizeMode = aspectMode.resizeMode
-                                keepScreenOn = true
-                            }
-                        },
-                        update = { pv ->
-                            if (pv.player !== exoPlayer) pv.player = exoPlayer
-                            pv.resizeMode = aspectMode.resizeMode
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
+                movableVideoSurface()
 
                 if (studioExpanded && studioCropActive) {
-                    VisualCropOverlay(
-                        crop = studioCrop,
-                        onCropChange = { studioCrop = it },
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(width = fitWDp, height = fitHDp),
+                    ) {
+                        VisualCropOverlay(
+                            crop = studioCrop,
+                            sourceWidth = naturalVideoWidth,
+                            sourceHeight = naturalVideoHeight,
+                            onCropChange = { studioCrop = it },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 }
             }
 
@@ -1251,63 +1324,67 @@ fun VideoPlayerAndTrimmerOverlay(
                 }
             }
         }
+    }
 
-        // AUTO-HIDING FLOATING TOP BAR
-        AnimatedVisibility(
-            visible = showControls && !isLocked,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.align(Alignment.TopCenter),
-        ) {
-            Box(
+    val renderTopBar: @Composable (Boolean) -> Unit = { docked ->
+        val headerBg = if (docked) {
+            Modifier.background(surfaces.panelSurface)
+        } else {
+            Modifier.background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.82f), Color.Transparent)))
+        }
+        val fgPrimary = if (docked) surfaces.textPrimary else Color.White
+        val fgSecondary = if (docked) surfaces.textSecondary else Color.White.copy(alpha = 0.72f)
+        Column(modifier = Modifier.fillMaxWidth().then(headerBg)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.82f), Color.Transparent)))
                     .statusBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                    .padding(horizontal = 8.dp, vertical = if (docked) 6.dp else 10.dp),
             ) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Close", tint = fgPrimary)
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = file.name,
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = fgPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    val infoLine = buildString {
+                        append(Formatters.formatBytes(file.sizeBytes))
+                        val w = naturalVideoWidth.takeIf { it > 0 } ?: file.meta?.width ?: 0
+                        val h = naturalVideoHeight.takeIf { it > 0 } ?: file.meta?.height ?: 0
+                        val res = Formatters.formatResolution(w, h)
+                        if (res.isNotBlank()) append(" • $res")
+                        if (usedCompatibilityFallback) {
+                            append(" • Live Transcode")
+                        } else if (activeEngine == VideoEngineMode.VLC) {
+                            append(" • VLC Native")
+                        }
+                        if (loopStartMs != null && loopEndMs != null) {
+                            append(" • Loop ${Formatters.formatDuration(loopStartMs!!)}–${Formatters.formatDuration(loopEndMs!!)}")
+                        }
+                    }
+                    Text(infoLine, style = MaterialTheme.typography.labelSmall, color = fgSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
                 ) {
-                    IconButton(onClick = onClose) {
-                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Close", tint = Color.White)
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = file.name,
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        val infoLine = buildString {
-                            append(Formatters.formatBytes(file.sizeBytes))
-                            file.meta?.let { m ->
-                                val res = Formatters.formatResolution(m.width, m.height)
-                                if (res.isNotBlank()) append(" • $res")
-                            }
-                            if (usedCompatibilityFallback) {
-                                append(" • Live Transcode")
-                            } else if (activeEngine == VideoEngineMode.VLC) {
-                                append(" • VLC Native")
-                            }
-                            if (loopStartMs != null && loopEndMs != null) {
-                                append(" • Loop ${Formatters.formatDuration(loopStartMs!!)}–${Formatters.formatDuration(loopEndMs!!)}")
-                            }
-                        }
-                        Text(infoLine, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.72f), maxLines = 1)
-                    }
-
                     if (prevItem != null) {
                         IconButton(onClick = { interactionNonce++; onSelectVideo(prevItem) }) {
-                            Icon(Icons.Rounded.SkipPrevious, contentDescription = "Previous Video", tint = Color.White)
+                            Icon(Icons.Rounded.SkipPrevious, contentDescription = "Previous Video", tint = fgPrimary)
                         }
                     }
                     if (nextItem != null) {
                         IconButton(onClick = { interactionNonce++; onSelectVideo(nextItem) }) {
-                            Icon(Icons.Rounded.SkipNext, contentDescription = "Next Video", tint = Color.White)
+                            Icon(Icons.Rounded.SkipNext, contentDescription = "Next Video", tint = fgPrimary)
                         }
                     }
 
@@ -1320,13 +1397,14 @@ fun VideoPlayerAndTrimmerOverlay(
                         onClick = {
                             interactionNonce++
                             studioExpanded = !studioExpanded
+                            studioPeekCollapsed = false
                             if (studioExpanded) enginePause() else studioCropActive = false
                         },
                         leadingIcon = { Icon(Icons.Rounded.ContentCut, null, Modifier.size(16.dp)) },
                         label = { Text(if (studioExpanded) "Hide Studio" else "Studio") },
                     )
 
-                    if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    if (!docked && activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         IconButton(
                             onClick = {
                                 val params = PictureInPictureParams.Builder()
@@ -1335,113 +1413,199 @@ fun VideoPlayerAndTrimmerOverlay(
                                 activity.enterPictureInPictureMode(params)
                             },
                         ) {
-                            Icon(Icons.Rounded.PictureInPictureAlt, contentDescription = "Picture in Picture", tint = Color.White)
+                            Icon(Icons.Rounded.PictureInPictureAlt, contentDescription = "Picture in Picture", tint = fgPrimary)
                         }
                     }
 
-                    IconButton(
-                        onClick = {
-                            interactionNonce++
-                            val vals = ScreenRotationMode.entries
-                            rotationMode = vals[(rotationMode.ordinal + 1) % vals.size]
-                            gestureHudTitle = "Rotation: ${rotationMode.label}"
-                            gestureHudSub = null
-                            gestureHudFraction = -1f
-                            hudNonce++
-                        },
-                    ) {
-                        Icon(Icons.Rounded.ScreenRotation, contentDescription = "Rotate Screen", tint = Color.White)
+                    if (!docked) {
+                        IconButton(
+                            onClick = {
+                                interactionNonce++
+                                val vals = ScreenRotationMode.entries
+                                rotationMode = vals[(rotationMode.ordinal + 1) % vals.size]
+                                gestureHudTitle = "Rotation: ${rotationMode.label}"
+                                gestureHudSub = null
+                                gestureHudFraction = -1f
+                                hudNonce++
+                            },
+                        ) {
+                            Icon(Icons.Rounded.ScreenRotation, contentDescription = "Rotate Screen", tint = fgPrimary)
+                        }
                     }
                 }
             }
+            if (docked) {
+                HorizontalDivider(color = surfaces.hairlineBorder)
+            }
         }
+    }
 
-        // AUTO-HIDING FLOATING BOTTOM SEEKBAR & STUDIO DRAWER (COMPLETELY DISAPPEARS WHEN UNTOUCHED!)
-        AnimatedVisibility(
-            visible = (showControls || studioExpanded) && !isLocked,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.align(Alignment.BottomCenter),
+    val renderStudioPanel: @Composable (Boolean) -> Unit = { sideRail ->
+        StudioEditorPanel(
+            filePath = file.path,
+            frameUrls = framePreviewUrls,
+            durationMs = durationMs,
+            currentPosMs = currentPosMs,
+            startMs = studioStartMs,
+            endMs = studioEndMs.coerceAtLeast(1L),
+            crop = studioCrop,
+            cropActive = studioCropActive,
+            rotate = studioRotate,
+            flipH = studioFlipH,
+            flipV = studioFlipV,
+            speed = studioSpeed,
+            muteAudio = studioMute,
+            brightness = studioBrightness,
+            contrast = studioContrast,
+            saturation = studioSaturation,
+            sharpen = studioSharpen,
+            deband = studioDeband,
+            stabilize = studioStabilize,
+            normalizeAudio = studioNormalize,
+            saveMode = studioSaveMode,
+            isLocalSource = isLocalSource,
+            pairedPcHosts = pairedPcHosts,
+            selectedOffloadHost = studioOffloadHost,
+            executionTarget = studioTarget,
+            activeTab = studioTab,
+            onActiveTabChange = { studioTab = it },
+            sideRailMode = sideRail,
+            onCollapsePeek = { studioPeekCollapsed = true },
+            onSetStartEnd = { s, e ->
+                studioStartMs = s
+                studioEndMs = e
+                smartSeekTo(s)
+            },
+            onToggleCropActive = { studioCropActive = it },
+            onCropChange = { studioCrop = it },
+            onRotateChange = { studioRotate = it },
+            onFlipHChange = { studioFlipH = it },
+            onFlipVChange = { studioFlipV = it },
+            onSpeedChange = { studioSpeed = it },
+            onMuteChange = { studioMute = it },
+            onColorChange = { b, c, s ->
+                studioBrightness = b
+                studioContrast = c
+                studioSaturation = s
+            },
+            onProFlagsChange = { sh, db, st, nm ->
+                studioSharpen = sh
+                studioDeband = db
+                studioStabilize = st
+                studioNormalize = nm
+                if (isLocalSource && (sh > 0.2f || db || st || nm) && studioOffloadHost != null) {
+                    studioTarget = JobExecutionTarget.PC_OFFLOAD
+                }
+            },
+            onSaveModeChange = { studioSaveMode = it },
+            onExecutionTargetChange = { tgt, host ->
+                studioTarget = tgt
+                if (host != null) studioOffloadHost = host
+            },
+            onExtractAudio = { req, tgt, host -> onSubmitExtractAudio(req, tgt, host) },
+            onExportGif = { req, host -> onSubmitExportGif(req, host) },
+            onSubmitEdit = { req, tgt, host, runNow ->
+                onSubmitStudioEdit(req, tgt, host, runNow)
+                if (runNow) {
+                    studioExpanded = false
+                    studioCropActive = false
+                    studioPeekCollapsed = false
+                }
+            },
+        )
+    }
+
+    val renderSlimStudioTransport: @Composable (Boolean) -> Unit = { showExpandBtn ->
+        val safeDur = durationMs.coerceAtLeast(1000L).toFloat()
+        val displayPos = if (isSliderDragging) sliderDragMs else currentPosMs
+        val tabName = when (studioTab) {
+            1 -> "Crop"
+            2 -> "Color"
+            3 -> "Audio/GIF"
+            else -> "Trim"
+        }
+        Surface(
+            color = surfaces.panelSurface,
+            border = BorderStroke(1.dp, surfaces.hairlineBorder),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                IconButton(
+                    onClick = {
+                        enginePause()
+                        smartSeekTo((engineCurrentLogicalPosMs() - 33L).coerceAtLeast(0L))
+                    },
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Text("-1f", color = surfaces.textSecondary, style = MaterialTheme.typography.labelSmall)
+                }
+                FilledIconButton(
+                    onClick = {
+                        if (engineIsPlaying()) enginePause() else enginePlay()
+                    },
+                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    modifier = Modifier.size(34.dp),
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = if (isPlaying) "Pause" else "Play",
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                IconButton(
+                    onClick = {
+                        enginePause()
+                        smartSeekTo(engineCurrentLogicalPosMs() + 33L)
+                    },
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Text("+1f", color = surfaces.textSecondary, style = MaterialTheme.typography.labelSmall)
+                }
+                Slider(
+                    value = displayPos.toFloat().coerceIn(0f, safeDur),
+                    onValueChange = { nextVal ->
+                        isSliderDragging = true
+                        sliderDragMs = nextVal.roundToInt().toLong()
+                    },
+                    onValueChangeFinished = {
+                        smartSeekTo(sliderDragMs)
+                        isSliderDragging = false
+                    },
+                    valueRange = 0f..safeDur,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "${Formatters.formatDuration(displayPos)}/${Formatters.formatDuration(durationMs)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = surfaces.textSecondary,
+                )
+                if (showExpandBtn) {
+                    AssistChip(
+                        onClick = { studioPeekCollapsed = false },
+                        leadingIcon = { Icon(Icons.Rounded.KeyboardArrowUp, null, Modifier.size(16.dp)) },
+                        label = { Text("Expand $tabName") },
+                    )
+                }
+            }
+        }
+    }
+
+    val renderCinemaBottomBar: @Composable () -> Unit = {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f), Color.Black.copy(alpha = 0.96f))))
+                .navigationBarsPadding(),
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f), Color.Black.copy(alpha = 0.96f))))
-                    .navigationBarsPadding(),
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
             ) {
-                if (studioExpanded) {
-                    StudioEditorPanel(
-                        filePath = file.path,
-                        frameUrls = framePreviewUrls,
-                        durationMs = durationMs,
-                        currentPosMs = currentPosMs,
-                        startMs = studioStartMs,
-                        endMs = studioEndMs.coerceAtLeast(1L),
-                        crop = studioCrop,
-                        cropActive = studioCropActive,
-                        rotate = studioRotate,
-                        flipH = studioFlipH,
-                        flipV = studioFlipV,
-                        speed = studioSpeed,
-                        muteAudio = studioMute,
-                        brightness = studioBrightness,
-                        contrast = studioContrast,
-                        saturation = studioSaturation,
-                        sharpen = studioSharpen,
-                        deband = studioDeband,
-                        stabilize = studioStabilize,
-                        normalizeAudio = studioNormalize,
-                        saveMode = studioSaveMode,
-                        isLocalSource = isLocalSource,
-                        pairedPcHosts = pairedPcHosts,
-                        selectedOffloadHost = studioOffloadHost,
-                        executionTarget = studioTarget,
-                        onSetStartEnd = { s, e ->
-                            studioStartMs = s
-                            studioEndMs = e
-                            smartSeekTo(s)
-                        },
-                        onToggleCropActive = { studioCropActive = it },
-                        onCropChange = { studioCrop = it },
-                        onRotateChange = { studioRotate = it },
-                        onFlipHChange = { studioFlipH = it },
-                        onFlipVChange = { studioFlipV = it },
-                        onSpeedChange = { studioSpeed = it },
-                        onMuteChange = { studioMute = it },
-                        onColorChange = { b, c, s ->
-                            studioBrightness = b
-                            studioContrast = c
-                            studioSaturation = s
-                        },
-                        onProFlagsChange = { sh, db, st, nm ->
-                            studioSharpen = sh
-                            studioDeband = db
-                            studioStabilize = st
-                            studioNormalize = nm
-                            if (isLocalSource && (sh > 0.2f || db || st || nm) && studioOffloadHost != null) {
-                                studioTarget = JobExecutionTarget.PC_OFFLOAD
-                            }
-                        },
-                        onSaveModeChange = { studioSaveMode = it },
-                        onExecutionTargetChange = { tgt, host ->
-                            studioTarget = tgt
-                            if (host != null) studioOffloadHost = host
-                        },
-                        onExtractAudio = { req, tgt, host -> onSubmitExtractAudio(req, tgt, host) },
-                        onExportGif = { req, host -> onSubmitExportGif(req, host) },
-                        onSubmitEdit = { req, tgt, host, runNow ->
-                            onSubmitStudioEdit(req, tgt, host, runNow)
-                            if (runNow) studioExpanded = false
-                        },
-                    )
-                }
-
-                // Floating Seekbar + Transport Bar
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                ) {
                     val safeDur = durationMs.coerceAtLeast(1000L).toFloat()
                     val displayPos = if (isSliderDragging) sliderDragMs else currentPosMs
 
@@ -1647,6 +1811,80 @@ fun VideoPlayerAndTrimmerOverlay(
                                 )
                             }
                         }
+                    }
+                }
+            }
+        }
+
+    // Root Adaptive Player Container:
+    // - Full-bleed floating controls during Cinema playback
+    // - Hybrid Studio Stage (Split Stage on Z Fold Unfolded / Phone Portrait, Side Rail on Tablet Landscape, 1-Tap Peek)
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(if (studioExpanded) surfaces.background else Color.Black),
+    ) {
+        val rootMaxHeight = maxHeight
+        val useSideRail = studioExpanded && !studioPeekCollapsed && maxWidth >= 840.dp && maxWidth > rootMaxHeight * 1.15f
+        when {
+            !studioExpanded -> {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    renderVideoStage(Modifier.fillMaxSize())
+                    AnimatedVisibility(
+                        visible = showControls && !isLocked,
+                        enter = fadeIn(),
+                        exit = fadeOut(),
+                        modifier = Modifier.align(Alignment.TopCenter),
+                    ) {
+                        renderTopBar(false)
+                    }
+                    AnimatedVisibility(
+                        visible = showControls && !isLocked,
+                        enter = fadeIn(),
+                        exit = fadeOut(),
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    ) {
+                        renderCinemaBottomBar()
+                    }
+                }
+            }
+            studioPeekCollapsed -> {
+                Column(modifier = Modifier.fillMaxSize().navigationBarsPadding()) {
+                    renderTopBar(true)
+                    renderVideoStage(Modifier.weight(1f).fillMaxWidth())
+                    renderSlimStudioTransport(true)
+                }
+            }
+            useSideRail -> {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    renderTopBar(true)
+                    Row(modifier = Modifier.weight(1f).fillMaxWidth().navigationBarsPadding()) {
+                        Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                            renderVideoStage(Modifier.weight(1f).fillMaxWidth())
+                            renderSlimStudioTransport(false)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .width(356.dp)
+                                .fillMaxHeight()
+                                .padding(top = 6.dp, end = 8.dp, bottom = 8.dp),
+                        ) {
+                            renderStudioPanel(true)
+                        }
+                    }
+                }
+            }
+            else -> {
+                Column(modifier = Modifier.fillMaxSize().navigationBarsPadding()) {
+                    renderTopBar(true)
+                    renderVideoStage(Modifier.weight(1f).fillMaxWidth())
+                    renderSlimStudioTransport(false)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = (rootMaxHeight * 0.43f).coerceAtLeast(220.dp)),
+                    ) {
+                        renderStudioPanel(false)
                     }
                 }
             }

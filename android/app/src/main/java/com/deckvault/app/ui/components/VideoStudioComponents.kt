@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.rounded.Crop
 import androidx.compose.material.icons.rounded.Flip
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.GifBox
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Queue
@@ -45,6 +47,7 @@ import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -60,6 +63,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -96,42 +100,127 @@ data class PlayerTrackOption(
     val selected: Boolean,
 )
 
+private enum class CropDragTarget {
+    MOVE,
+    TOP_LEFT,
+    TOP_RIGHT,
+    BOTTOM_LEFT,
+    BOTTOM_RIGHT,
+    LEFT,
+    RIGHT,
+    TOP,
+    BOTTOM,
+}
+
 @Composable
 fun VisualCropOverlay(
     crop: CropBoxSpec,
+    sourceWidth: Int = 0,
+    sourceHeight: Int = 0,
     onCropChange: (CropBoxSpec) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val accent = MaterialTheme.colorScheme.primary
+    val currentCrop by rememberUpdatedState(crop)
+    val latestOnCropChange by rememberUpdatedState(onCropChange)
+
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val wPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
         val hPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
         val density = LocalDensity.current
+        val minFrac = 0.12f
 
         Canvas(modifier = Modifier.fillMaxSize()) {
             val left = crop.x * size.width
             val top = crop.y * size.height
             val cw = crop.w * size.width
             val ch = crop.h * size.height
+            val right = left + cw
+            val bottom = top + ch
 
-            // Scrim outside crop rectangle
+            // Dim outside crop rectangle
             drawRect(Color.Black.copy(alpha = 0.56f), Offset.Zero, Size(size.width, top))
-            drawRect(Color.Black.copy(alpha = 0.56f), Offset(0f, top + ch), Size(size.width, (size.height - top - ch).coerceAtLeast(0f)))
+            drawRect(Color.Black.copy(alpha = 0.56f), Offset(0f, bottom), Size(size.width, (size.height - bottom).coerceAtLeast(0f)))
             drawRect(Color.Black.copy(alpha = 0.56f), Offset(0f, top), Size(left, ch))
-            drawRect(Color.Black.copy(alpha = 0.56f), Offset(left + cw, top), Size((size.width - left - cw).coerceAtLeast(0f), ch))
+            drawRect(Color.Black.copy(alpha = 0.56f), Offset(right, top), Size((size.width - right).coerceAtLeast(0f), ch))
 
-            // Crop outline + rule of thirds grid
+            // Primary border + rule of thirds grid
             drawRect(
-                color = Color(0xFF7DD3FC),
+                color = accent,
                 topLeft = Offset(left, top),
                 size = Size(cw, ch),
-                style = Stroke(width = 3f),
+                style = Stroke(width = 2.5.dp.toPx()),
             )
             for (i in 1..2) {
                 val gx = left + cw * (i / 3f)
                 val gy = top + ch * (i / 3f)
-                drawLine(Color.White.copy(alpha = 0.35f), Offset(gx, top), Offset(gx, top + ch), strokeWidth = 1f)
-                drawLine(Color.White.copy(alpha = 0.35f), Offset(left, gy), Offset(left + cw, gy), strokeWidth = 1f)
+                drawLine(Color.White.copy(alpha = 0.34f), Offset(gx, top), Offset(gx, bottom), strokeWidth = 1.dp.toPx())
+                drawLine(Color.White.copy(alpha = 0.34f), Offset(left, gy), Offset(right, gy), strokeWidth = 1.dp.toPx())
             }
+
+            // Crisp white L-shaped corner brackets
+            val arm = minOf(18.dp.toPx(), cw * 0.28f, ch * 0.28f)
+            val cornerStroke = 3.5.dp.toPx()
+            drawLine(Color.White, Offset(left, top), Offset(left + arm, top), strokeWidth = cornerStroke)
+            drawLine(Color.White, Offset(left, top), Offset(left, top + arm), strokeWidth = cornerStroke)
+            drawLine(Color.White, Offset(right, top), Offset(right - arm, top), strokeWidth = cornerStroke)
+            drawLine(Color.White, Offset(right, top), Offset(right, top + arm), strokeWidth = cornerStroke)
+            drawLine(Color.White, Offset(left, bottom), Offset(left + arm, bottom), strokeWidth = cornerStroke)
+            drawLine(Color.White, Offset(left, bottom), Offset(left, bottom - arm), strokeWidth = cornerStroke)
+            drawLine(Color.White, Offset(right, bottom), Offset(right - arm, bottom), strokeWidth = cornerStroke)
+            drawLine(Color.White, Offset(right, bottom), Offset(right, bottom - arm), strokeWidth = cornerStroke)
+
+            // Edge midpoint pill bars
+            val barHalf = minOf(12.dp.toPx(), cw * 0.16f)
+            val vBarHalf = minOf(12.dp.toPx(), ch * 0.16f)
+            drawLine(Color.White, Offset(left + cw * 0.5f - barHalf, top), Offset(left + cw * 0.5f + barHalf, top), strokeWidth = cornerStroke)
+            drawLine(Color.White, Offset(left + cw * 0.5f - barHalf, bottom), Offset(left + cw * 0.5f + barHalf, bottom), strokeWidth = cornerStroke)
+            drawLine(Color.White, Offset(left, top + ch * 0.5f - vBarHalf), Offset(left, top + ch * 0.5f + vBarHalf), strokeWidth = cornerStroke)
+            drawLine(Color.White, Offset(right, top + ch * 0.5f - vBarHalf), Offset(right, top + ch * 0.5f + vBarHalf), strokeWidth = cornerStroke)
+        }
+
+        fun applyDelta(target: CropDragTarget, dxPx: Float, dyPx: Float) {
+            val c = currentCrop
+            val dx = dxPx / wPx
+            val dy = dyPx / hPx
+            val next = when (target) {
+                CropDragTarget.MOVE -> c.copy(
+                    x = (c.x + dx).coerceIn(0f, 1f - c.w),
+                    y = (c.y + dy).coerceIn(0f, 1f - c.h),
+                )
+                CropDragTarget.LEFT -> {
+                    val nx = (c.x + dx).coerceIn(0f, c.x + c.w - minFrac)
+                    c.copy(x = nx, w = c.w + (c.x - nx))
+                }
+                CropDragTarget.RIGHT -> c.copy(
+                    w = (c.w + dx).coerceIn(minFrac, 1f - c.x),
+                )
+                CropDragTarget.TOP -> {
+                    val ny = (c.y + dy).coerceIn(0f, c.y + c.h - minFrac)
+                    c.copy(y = ny, h = c.h + (c.y - ny))
+                }
+                CropDragTarget.BOTTOM -> c.copy(
+                    h = (c.h + dy).coerceIn(minFrac, 1f - c.y),
+                )
+                CropDragTarget.TOP_LEFT -> {
+                    val nx = (c.x + dx).coerceIn(0f, c.x + c.w - minFrac)
+                    val ny = (c.y + dy).coerceIn(0f, c.y + c.h - minFrac)
+                    c.copy(x = nx, y = ny, w = c.w + (c.x - nx), h = c.h + (c.y - ny))
+                }
+                CropDragTarget.TOP_RIGHT -> {
+                    val ny = (c.y + dy).coerceIn(0f, c.y + c.h - minFrac)
+                    c.copy(y = ny, w = (c.w + dx).coerceIn(minFrac, 1f - c.x), h = c.h + (c.y - ny))
+                }
+                CropDragTarget.BOTTOM_LEFT -> {
+                    val nx = (c.x + dx).coerceIn(0f, c.x + c.w - minFrac)
+                    c.copy(x = nx, w = c.w + (c.x - nx), h = (c.h + dy).coerceIn(minFrac, 1f - c.y))
+                }
+                CropDragTarget.BOTTOM_RIGHT -> c.copy(
+                    w = (c.w + dx).coerceIn(minFrac, 1f - c.x),
+                    h = (c.h + dy).coerceIn(minFrac, 1f - c.y),
+                )
+            }
+            latestOnCropChange(next)
         }
 
         // Center body pan gesture
@@ -144,35 +233,70 @@ fun VisualCropOverlay(
             modifier = Modifier
                 .offset(x = leftDp, y = topDp)
                 .size(width = widthDp, height = heightDp)
-                .pointerInput(crop, wPx, hPx) {
+                .pointerInput(wPx, hPx) {
                     detectDragGestures { change, drag ->
                         change.consume()
-                        val nx = (crop.x + drag.x / wPx).coerceIn(0f, 1f - crop.w)
-                        val ny = (crop.y + drag.y / hPx).coerceIn(0f, 1f - crop.h)
-                        onCropChange(crop.copy(x = nx, y = ny))
+                        applyDelta(CropDragTarget.MOVE, drag.x, drag.y)
                     }
                 },
-        )
+        ) {
+            val dimLabel = if (sourceWidth > 0 && sourceHeight > 0) {
+                "${(crop.w * sourceWidth).roundToInt()} × ${(crop.h * sourceHeight).roundToInt()}"
+            } else {
+                "${(crop.w * 100).roundToInt()}% × ${(crop.h * 100).roundToInt()}%"
+            }
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = Color.Black.copy(alpha = 0.72f),
+                modifier = Modifier.padding(6.dp),
+            ) {
+                Text(
+                    text = dimLabel,
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = Color.White,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+        }
 
-        // Bottom-right corner resize handle
-        val handleX = with(density) { ((crop.x + crop.w) * wPx).toInt() }
-        val handleY = with(density) { ((crop.y + crop.h) * hPx).toInt() }
-        Box(
-            modifier = Modifier
-                .offset { IntOffset(handleX - 24, handleY - 24) }
-                .size(40.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(MaterialTheme.colorScheme.primary)
-                .border(2.dp, Color.White, RoundedCornerShape(20.dp))
-                .pointerInput(crop, wPx, hPx) {
-                    detectDragGestures { change, drag ->
-                        change.consume()
-                        val nw = (crop.w + drag.x / wPx).coerceIn(0.15f, 1f - crop.x)
-                        val nh = (crop.h + drag.y / hPx).coerceIn(0.15f, 1f - crop.y)
-                        onCropChange(crop.copy(w = nw, h = nh))
-                    }
-                },
+        // 8 Touch Handles (4 corners + 4 edges) kept cleanly inside stage bounds
+        val touchSizePx = with(density) { 36.dp.roundToPx() }
+        val halfTouchPx = touchSizePx / 2
+        val leftPx = (crop.x * wPx).roundToInt()
+        val rightPx = ((crop.x + crop.w) * wPx).roundToInt()
+        val topPx = (crop.y * hPx).roundToInt()
+        val bottomPx = ((crop.y + crop.h) * hPx).roundToInt()
+        val midXPx = (leftPx + rightPx) / 2
+        val midYPx = (topPx + bottomPx) / 2
+
+        val handles = listOf(
+            CropDragTarget.TOP_LEFT to IntOffset(leftPx - halfTouchPx, topPx - halfTouchPx),
+            CropDragTarget.TOP_RIGHT to IntOffset(rightPx - halfTouchPx, topPx - halfTouchPx),
+            CropDragTarget.BOTTOM_LEFT to IntOffset(leftPx - halfTouchPx, bottomPx - halfTouchPx),
+            CropDragTarget.BOTTOM_RIGHT to IntOffset(rightPx - halfTouchPx, bottomPx - halfTouchPx),
+            CropDragTarget.TOP to IntOffset(midXPx - halfTouchPx, topPx - halfTouchPx),
+            CropDragTarget.BOTTOM to IntOffset(midXPx - halfTouchPx, bottomPx - halfTouchPx),
+            CropDragTarget.LEFT to IntOffset(leftPx - halfTouchPx, midYPx - halfTouchPx),
+            CropDragTarget.RIGHT to IntOffset(rightPx - halfTouchPx, midYPx - halfTouchPx),
         )
+        handles.forEach { (dragTarget, pos) ->
+            Box(
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            pos.x.coerceIn(-halfTouchPx / 2, (wPx.toInt() - halfTouchPx).coerceAtLeast(0)),
+                            pos.y.coerceIn(-halfTouchPx / 2, (hPx.toInt() - halfTouchPx).coerceAtLeast(0)),
+                        )
+                    }
+                    .size(36.dp)
+                    .pointerInput(dragTarget, wPx, hPx) {
+                        detectDragGestures { change, drag ->
+                            change.consume()
+                            applyDelta(dragTarget, drag.x, drag.y)
+                        }
+                    },
+            )
+        }
     }
 }
 
@@ -270,6 +394,10 @@ fun StudioEditorPanel(
     pairedPcHosts: List<SavedHost>,
     selectedOffloadHost: SavedHost?,
     executionTarget: JobExecutionTarget,
+    activeTab: Int = 0,
+    onActiveTabChange: (Int) -> Unit = {},
+    sideRailMode: Boolean = false,
+    onCollapsePeek: (() -> Unit)? = null,
     onSetStartEnd: (Long, Long) -> Unit,
     onToggleCropActive: (Boolean) -> Unit,
     onCropChange: (CropBoxSpec) -> Unit,
@@ -287,29 +415,50 @@ fun StudioEditorPanel(
     onSubmitEdit: (EditStudioRequest, JobExecutionTarget, SavedHost?, runNow: Boolean) -> Unit,
 ) {
     val surfaces = LocalDeckSurfaces.current
-    var tab by remember { mutableStateOf(0) } // 0=Trim, 1=Crop/Transform, 2=Color/Pro, 3=Audio/GIF
+    val tab = activeTab.coerceIn(0, 3)
+    val studioChipColors = FilterChipDefaults.filterChipColors(
+        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+        selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        containerColor = surfaces.elevatedSurface,
+        labelColor = surfaces.textSecondary,
+    )
 
     Surface(
-        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-        color = surfaces.panelSurface.copy(alpha = 0.96f),
+        shape = if (sideRailMode) RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp) else RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        color = surfaces.panelSurface,
         border = BorderStroke(1.dp, surfaces.hairlineBorder),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = if (sideRailMode) Modifier.fillMaxSize() else Modifier.fillMaxWidth(),
     ) {
         Column(
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier
                 .fillMaxWidth()
+                .then(if (sideRailMode) Modifier.fillMaxHeight() else Modifier)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
             Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                FilterChip(selected = tab == 0, onClick = { tab = 0; onToggleCropActive(false) }, leadingIcon = { Icon(Icons.Rounded.ContentCut, null, Modifier.size(16.dp)) }, label = { Text("Trim & Cut") })
-                FilterChip(selected = tab == 1, onClick = { tab = 1; onToggleCropActive(true) }, leadingIcon = { Icon(Icons.Rounded.Crop, null, Modifier.size(16.dp)) }, label = { Text("Crop & Rotate") })
-                FilterChip(selected = tab == 2, onClick = { tab = 2; onToggleCropActive(false) }, label = { Text("Color & Pro") })
-                FilterChip(selected = tab == 3, onClick = { tab = 3; onToggleCropActive(false) }, leadingIcon = { Icon(Icons.Rounded.GifBox, null, Modifier.size(16.dp)) }, label = { Text("GIF / Audio") })
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                ) {
+                    FilterChip(selected = tab == 0, onClick = { onActiveTabChange(0); onToggleCropActive(false) }, colors = studioChipColors, leadingIcon = { Icon(Icons.Rounded.ContentCut, null, Modifier.size(16.dp)) }, label = { Text("Trim & Cut") })
+                    FilterChip(selected = tab == 1, onClick = { onActiveTabChange(1); onToggleCropActive(true) }, colors = studioChipColors, leadingIcon = { Icon(Icons.Rounded.Crop, null, Modifier.size(16.dp)) }, label = { Text("Crop & Rotate") })
+                    FilterChip(selected = tab == 2, onClick = { onActiveTabChange(2); onToggleCropActive(false) }, colors = studioChipColors, label = { Text("Color & Pro") })
+                    FilterChip(selected = tab == 3, onClick = { onActiveTabChange(3); onToggleCropActive(false) }, colors = studioChipColors, leadingIcon = { Icon(Icons.Rounded.GifBox, null, Modifier.size(16.dp)) }, label = { Text("GIF / Audio") })
+                }
+                if (onCollapsePeek != null) {
+                    AssistChip(
+                        onClick = onCollapsePeek,
+                        leadingIcon = { Icon(Icons.Rounded.KeyboardArrowDown, null, Modifier.size(16.dp)) },
+                        label = { Text("Peek") },
+                    )
+                }
             }
 
             if (isLocalSource) {

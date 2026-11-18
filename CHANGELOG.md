@@ -2,6 +2,17 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.4.2] - 2026-11-18
+
+### Android Hybrid Video Studio, Fitted 8-Handle Cropper & Full-Color Material 3 Themes
+- **Hybrid Adaptive Video Studio (`VideoPlayerAndTrimmer.kt` & `VideoStudioComponents.kt`)**:
+  - Replaced the overlapping Studio overlay with an adaptive split viewport: on Z Fold unfolded and phones in portrait, the video shrinks cleanly above the Studio workbench and single-row slim transport bar so 100% of the video frame stays unobstructed; on wide tablets (`>= 840dp` landscape), Studio docks as a right-hand inspector rail; added a **1-Tap Peek** button to collapse Studio down to a single slim bar for quick full-screen inspection, and preserved live ExoPlayer/LibVLC surfaces via `movableContentOf` across transitions.
+  - Upgraded `VisualCropOverlay` to measure real rendered video bounds (`ExoPlayer.onVideoSizeChanged` and `LibVLC` track orientation/SAR dimensions) so the crop frame & Rule-of-Thirds grid never bleed into black letterbox/pillarbox bars, upgraded dragging to `rememberUpdatedState` (zero mid-drag cancellation), added **4 corners + 4 edge midpoint bars + center pan**, and added a live pixel resolution badge (`W × H`).
+- **Full-Color Material 3 + Tonal Dark / OLED + Tonal / OLED Neon (`DeckVaultTheme.kt` & `Models.kt`)**:
+  - Unlocked genuine Android 12–16 **Material You** dynamic surface & container tinting (`DYNAMIC_YOU`) instead of stripping it back to neutral grayscale, and added vibrant full-color palettes (`Electric Cobalt`, `Emerald Forest`, `Royal Amethyst`, `Crimson Velvet`, `Amber Sunburst`, `Cyber Teal`).
+  - Added selectable **Dark Surface Styles**: **Tonal Dark** (rich color-tinted Material 3 dark hierarchy), **OLED + Tonal** (pure `#000000` backdrop + color-tinted Material cards), and **OLED Neon** (pure `#000000` backdrop + luminous borders & high-contrast accents) in both Settings and Quick Appearance sheet.
+- *(Desktop Companion `DeckVault.exe` unchanged — 100% compatible with `v1.4.1`.)*
+
 ## [v1.4.1] - 2026-11-18
 
 ### Performance, FFmpeg Memory Spike Fix & Smoothness (`DeckVault.exe` & Android `v1.4.1`)
