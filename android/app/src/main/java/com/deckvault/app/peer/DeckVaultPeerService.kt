@@ -8,8 +8,12 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import com.deckvault.app.MainActivity
 import com.deckvault.app.model.DriveInfo
@@ -30,10 +34,28 @@ data class PeerServiceStatus(
 class DeckVaultPeerService : Service() {
 
     private var server: AndroidPeerServer? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onCreate() {
         super.onCreate()
         ensureChannel()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acquireWifiLock() {
+        if (wifiLock?.isHeld == true) return
+        runCatching {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wm.createWifiLock(mode, "DeckVaultPeerWifi").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -41,6 +63,7 @@ class DeckVaultPeerService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        acquireWifiLock()
         if (server == null) {
             server = AndroidPeerServer(applicationContext).also { it.start() }
         }
@@ -62,6 +85,10 @@ class DeckVaultPeerService : Service() {
     }
 
     override fun onDestroy() {
+        runCatching {
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        }
+        wifiLock = null
         server?.stop()
         server = null
         activeServer = null
@@ -178,5 +205,17 @@ class DeckVaultPeerService : Service() {
         fun localQuickFolders(context: Context): List<QuickFolder> {
             return (activeServer ?: AndroidPeerServer(context.applicationContext)).detectQuickFolders()
         }
+
+        fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+            val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
+            return runCatching { pm.isIgnoringBatteryOptimizations(context.packageName) }.getOrDefault(false)
+        }
+
+        fun batteryOptimizationIntent(context: Context): Intent =
+            Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:${context.packageName}"),
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 }

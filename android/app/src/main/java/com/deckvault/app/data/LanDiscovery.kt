@@ -67,6 +67,55 @@ object LanDiscovery {
         )
     }
 
+    /** Fast UDP ping targeted at a single paired hostId so DHCP IP changes heal automatically in ~100ms. */
+    suspend fun resolveHostIpsById(context: Context, targetHostId: String, timeoutMs: Int = 900): List<String> =
+        withContext(Dispatchers.IO) {
+            if (targetHostId.isBlank()) return@withContext emptyList()
+            val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val lock = wifi?.createMulticastLock("DeckVaultHeal")?.apply {
+                setReferenceCounted(false)
+                runCatching { acquire() }
+            }
+            var socket: DatagramSocket? = null
+            try {
+                socket = DatagramSocket().apply {
+                    broadcast = true
+                    soTimeout = 250
+                }
+                val targets = collectBroadcastAddresses()
+                for (target in targets) {
+                    runCatching { socket.send(DatagramPacket(MAGIC, MAGIC.size, target, UDP_PORT)) }
+                }
+                val deadline = System.currentTimeMillis() + timeoutMs
+                val buf = ByteArray(4096)
+                while (System.currentTimeMillis() < deadline) {
+                    try {
+                        val resp = DatagramPacket(buf, buf.size)
+                        socket.receive(resp)
+                        val text = String(resp.data, 0, resp.length, Charsets.UTF_8)
+                        val parsed = runCatching { json.decodeFromString<DiscoveredHost>(text) }.getOrNull()
+                        if (parsed != null && parsed.service == "DeckVault" && parsed.hostId == targetHostId) {
+                            val senderIp = resp.address.hostAddress ?: ""
+                            return@withContext (listOf(senderIp) + parsed.ips)
+                                .filter { it.isNotBlank() && it != "127.0.0.1" }
+                                .distinct()
+                                .sortedByDescending { it.startsWith("192.168.") || it.startsWith("10.") || it.startsWith("172.") }
+                        }
+                    } catch (_: SocketTimeoutException) {
+                        for (target in targets) {
+                            runCatching { socket.send(DatagramPacket(MAGIC, MAGIC.size, target, UDP_PORT)) }
+                        }
+                    }
+                }
+                emptyList()
+            } catch (_: Exception) {
+                emptyList()
+            } finally {
+                runCatching { socket?.close() }
+                runCatching { if (lock?.isHeld == true) lock.release() }
+            }
+        }
+
     private fun discoverViaUdp(
         context: Context,
         timeoutMs: Int,

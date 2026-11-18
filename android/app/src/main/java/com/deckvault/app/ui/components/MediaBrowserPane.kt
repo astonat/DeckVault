@@ -192,7 +192,7 @@ fun MediaBrowserPane(
                     ) {
                         Icon(androidx.compose.material.icons.Icons.Rounded.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                         Text(
-                            "Grant All Files Access to browse & move between Internal Storage and SD Card freely.",
+                            "Grant All Files Access to browse & manage all device folders directly.",
                             style = MaterialTheme.typography.bodySmall,
                             color = surfaces.textPrimary,
                             modifier = Modifier.weight(1f),
@@ -782,7 +782,7 @@ fun MediaBrowserPane(
                 Spacer(Modifier.height(6.dp))
                 ContextActionRow(
                     icon = Icons.AutoMirrored.Rounded.DriveFileMove,
-                    label = "Move to Folder, SD Card or PC",
+                    label = "Move to Folder or Device",
                     onClick = {
                         contextFile = null
                         onMoveFile(file)
@@ -790,7 +790,7 @@ fun MediaBrowserPane(
                 )
                 ContextActionRow(
                     icon = Icons.Rounded.ContentCopy,
-                    label = "Copy to Folder, SD Card or PC",
+                    label = "Copy to Folder or Device",
                     onClick = {
                         contextFile = null
                         onCopyFile(file)

@@ -9,6 +9,7 @@ import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.util.LruCache
 import android.webkit.MimeTypeMap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -161,12 +162,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var folderNavJob: Job? = null
     private var browseGeneration: Long = 0L
 
+    private val rootsCache = ConcurrentHashMap<String, RootsResponse>()
+    private val folderCache = LruCache<String, ListResponse>(48)
+    private val treeCache = LruCache<String, TreeResponse>(48)
+
+    private fun folderCacheKey(hostId: String, path: String, prefs: UserPreferences, query: String): String =
+        "$hostId|$path|${prefs.sortBy.apiKey}|${prefs.sortDescending}|${prefs.mediaFilter.apiKey}|$query"
+
+    private fun treeCacheKey(hostId: String, path: String, sort: String): String =
+        "$hostId|$path|$sort"
+
+    fun invalidateHostCache(hostId: String? = null) {
+        if (hostId == null) {
+            rootsCache.clear()
+            folderCache.evictAll()
+            treeCache.evictAll()
+        } else {
+            rootsCache.remove(hostId)
+            folderCache.snapshot().keys.filter { it.startsWith("$hostId|") }.forEach { folderCache.remove(it) }
+            treeCache.snapshot().keys.filter { it.startsWith("$hostId|") }.forEach { treeCache.remove(it) }
+        }
+    }
+
     private val localTasks = ConcurrentHashMap<String, LocalTaskSpec>()
     private val localQueueChannel = Channel<String>(Channel.UNLIMITED)
     private val runningCoroutines = ConcurrentHashMap<String, Job>()
     private val cancelledIds = ConcurrentHashMap.newKeySet<String>()
 
     init {
+        api.onResolveHostIps = { host ->
+            LanDiscovery.resolveHostIpsById(getApplication(), host.hostId, timeoutMs = 900)
+        }
+        api.onHostIpHealed = { staleHost, goodIp, extraIps ->
+            prefsRepo.update { prefs ->
+                val updatedHosts = prefs.hosts.map { h ->
+                    if (h.hostId == staleHost.hostId) h.withPrimaryIp(goodIp, extraIps) else h
+                }
+                prefs.copy(hosts = updatedHosts)
+            }
+        }
         // Ensure This Device host is always registered & remove any broken legacy 127.0.0.1 loopback host
         viewModelScope.launch {
             prefsRepo.update { prefs ->
@@ -291,6 +325,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 val deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
                 val resp = api.pair(ip, port, pin, deviceModel)
+                val discoveredIps = _ui.value.discoveredHosts
+                    .firstOrNull { it.hostId == resp.hostId || ip in it.ips }
+                    ?.ips
+                    .orEmpty()
+                    .filter { it != ip && it.isNotBlank() && it != "127.0.0.1" }
                 val saved = SavedHost(
                     hostId = resp.hostId,
                     name = resp.deviceName,
@@ -299,6 +338,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     token = resp.token,
                     label = customLabel.ifBlank { resp.deviceName },
                     os = resp.os,
+                    alternateIps = discoveredIps,
                 )
                 prefsRepo.upsertHost(saved, makeActive = true)
             }.onSuccess {
@@ -323,6 +363,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onPermissionChanged() {
         val host = activeHost()
         if (host.isLocalDevice) {
+            invalidateHostCache(host.hostId)
             viewModelScope.launch {
                 _ui.update { it.copy(needsAllFilesPermission = false, errorMessage = null) }
                 connectAndLoadHost(host, preferences.value)
@@ -393,19 +434,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun connectAndLoadHost(host: SavedHost, prefs: UserPreferences) {
         val connectGen = ++browseGeneration
-        _ui.update {
-            it.copy(
-                isLoading = true,
-                errorMessage = null,
-                needsAllFilesPermission = host.isLocalDevice && !localRepo.hasAllFilesAccess(),
-                selectedPaths = emptySet(),
-                isSpaceHogsMode = false,
-                searchQuery = "",
-            )
+        val cachedRoots = rootsCache[host.hostId]
+        val cachedInitialPath = pendingNavigatePath?.takeIf { it.isNotBlank() }
+            ?: cachedRoots?.quickFolders?.firstOrNull { it.name.contains("Videos", true) || it.name.contains("Movies", true) }?.path
+            ?: cachedRoots?.quickFolders?.firstOrNull()?.path
+            ?: cachedRoots?.drives?.firstOrNull()?.path.orEmpty()
+        val cachedInitialList = if (cachedInitialPath.isNotBlank()) {
+            folderCache.get(folderCacheKey(host.hostId, cachedInitialPath, prefs, ""))
+        } else null
+
+        if (cachedRoots != null) {
+            // Instant stale-while-revalidate UI switch between phones, tablet, and PC (<2ms)
+            _ui.update {
+                it.copy(
+                    isLoading = cachedInitialList == null,
+                    errorMessage = null,
+                    needsAllFilesPermission = host.isLocalDevice && !localRepo.hasAllFilesAccess(),
+                    selectedPaths = emptySet(),
+                    isSpaceHogsMode = false,
+                    searchQuery = "",
+                    drives = cachedRoots.drives,
+                    quickFolders = cachedRoots.quickFolders,
+                    spaceSavedBytes = cachedRoots.spaceSavedBytes,
+                    isIndexing = cachedRoots.indexer.scanning,
+                    currentPath = cachedInitialPath,
+                    folderName = cachedInitialList?.name ?: it.folderName,
+                    parentPath = cachedInitialList?.parentPath ?: it.parentPath,
+                    currentFolderSizeBytes = cachedInitialList?.totalSizeBytes ?: it.currentFolderSizeBytes,
+                    listFolders = cachedInitialList?.folders ?: emptyList(),
+                    files = cachedInitialList?.files ?: emptyList(),
+                )
+            }
+        } else {
+            _ui.update {
+                it.copy(
+                    isLoading = true,
+                    errorMessage = null,
+                    needsAllFilesPermission = host.isLocalDevice && !localRepo.hasAllFilesAccess(),
+                    selectedPaths = emptySet(),
+                    isSpaceHogsMode = false,
+                    searchQuery = "",
+                )
+            }
         }
+
         runCatching {
             resolveRoots(host)
         }.onSuccess { roots ->
+            rootsCache[host.hostId] = roots
             if (connectGen != browseGeneration) return
             val overridePath = pendingNavigatePath
             pendingNavigatePath = null
@@ -462,6 +538,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun rescanDisks() {
         val host = activeHost()
+        invalidateHostCache(host.hostId)
         viewModelScope.launch {
             runCatching {
                 if (!host.isLocalDevice) api.rescan(host)
@@ -544,16 +621,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun loadFolder(host: SavedHost, path: String, prefs: UserPreferences) {
         val myGen = ++browseGeneration
-        _ui.update {
-            it.copy(
-                isLoading = true,
-                errorMessage = null,
-                needsAllFilesPermission = host.isLocalDevice && !localRepo.hasAllFilesAccess(),
-            )
-        }
         val treeSort = if (_ui.value.treeSortBySize) "size" else "name"
         val query = _ui.value.searchQuery.trim()
         val recursive = _ui.value.recursiveSearch && query.isNotBlank()
+        val fKey = folderCacheKey(host.hostId, path, prefs, if (recursive) "" else query)
+        val tKey = treeCacheKey(host.hostId, path, treeSort)
+        val cachedList = if (!recursive) folderCache.get(fKey) else null
+        val cachedTree = treeCache.get(tKey)
+
+        if (cachedList != null) {
+            _ui.update {
+                it.copy(
+                    isLoading = false,
+                    errorMessage = null,
+                    needsAllFilesPermission = host.isLocalDevice && !localRepo.hasAllFilesAccess(),
+                    currentPath = cachedList.path,
+                    folderName = cachedList.name,
+                    parentPath = cachedList.parentPath,
+                    currentFolderSizeBytes = cachedList.totalSizeBytes,
+                    listFolders = cachedList.folders,
+                    files = cachedList.files,
+                    treeFolders = cachedTree?.children ?: it.treeFolders,
+                )
+            }
+        } else {
+            _ui.update {
+                it.copy(
+                    isLoading = true,
+                    errorMessage = null,
+                    needsAllFilesPermission = host.isLocalDevice && !localRepo.hasAllFilesAccess(),
+                )
+            }
+        }
 
         runCatching {
             coroutineScope {
@@ -577,6 +676,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else null
 
                 val listResp = listDef.await()
+                if (!recursive) folderCache.put(fKey, listResp)
                 val recursiveFiles = recDef?.await()
                 if (myGen == browseGeneration) {
                     _ui.update {
@@ -593,14 +693,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 val treeResp = treeDef.await()
+                if (treeResp != null) treeCache.put(tKey, treeResp)
                 if (myGen == browseGeneration && treeResp != null) {
                     _ui.update { it.copy(treeFolders = treeResp.children) }
                 }
             }
         }.onFailure { err ->
             if (err is kotlinx.coroutines.CancellationException) throw err
-            if (myGen == browseGeneration) {
+            if (myGen == browseGeneration && cachedList == null) {
                 handleStorageFailure(err, err.message ?: "Failed to load folder")
+            } else if (myGen == browseGeneration) {
+                _ui.update { it.copy(isLoading = false) }
             }
         }
     }
@@ -2003,6 +2106,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearError() { _ui.update { it.copy(errorMessage = null) } }
 
     private suspend fun refreshAfterMutation(host: SavedHost) {
+        invalidateHostCache(host.hostId)
         runCatching {
             val roots = resolveRoots(host)
             _ui.update {

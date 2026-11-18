@@ -56,9 +56,18 @@ import okio.BufferedSink
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
+class HttpStatusException(val code: Int, message: String) : IOException(message)
+
 class DeckVaultApi {
+
+    var onResolveHostIps: (suspend (SavedHost) -> List<String>)? = null
+    var onHostIpHealed: (suspend (SavedHost, String, List<String>) -> Unit)? = null
 
     val json = Json {
         ignoreUnknownKeys = true
@@ -559,28 +568,76 @@ class DeckVaultApi {
         serializer: KSerializer<T>,
         client: OkHttpClient,
     ): T = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
-            .url(buildUrl(host, route).build())
-            .header("X-DeckVault-Token", host.token)
-            .post(jsonBody.toRequestBody(jsonMediaType))
-            .build()
-        executeJson(client, req, serializer)
+        val url = buildUrl(host, route).build()
+        executeWithIpFailover(host, url) { targetUrl ->
+            val req = Request.Builder()
+                .url(targetUrl)
+                .header("X-DeckVault-Token", host.token)
+                .post(jsonBody.toRequestBody(jsonMediaType))
+                .build()
+            executeJson(client, req, serializer)
+        }
     }
 
     private fun buildUrl(host: SavedHost, route: String): HttpUrl.Builder =
         "${host.baseUrl}$route".toHttpUrl().newBuilder()
 
-    private fun <T> executeAuthedGet(
+    private suspend fun <T> executeAuthedGet(
         host: SavedHost,
         url: HttpUrl,
         serializer: kotlinx.serialization.KSerializer<T>,
-    ): T {
+    ): T = executeWithIpFailover(host, url) { targetUrl ->
         val req = Request.Builder()
-            .url(url)
+            .url(targetUrl)
             .header("X-DeckVault-Token", host.token)
             .get()
             .build()
-        return executeJson(okHttpClient, req, serializer)
+        executeJson(okHttpClient, req, serializer)
+    }
+
+    private fun isNetworkReachabilityError(t: Throwable): Boolean =
+        t is ConnectException ||
+            t is SocketTimeoutException ||
+            t is UnknownHostException ||
+            t is NoRouteToHostException ||
+            (t is IOException && t !is HttpStatusException)
+
+    private suspend fun <T> executeWithIpFailover(
+        host: SavedHost,
+        url: HttpUrl,
+        block: (HttpUrl) -> T,
+    ): T {
+        try {
+            return block(url)
+        } catch (firstErr: Throwable) {
+            if (host.isLocalDevice || !isNetworkReachabilityError(firstErr)) throw firstErr
+            // 1. Try saved alternate IPs first
+            for (altIp in host.candidateIps()) {
+                if (altIp == url.host) continue
+                val altUrl = url.newBuilder().host(altIp).build()
+                try {
+                    val res = block(altUrl)
+                    onHostIpHealed?.invoke(host, altIp, host.candidateIps())
+                    return res
+                } catch (e: Throwable) {
+                    if (!isNetworkReachabilityError(e)) throw e
+                }
+            }
+            // 2. Ask LAN discovery to resolve current Wi-Fi IP by hostId (~100-900ms)
+            val resolved = runCatching { onResolveHostIps?.invoke(host).orEmpty() }.getOrDefault(emptyList())
+            for (newIp in resolved) {
+                if (newIp == url.host) continue
+                val altUrl = url.newBuilder().host(newIp).build()
+                try {
+                    val res = block(altUrl)
+                    onHostIpHealed?.invoke(host, newIp, resolved)
+                    return res
+                } catch (e: Throwable) {
+                    if (!isNetworkReachabilityError(e)) throw e
+                }
+            }
+            throw firstErr
+        }
     }
 
     private fun <T> executeJson(
@@ -591,7 +648,7 @@ class DeckVaultApi {
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw IOException("HTTP ${resp.code}: ${text.take(240)}")
+                throw HttpStatusException(resp.code, "HTTP ${resp.code}: ${text.take(240)}")
             }
             return json.decodeFromString(serializer, text)
         }

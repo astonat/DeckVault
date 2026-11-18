@@ -7,14 +7,18 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.media.ExifInterface
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
+import android.util.Size
+import com.deckvault.app.data.AllFilesPermissionRequiredException
 import com.deckvault.app.data.LocalStorageRepository
 import com.deckvault.app.model.CreateFolderRequest
 import com.deckvault.app.model.CreateFolderResponse
@@ -27,6 +31,7 @@ import com.deckvault.app.model.FolderItem
 import com.deckvault.app.model.IndexerStatus
 import com.deckvault.app.model.LargestResponse
 import com.deckvault.app.model.ListResponse
+import com.deckvault.app.model.MediaFilter
 import com.deckvault.app.model.PairRequest
 import com.deckvault.app.model.PairResponse
 import com.deckvault.app.model.PingResponse
@@ -35,6 +40,7 @@ import com.deckvault.app.model.RemotePullRequest
 import com.deckvault.app.model.RenameRequest
 import com.deckvault.app.model.RootsResponse
 import com.deckvault.app.model.SearchResponse
+import com.deckvault.app.model.SortBy
 import com.deckvault.app.model.TransferRequest
 import com.deckvault.app.model.TransferResponse
 import com.deckvault.app.model.TransferredItemResult
@@ -43,13 +49,16 @@ import com.deckvault.app.model.TrimRequest
 import com.deckvault.app.model.TrimResponse
 import com.deckvault.app.model.UploadResponse
 import com.deckvault.app.model.VideoMeta
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -160,7 +169,7 @@ class AndroidPeerServer(private val context: Context) {
 
         thread(name = "DeckVaultAndroidHttp", isDaemon = true) {
             try {
-                val ss = ServerSocket(HTTP_PORT)
+                val ss = ServerSocket(HTTP_PORT, 256)
                 serverSocket = ss
                 while (running) {
                     val sock = try {
@@ -237,6 +246,8 @@ class AndroidPeerServer(private val context: Context) {
             while (ifaces.hasMoreElements()) {
                 val iface = ifaces.nextElement()
                 if (!iface.isUp || iface.isLoopback) continue
+                val ifName = iface.name.lowercase(Locale.US)
+                if (ifName.startsWith("tun") || ifName.startsWith("rmnet") || ifName.startsWith("ccmni")) continue
                 val addrs = iface.inetAddresses
                 while (addrs.hasMoreElements()) {
                     val addr = addrs.nextElement()
@@ -247,13 +258,14 @@ class AndroidPeerServer(private val context: Context) {
                 }
             }
         }
-        return result.sortedByDescending { it.startsWith("192.168.") || it.startsWith("10.") }
+        return result.sortedByDescending {
+            it.startsWith("192.168.") || it.startsWith("10.") || it.startsWith("172.")
+        }
     }
 
     fun detectStorageDrives(): List<DriveInfo> = localRepo.detectStorageDrives()
 
-    fun detectQuickFolders(): List<QuickFolder> =
-        localRepo.detectQuickFolders().filterNot { LocalStorageRepository.isVirtualMediaStorePath(it.path) }
+    fun detectQuickFolders(): List<QuickFolder> = localRepo.detectQuickFolders()
 
     private fun statVolume(dir: File): Pair<Long, Long> = runCatching {
         val sf = StatFs(dir.absolutePath)
@@ -264,89 +276,112 @@ class AndroidPeerServer(private val context: Context) {
 
     private fun handleSocket(socket: Socket) {
         socket.use { sock ->
-            sock.soTimeout = 30_000
+            sock.soTimeout = 25_000
+            runCatching { sock.tcpNoDelay = true }
             val input = BufferedInputStream(sock.getInputStream(), 32 * 1024)
-            val output = sock.getOutputStream()
+            val output = BufferedOutputStream(sock.getOutputStream(), 64 * 1024)
 
-            val requestLine = readHttpLine(input) ?: return
-            val parts = requestLine.split(" ")
-            if (parts.size < 2) return
-            val method = parts[0].uppercase(Locale.US)
-            val rawTarget = parts[1]
-
-            val headers = linkedMapOf<String, String>()
-            while (true) {
-                val line = readHttpLine(input) ?: break
-                if (line.isEmpty()) break
-                val colon = line.indexOf(':')
-                if (colon > 0) {
-                    headers[line.substring(0, colon).trim().lowercase(Locale.US)] =
-                        line.substring(colon + 1).trim()
+            var keepAlive = true
+            while (running && keepAlive && !sock.isClosed) {
+                var requestLine = readHttpLine(input) ?: break
+                while (requestLine.isEmpty()) {
+                    requestLine = readHttpLine(input) ?: return
                 }
-            }
+                val parts = requestLine.split(" ")
+                if (parts.size < 2) break
+                val method = parts[0].uppercase(Locale.US)
+                val rawTarget = parts[1]
+                val httpVersion = parts.getOrNull(2)?.uppercase(Locale.US) ?: "HTTP/1.1"
 
-            val qIdx = rawTarget.indexOf('?')
-            val route = if (qIdx >= 0) rawTarget.substring(0, qIdx) else rawTarget
-            val queryStr = if (qIdx >= 0) rawTarget.substring(qIdx + 1) else ""
-            val qs = parseQuery(queryStr)
-
-            if (method == "GET" && route == "/") {
-                sendHtml(output, DeckVaultWebPortal.HTML)
-                return
-            }
-
-            if (method == "GET" && route == "/api/ping") {
-                val ping = PingResponse(
-                    service = "DeckVault",
-                    version = "1.4.1",
-                    hostId = hostId,
-                    deviceName = deviceName,
-                    os = "Android",
-                    ffmpeg = false,
-                    spaceSavedBytes = spaceSavedBytes,
-                    indexer = IndexerStatus(scanning = false, indexedDirs = 0, lastScanEpoch = System.currentTimeMillis() / 1000L),
-                )
-                sendJson(output, 200, json.encodeToString(ping))
-                return
-            }
-
-            if (method == "POST" && route == "/api/pair") {
-                val bodyStr = readBodyString(input, headers["content-length"]?.toIntOrNull() ?: 0)
-                val req = json.decodeFromString(PairRequest.serializer(), bodyStr)
-                if (req.pin.trim() != pin.trim()) {
-                    sendJson(output, 401, """{"error":"Invalid PIN"}""")
-                    return
+                val headers = linkedMapOf<String, String>()
+                while (true) {
+                    val line = readHttpLine(input) ?: return
+                    if (line.isEmpty()) break
+                    val colon = line.indexOf(':')
+                    if (colon > 0) {
+                        headers[line.substring(0, colon).trim().lowercase(Locale.US)] =
+                            line.substring(colon + 1).trim()
+                    }
                 }
-                val resp = PairResponse(
-                    token = issueToken(),
-                    hostId = hostId,
-                    deviceName = deviceName,
-                    ffmpeg = false,
-                    spaceSavedBytes = spaceSavedBytes,
-                    os = "Android",
-                )
-                sendJson(output, 200, json.encodeToString(resp))
-                return
-            }
 
-            val token = headers["x-deckvault-token"] ?: qs["token"]
-            if (!isValidToken(token)) {
-                sendJson(output, 401, """{"error":"Unauthorized"}""")
-                return
-            }
+                val connHdr = headers["connection"].orEmpty()
+                keepAlive = (httpVersion == "HTTP/1.1" && !connHdr.equals("close", ignoreCase = true)) ||
+                    connHdr.equals("keep-alive", ignoreCase = true)
 
-            try {
-                when (method) {
-                    "GET", "HEAD" -> handleGet(method == "HEAD", route, qs, headers, output)
-                    "POST" -> handlePost(route, qs, headers, input, output)
-                    else -> sendJson(output, 405, """{"error":"Method not allowed"}""")
+                val qIdx = rawTarget.indexOf('?')
+                val route = if (qIdx >= 0) rawTarget.substring(0, qIdx) else rawTarget
+                val queryStr = if (qIdx >= 0) rawTarget.substring(qIdx + 1) else ""
+                val qs = parseQuery(queryStr)
+
+                if (method == "GET" && route == "/") {
+                    sendHtml(output, DeckVaultWebPortal.HTML, keepAlive)
+                    continue
                 }
-            } catch (e: SecurityException) {
-                runCatching { sendJson(output, 403, json.encodeToString(mapOf("error" to (e.message ?: "Forbidden")))) }
-            } catch (e: java.io.FileNotFoundException) {
-                runCatching { sendJson(output, 404, json.encodeToString(mapOf("error" to (e.message ?: "Not found")))) }
-            } catch (e: Throwable) {
-                runCatching { sendJson(output, 400, json.encodeToString(mapOf("error" to (e.message ?: "Bad request")))) }
+
+                if (method == "GET" && route == "/api/ping") {
+                    val ping = PingResponse(
+                        service = "DeckVault",
+                        version = "1.4.1",
+                        hostId = hostId,
+                        deviceName = deviceName,
+                        os = "Android",
+                        ffmpeg = false,
+                        spaceSavedBytes = spaceSavedBytes,
+                        indexer = IndexerStatus(scanning = false, indexedDirs = 0, lastScanEpoch = System.currentTimeMillis() / 1000L),
+                    )
+                    sendJson(output, 200, json.encodeToString(ping), keepAlive = keepAlive)
+                    continue
+                }
+
+                if (method == "POST" && route == "/api/pair") {
+                    val bodyStr = readBodyString(input, headers["content-length"]?.toIntOrNull() ?: 0)
+                    val req = json.decodeFromString(PairRequest.serializer(), bodyStr)
+                    if (req.pin.trim() != pin.trim()) {
+                        sendJson(output, 401, """{"error":"Invalid PIN"}""", keepAlive = false)
+                        break
+                    }
+                    val resp = PairResponse(
+                        token = issueToken(),
+                        hostId = hostId,
+                        deviceName = deviceName,
+                        ffmpeg = false,
+                        spaceSavedBytes = spaceSavedBytes,
+                        os = "Android",
+                    )
+                    sendJson(output, 200, json.encodeToString(resp), keepAlive = keepAlive)
+                    continue
+                }
+
+                val token = headers["x-deckvault-token"] ?: qs["token"]
+                if (!isValidToken(token)) {
+                    sendJson(output, 401, """{"error":"Unauthorized"}""", keepAlive = false)
+                    break
+                }
+
+                try {
+                    when (method) {
+                        "GET", "HEAD" -> handleGet(method == "HEAD", route, qs, headers, output, keepAlive)
+                        "POST" -> {
+                            handlePost(route, qs, headers, input, output, keepAlive)
+                        }
+                        else -> sendJson(output, 405, """{"error":"Method not allowed"}""", keepAlive = keepAlive)
+                    }
+                } catch (e: AllFilesPermissionRequiredException) {
+                    val safeKa = if (method == "POST") false else keepAlive
+                    if (!safeKa) keepAlive = false
+                    runCatching { sendJson(output, 403, json.encodeToString(mapOf("error" to "Grant All Files Access on $deviceName or open All Device Videos/Photos")), keepAlive = safeKa) }
+                } catch (e: SecurityException) {
+                    keepAlive = false
+                    runCatching { sendJson(output, 403, json.encodeToString(mapOf("error" to (e.message ?: "Forbidden"))), keepAlive = false) }
+                } catch (e: java.io.FileNotFoundException) {
+                    val safeKa = if (method == "POST") false else keepAlive
+                    if (!safeKa) keepAlive = false
+                    runCatching { sendJson(output, 404, json.encodeToString(mapOf("error" to (e.message ?: "Not found"))), keepAlive = safeKa) }
+                } catch (e: Throwable) {
+                    val safeKa = if (method == "POST") false else keepAlive
+                    if (!safeKa) keepAlive = false
+                    runCatching { sendJson(output, 400, json.encodeToString(mapOf("error" to (e.message ?: "Bad request"))), keepAlive = safeKa) }
+                }
             }
         }
     }
@@ -357,6 +392,7 @@ class AndroidPeerServer(private val context: Context) {
         qs: Map<String, String>,
         headers: Map<String, String>,
         output: OutputStream,
+        keepAlive: Boolean,
     ) {
         when (route) {
             "/api/roots" -> {
@@ -370,117 +406,57 @@ class AndroidPeerServer(private val context: Context) {
                     drives = detectStorageDrives(),
                     quickFolders = detectQuickFolders(),
                 )
-                sendJson(output, 200, json.encodeToString(resp), headOnly)
+                sendJson(output, 200, json.encodeToString(resp), headOnly, keepAlive)
             }
             "/api/tree" -> {
-                val safe = resolveSafePath(qs["path"].orEmpty())
-                if (!safe.isDirectory) throw java.io.FileNotFoundException(safe.path)
+                val rawPath = qs["path"].orEmpty()
                 val sort = qs["sort"] ?: "size"
-                val rawDirs = (safe.listFiles() ?: emptyArray())
-                    .filter { it.isDirectory && !it.name.startsWith(".") && it.name != "Android" }
-                val fastMode = rawDirs.size > 24
-                val childrenDirs = rawDirs.map { dir ->
-                    val quickSum = if (fastMode) -1L else quickFolderSizeBytes(dir)
-                    val hasSub = if (fastMode) true else (dir.listFiles()?.any { it.isDirectory && !it.name.startsWith(".") } == true)
-                    FolderItem(
-                        name = dir.name,
-                        path = dir.canonicalPath,
-                        sizeBytes = quickSum,
-                        percentOfParent = 0.0,
-                        hasSubfolders = hasSub,
-                    )
-                }
-                val parentSize = max(1L, childrenDirs.sumOf { max(0L, it.sizeBytes) })
-                val sorted = childrenDirs.map {
-                    it.copy(percentOfParent = if (it.sizeBytes > 0) min(100.0, (it.sizeBytes * 100.0) / parentSize) else 0.0)
-                }.let { list ->
-                    if (sort == "name") list.sortedBy { it.name.lowercase(Locale.US) }
-                    else list.sortedByDescending { it.sizeBytes }
-                }
-                val resp = TreeResponse(path = safe.canonicalPath, sizeBytes = max(0L, parentSize), children = sorted)
-                sendJson(output, 200, json.encodeToString(resp), headOnly)
+                val baseTree = runBlocking { localRepo.getTree(rawPath) }
+                val sorted = baseTree.children
+                    .filterNot { it.name == "Android" }
+                    .let { list ->
+                        if (sort == "name") list.sortedBy { it.name.lowercase(Locale.US) }
+                        else list.sortedByDescending { it.sizeBytes }
+                    }
+                val resp = baseTree.copy(children = sorted)
+                sendJson(output, 200, json.encodeToString(resp), headOnly, keepAlive)
             }
             "/api/list" -> {
-                val safe = resolveSafePath(qs["path"].orEmpty())
-                if (!safe.isDirectory) throw java.io.FileNotFoundException(safe.path)
-                val sort = qs["sort"] ?: "size"
+                val rawPath = qs["path"].orEmpty()
+                val sortKey = qs["sort"] ?: "size"
                 val desc = (qs["order"] ?: "desc") != "asc"
-                val filter = qs["filter"] ?: "all"
+                val filterKey = qs["filter"] ?: "all"
                 val q = (qs["q"] ?: "").trim().lowercase(Locale.US)
 
-                localRepo.prefetchMediaStoreVideoMeta()
-
-                val entries = (safe.listFiles() ?: emptyArray()).filter { !it.name.startsWith(".") }
-                val rawFolders = entries.filter { it.isDirectory && (q.isEmpty() || it.name.lowercase(Locale.US).contains(q)) }
-                val fastFolderMode = rawFolders.size > 24
-                val folders = rawFolders
-                    .map { dir ->
-                        FolderItem(
-                            name = dir.name,
-                            path = dir.canonicalPath,
-                            sizeBytes = if (fastFolderMode) -1L else quickFolderSizeBytes(dir),
-                            hasSubfolders = true,
-                        )
-                    }
-                    .sortedByDescending { it.sizeBytes }
-
-                var files = entries.filter { it.isFile }.map { toFileItem(it, probeVideo = false) }
-                if (q.isNotEmpty()) files = files.filter { it.name.lowercase(Locale.US).contains(q) }
-                files = when (filter) {
-                    "video" -> files.filter { it.isVideo }
-                    "image" -> files.filter { it.isImage }
-                    "media" -> files.filter { it.isVideo || it.isImage }
-                    "large" -> files.filter { it.sizeBytes >= 100L * 1024 * 1024 }
-                    else -> files
+                val sortEnum = SortBy.entries.firstOrNull { it.apiKey == sortKey } ?: SortBy.SIZE
+                val filterEnum = MediaFilter.entries.firstOrNull { it.apiKey == filterKey } ?: MediaFilter.ALL
+                val base = runBlocking { localRepo.listDirectory(rawPath, sortEnum, desc, filterEnum) }
+                val filtered = if (q.isEmpty()) base else {
+                    base.copy(
+                        folders = base.folders.filter { it.name.lowercase(Locale.US).contains(q) },
+                        files = base.files.filter { it.name.lowercase(Locale.US).contains(q) },
+                    )
                 }
-                // Resolve from MediaStore/memory cache instantly; queue up to 16 uncached media probes asynchronously
+
+                // Queue up to 12 uncached local video metadata probes silently in background for future opens
                 var queued = 0
-                files = files.map { item ->
-                    if ((item.isVideo || item.isAudio) && item.meta == null) {
-                        val cached = metaCache[item.path] ?: localRepo.getCachedVideoMeta(item.path)
-                        if (cached != null) {
-                            item.copy(meta = cached)
-                        } else {
-                            if (queued < 16) {
-                                queued++
-                                pool.execute { probeMediaMeta(File(item.path)) }
-                            }
-                            item
-                        }
-                    } else item
+                filtered.files.forEach { item ->
+                    if (item.isVideo && item.meta == null && !LocalStorageRepository.isContentUriPath(item.path) && queued < 12) {
+                        queued++
+                        pool.execute { runCatching { localRepo.probeVideoMeta(item.path) } }
+                    }
                 }
-                val comparator: Comparator<FileItem> = when (sort) {
-                    "name" -> compareBy { it.name.lowercase(Locale.US) }
-                    "date" -> compareBy { it.modifiedMs }
-                    "duration" -> compareBy { it.meta?.durationMs ?: 0L }
-                    "type" -> compareBy<FileItem> { it.extension }.thenBy { it.name.lowercase(Locale.US) }
-                    else -> compareBy { it.sizeBytes }
-                }
-                files = if (desc) files.sortedWith(comparator.reversed()) else files.sortedWith(comparator)
-
-                val (totalDisk, freeDisk) = statVolume(safe)
-                val parentCanon = safe.parentFile?.let {
-                    runCatching { resolveSafePath(it.canonicalPath).canonicalPath }.getOrNull()
-                } ?: safe.canonicalPath
-
-                val resp = ListResponse(
-                    path = safe.canonicalPath,
-                    name = safe.name.ifBlank { "Storage" },
-                    parentPath = parentCanon,
-                    totalSizeBytes = files.sumOf { it.sizeBytes },
-                    fileCount = files.size,
-                    mediaCount = files.count { it.isVideo || it.isImage },
-                    diskFreeBytes = freeDisk,
-                    diskTotalBytes = totalDisk,
-                    indexer = IndexerStatus(),
-                    folders = folders,
-                    files = files,
-                )
-                sendJson(output, 200, json.encodeToString(resp), headOnly)
+                sendJson(output, 200, json.encodeToString(filtered), headOnly, keepAlive)
             }
             "/api/search" -> {
-                val safe = resolveSafePath(qs["path"].orEmpty())
+                val rawPath = qs["path"].orEmpty()
                 val q = (qs["q"] ?: "").trim().lowercase(Locale.US)
+                if (LocalStorageRepository.isVirtualMediaStorePath(rawPath) || !localRepo.hasAllFilesAccess()) {
+                    val found = runBlocking { localRepo.searchFiles(q, rawPath, MediaFilter.ALL, 120) }
+                    sendJson(output, 200, json.encodeToString(found), headOnly, keepAlive)
+                    return
+                }
+                val safe = resolveSafePath(rawPath)
                 val matches = mutableListOf<FileItem>()
                 if (q.isNotEmpty()) {
                     walkFilesLimited(safe, maxResults = 160) { f ->
@@ -489,16 +465,22 @@ class AndroidPeerServer(private val context: Context) {
                         }
                     }
                 }
-                sendJson(output, 200, json.encodeToString(SearchResponse(files = matches)), headOnly)
+                sendJson(output, 200, json.encodeToString(SearchResponse(files = matches)), headOnly, keepAlive)
             }
             "/api/largest" -> {
-                val safe = resolveSafePath(qs["path"].orEmpty())
-                val filter = qs["filter"] ?: "video"
+                val rawPath = qs["path"].orEmpty()
+                val filterKey = qs["filter"] ?: "video"
                 val limit = (qs["limit"]?.toIntOrNull() ?: 80).coerceIn(1, 200)
+                if (LocalStorageRepository.isVirtualMediaStorePath(rawPath) || !localRepo.hasAllFilesAccess()) {
+                    val found = runBlocking { localRepo.findLargest(rawPath, limit) }
+                    sendJson(output, 200, json.encodeToString(found), headOnly, keepAlive)
+                    return
+                }
+                val safe = resolveSafePath(rawPath)
                 val all = mutableListOf<FileItem>()
                 walkFilesLimited(safe, maxResults = 3000) { f ->
                     val item = toFileItem(f, probeVideo = false)
-                    val keep = when (filter) {
+                    val keep = when (filterKey) {
                         "video" -> item.isVideo
                         "image" -> item.isImage
                         "media" -> item.isVideo || item.isImage
@@ -507,52 +489,81 @@ class AndroidPeerServer(private val context: Context) {
                     if (keep) all.add(item)
                 }
                 val top = all.sortedByDescending { it.sizeBytes }.take(limit).map {
-                    if (it.isVideo || it.isAudio) it.copy(meta = probeMediaMeta(File(it.path))) else it
+                    if ((it.isVideo || it.isAudio) && it.meta == null) {
+                        it.copy(meta = localRepo.getCachedVideoMeta(it.path, it.sizeBytes) ?: probeMediaMeta(File(it.path)))
+                    } else it
                 }
-                sendJson(output, 200, json.encodeToString(LargestResponse(path = safe.canonicalPath, files = top)), headOnly)
+                sendJson(output, 200, json.encodeToString(LargestResponse(path = safe.canonicalPath, files = top)), headOnly, keepAlive)
             }
             "/api/video/thumbnail" -> {
-                val safe = resolveSafePath(qs["path"].orEmpty())
+                val rawPath = qs["path"].orEmpty()
                 val w = (qs["w"]?.toIntOrNull() ?: 480).coerceIn(120, 1280)
-                val thumb = getOrBuildVideoThumb(safe, w)
-                sendFileBytes(output, thumb, "image/jpeg", headers, headOnly)
+                val thumb = if (LocalStorageRepository.isContentUriPath(rawPath)) {
+                    localRepo.getOrBuildThumbnailFile(rawPath, w)
+                        ?: throw java.io.FileNotFoundException("Thumbnail unavailable for $rawPath")
+                } else {
+                    val safe = resolveSafePath(rawPath)
+                    getOrBuildVideoThumb(safe, w)
+                }
+                sendFileBytes(output, thumb, "image/jpeg", headers, headOnly, keepAlive, cacheSeconds = 604_800)
             }
             "/api/video/storyboard" -> {
-                val safe = resolveSafePath(qs["path"].orEmpty())
+                val rawPath = qs["path"].orEmpty()
                 val cols = (qs["cols"]?.toIntOrNull() ?: 4).coerceIn(2, 6)
                 val rows = (qs["rows"]?.toIntOrNull() ?: 4).coerceIn(2, 6)
-                val sb = getOrBuildStoryboard(safe, cols, rows)
-                sendFileBytes(output, sb, "image/jpeg", headers, headOnly)
+                val sb = if (LocalStorageRepository.isContentUriPath(rawPath)) {
+                    localRepo.getOrBuildStoryboardFile(rawPath, cols, rows)
+                        ?: throw java.io.FileNotFoundException("Storyboard unavailable for $rawPath")
+                } else {
+                    val safe = resolveSafePath(rawPath)
+                    getOrBuildStoryboard(safe, cols, rows)
+                }
+                sendFileBytes(output, sb, "image/jpeg", headers, headOnly, keepAlive, cacheSeconds = 604_800)
             }
             "/api/video/frame" -> {
-                val safe = resolveSafePath(qs["path"].orEmpty())
+                val rawPath = qs["path"].orEmpty()
                 val ms = qs["ms"]?.toLongOrNull() ?: 0L
                 val w = (qs["w"]?.toIntOrNull() ?: 360).coerceIn(120, 1280)
-                val frame = localRepo.getOrBuildVideoFrameFile(safe.canonicalPath, ms, w)
-                    ?: throw java.io.FileNotFoundException("No frame available for ${safe.name}")
-                sendFileBytes(output, frame, "image/jpeg", headers, headOnly)
+                val targetKey = if (LocalStorageRepository.isContentUriPath(rawPath)) rawPath else resolveSafePath(rawPath).canonicalPath
+                val frame = localRepo.getOrBuildVideoFrameFile(targetKey, ms, w)
+                    ?: throw java.io.FileNotFoundException("No frame available for $rawPath")
+                sendFileBytes(output, frame, "image/jpeg", headers, headOnly, keepAlive, cacheSeconds = 604_800)
             }
             "/api/image" -> {
-                val safe = resolveSafePath(qs["path"].orEmpty())
+                val rawPath = qs["path"].orEmpty()
                 val w = (qs["w"]?.toIntOrNull() ?: 0)
+                if (LocalStorageRepository.isContentUriPath(rawPath)) {
+                    if (w > 0) {
+                        val thumb = getOrBuildContentImageThumb(rawPath, w)
+                        if (thumb != null) {
+                            sendFileBytes(output, thumb, "image/jpeg", headers, headOnly, keepAlive, cacheSeconds = 604_800)
+                            return
+                        }
+                    }
+                    sendContentUriStream(output, rawPath, headers, headOnly, keepAlive)
+                    return
+                }
+                val safe = resolveSafePath(rawPath)
                 if (w > 0) {
-                    val bmp = decodeScaledBitmap(safe, w)
-                    if (bmp != null) {
-                        val baos = ByteArrayOutputStream()
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 86, baos)
-                        bmp.recycle()
-                        sendBytes(output, baos.toByteArray(), "image/jpeg", headOnly)
+                    val cached = getOrBuildImageThumb(safe, w)
+                    if (cached != null) {
+                        sendFileBytes(output, cached, "image/jpeg", headers, headOnly, keepAlive, cacheSeconds = 604_800)
                         return
                     }
                 }
-                sendFileBytes(output, safe, guessMime(safe), headers, headOnly)
+                sendFileBytes(output, safe, guessMime(safe), headers, headOnly, keepAlive, cacheSeconds = if (w > 0) 604_800 else 0)
             }
             "/api/stream" -> {
-                val safe = resolveSafePath(qs["path"].orEmpty())
+                val rawPath = qs["path"].orEmpty()
+                if (LocalStorageRepository.isContentUriPath(rawPath)) {
+                    sendContentUriStream(output, rawPath, headers, headOnly, keepAlive)
+                    return
+                }
+                val safe = resolveSafePath(rawPath)
                 if (!safe.isFile) throw java.io.FileNotFoundException(safe.path)
-                sendFileBytes(output, safe, guessMime(safe), headers, headOnly)
+                sendFileBytes(output, safe, guessMime(safe), headers, headOnly, keepAlive)
             }
-            else -> sendJson(output, 404, """{"error":"Unknown route"}""", headOnly)
+            else -> sendJson(output, 404, """{"error":"Unknown route"}""", headOnly, keepAlive)
         }
     }
 
@@ -562,6 +573,7 @@ class AndroidPeerServer(private val context: Context) {
         headers: Map<String, String>,
         input: BufferedInputStream,
         output: OutputStream,
+        keepAlive: Boolean,
     ) {
         if (route == "/api/file/upload") {
             val destDir = resolveSafePath(qs["dir"].orEmpty())
@@ -570,7 +582,7 @@ class AndroidPeerServer(private val context: Context) {
             val conflict = qs["conflict"] ?: "rename"
             val target = resolveUniqueDest(destDir, rawName, conflict)
             if (target == null) {
-                sendJson(output, 200, json.encodeToString(UploadResponse(ok = true, skipped = true)))
+                sendJson(output, 200, json.encodeToString(UploadResponse(ok = true, skipped = true)), keepAlive = keepAlive)
                 return
             }
             resolveSafePath(target.absolutePath)
@@ -601,7 +613,7 @@ class AndroidPeerServer(private val context: Context) {
                 tmp.delete()
                 throw e
             }
-            sendJson(output, 200, json.encodeToString(UploadResponse(ok = true, path = target.canonicalPath, name = target.name, sizeBytes = written)))
+            sendJson(output, 200, json.encodeToString(UploadResponse(ok = true, path = target.canonicalPath, name = target.name, sizeBytes = written)), keepAlive = keepAlive)
             return
         }
 
@@ -609,7 +621,7 @@ class AndroidPeerServer(private val context: Context) {
         val bodyStr = readBodyString(input, bodyLen)
 
         when (route) {
-            "/api/rescan" -> sendJson(output, 200, """{"started":true}""")
+            "/api/rescan" -> sendJson(output, 200, """{"started":true}""", keepAlive = keepAlive)
             "/api/folder/create" -> {
                 val req = json.decodeFromString(CreateFolderRequest.serializer(), bodyStr)
                 val parent = resolveSafePath(req.parentDir)
@@ -618,7 +630,7 @@ class AndroidPeerServer(private val context: Context) {
                 val created = File(parent, clean)
                 resolveSafePath(created.absolutePath)
                 created.mkdirs()
-                sendJson(output, 200, json.encodeToString(CreateFolderResponse(ok = true, path = created.canonicalPath, name = clean)))
+                sendJson(output, 200, json.encodeToString(CreateFolderResponse(ok = true, path = created.canonicalPath, name = clean)), keepAlive = keepAlive)
             }
             "/api/file/rename" -> {
                 val req = json.decodeFromString(RenameRequest.serializer(), bodyStr)
@@ -629,7 +641,8 @@ class AndroidPeerServer(private val context: Context) {
                 resolveSafePath(dst.absolutePath)
                 if (!src.renameTo(dst)) throw IllegalStateException("Rename failed")
                 metaCache.remove(src.canonicalPath)
-                sendJson(output, 200, """{"ok":true}""")
+                localRepo.metaDb.invalidate(src.canonicalPath)
+                sendJson(output, 200, """{"ok":true}""", keepAlive = keepAlive)
             }
             "/api/file/delete" -> {
                 val req = json.decodeFromString(DeleteRequest.serializer(), bodyStr)
@@ -647,7 +660,7 @@ class AndroidPeerServer(private val context: Context) {
                     }.onFailure { errors.add("$raw: ${it.message}") }
                 }
                 spaceSavedBytes += freed
-                sendJson(output, 200, json.encodeToString(DeleteResponse(deletedCount = count, freedBytes = freed, totalSpaceSavedBytes = spaceSavedBytes, errors = errors)))
+                sendJson(output, 200, json.encodeToString(DeleteResponse(deletedCount = count, freedBytes = freed, totalSpaceSavedBytes = spaceSavedBytes, errors = errors)), keepAlive = keepAlive)
             }
             "/api/file/transfer" -> {
                 val req = json.decodeFromString(TransferRequest.serializer(), bodyStr)
@@ -685,7 +698,7 @@ class AndroidPeerServer(private val context: Context) {
                         results.add(TransferredItemResult(src = src.canonicalPath, dest = target.canonicalPath, sizeBytes = sz))
                     }.onFailure { errors.add("$raw: ${it.message}") }
                 }
-                sendJson(output, 200, json.encodeToString(TransferResponse(transferredCount = results.size, transferredBytes = totalBytes, results = results, errors = errors)))
+                sendJson(output, 200, json.encodeToString(TransferResponse(transferredCount = results.size, transferredBytes = totalBytes, results = results, errors = errors)), keepAlive = keepAlive)
             }
             "/api/file/pull" -> {
                 val req = json.decodeFromString(RemotePullRequest.serializer(), bodyStr)
@@ -731,7 +744,7 @@ class AndroidPeerServer(private val context: Context) {
                         errors.add("$srcPath: ${err.message}")
                     }
                 }
-                sendJson(output, 200, json.encodeToString(TransferResponse(transferredCount = results.size, transferredBytes = totalBytes, results = results, errors = errors)))
+                sendJson(output, 200, json.encodeToString(TransferResponse(transferredCount = results.size, transferredBytes = totalBytes, results = results, errors = errors)), keepAlive = keepAlive)
             }
             "/api/video/trim" -> {
                 val req = json.decodeFromString(TrimRequest.serializer(), bodyStr)
@@ -743,9 +756,9 @@ class AndroidPeerServer(private val context: Context) {
                 val resp = trimMp4Lossless(safe, req.startMs, req.endMs)
                 spaceSavedBytes += resp.savedBytes
                 metaCache.remove(safe.canonicalPath)
-                sendJson(output, 200, json.encodeToString(resp.copy(totalSpaceSavedBytes = spaceSavedBytes)))
+                sendJson(output, 200, json.encodeToString(resp.copy(totalSpaceSavedBytes = spaceSavedBytes)), keepAlive = keepAlive)
             }
-            else -> sendJson(output, 404, """{"error":"Unknown route"}""")
+            else -> sendJson(output, 404, """{"error":"Unknown route"}""", keepAlive = keepAlive)
         }
     }
 
@@ -1006,6 +1019,105 @@ class AndroidPeerServer(private val context: Context) {
         scaled
     }.getOrNull()
 
+    private fun getOrBuildImageThumb(file: File, width: Int): File? {
+        if (!file.isFile) return null
+        val w = width.coerceIn(120, 1280)
+        val dir = File(context.cacheDir, "peer_img_thumbs").apply { mkdirs() }
+        val key = cacheKeyForFile(file, "img_$w")
+        val out = File(dir, "$key.jpg")
+        if (out.exists() && out.length() > 64L) return out
+
+        mediaSem.acquire()
+        return try {
+            if (out.exists() && out.length() > 64L) return out
+            val tmp = File(dir, "$key.tmp.jpg")
+            runCatching {
+                // Try fast embedded EXIF JPEG thumbnail first (<2ms, avoids 50MP Bitmap decode)
+                val exifThumb = if (w <= 640 && file.extension.lowercase(Locale.US) in setOf("jpg", "jpeg", "heic", "heif")) {
+                    runCatching { ExifInterface(file.absolutePath).thumbnailBytes }.getOrNull()
+                } else null
+
+                val bmp = if (exifThumb != null && exifThumb.isNotEmpty()) {
+                    BitmapFactory.decodeByteArray(exifThumb, 0, exifThumb.size)?.let { raw ->
+                        scaleBitmapToWidth(raw, w).also { if (it !== raw) raw.recycle() }
+                    }
+                } else {
+                    decodeScaledBitmap(file, w)
+                } ?: return@runCatching null
+
+                FileOutputStream(tmp).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                bmp.recycle()
+                if (!tmp.renameTo(out)) tmp.copyTo(out, overwrite = true)
+                out
+            }.getOrNull().also {
+                tmp.delete()
+            }
+        } finally {
+            mediaSem.release()
+        }
+    }
+
+    private fun getOrBuildContentImageThumb(uriStr: String, width: Int): File? {
+        val w = width.coerceIn(120, 1280)
+        val dir = File(context.cacheDir, "peer_img_thumbs").apply { mkdirs() }
+        val digest = MessageDigest.getInstance("SHA-1").digest("$uriStr|w$w".toByteArray()).joinToString("") { "%02x".format(it) }
+        val out = File(dir, "$digest.jpg")
+        if (out.exists() && out.length() > 64L) return out
+
+        mediaSem.acquire()
+        return try {
+            if (out.exists() && out.length() > 64L) return out
+            val tmp = File(dir, "$digest.tmp.jpg")
+            runCatching {
+                val uri = Uri.parse(uriStr)
+                val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    runCatching { context.contentResolver.loadThumbnail(uri, Size(w, w), null) }.getOrNull()
+                } else null
+                val finalBmp = bmp ?: context.contentResolver.openInputStream(uri)?.use { ins ->
+                    BitmapFactory.decodeStream(ins)?.let { raw ->
+                        scaleBitmapToWidth(raw, w).also { if (it !== raw) raw.recycle() }
+                    }
+                } ?: return@runCatching null
+                FileOutputStream(tmp).use { finalBmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                finalBmp.recycle()
+                if (!tmp.renameTo(out)) tmp.copyTo(out, overwrite = true)
+                out
+            }.getOrNull().also {
+                tmp.delete()
+            }
+        } finally {
+            mediaSem.release()
+        }
+    }
+
+    private fun parseByteRange(rangeHeader: String?, size: Long): Triple<Int, Long, Long> {
+        var start = 0L
+        var end = (size - 1L).coerceAtLeast(0L)
+        var status = 200
+        if (rangeHeader != null && rangeHeader.startsWith("bytes=") && size > 0L) {
+            val spec = rangeHeader.substring(6).split(",")[0].trim()
+            val dash = spec.indexOf('-')
+            if (dash >= 0) {
+                val a = spec.substring(0, dash).trim()
+                val b = spec.substring(dash + 1).trim()
+                if (a.isNotEmpty()) {
+                    start = a.toLongOrNull()?.coerceIn(0L, size - 1L) ?: 0L
+                    end = b.toLongOrNull()?.coerceIn(start, size - 1L) ?: (size - 1L)
+                    status = 206
+                } else if (b.isNotEmpty()) {
+                    val suffix = b.toLongOrNull() ?: size
+                    start = (size - suffix).coerceAtLeast(0L)
+                    end = size - 1L
+                    status = 206
+                }
+            }
+        }
+        return Triple(status, start, end)
+    }
+
+    private fun connectionHeader(keepAlive: Boolean): String =
+        if (keepAlive) "Connection: keep-alive\r\nKeep-Alive: timeout=20, max=100\r\n" else "Connection: close\r\n"
+
     private fun guessMime(file: File): String = when (file.extension.lowercase(Locale.US)) {
         "mp4", "m4v" -> "video/mp4"
         "mov" -> "video/quicktime"
@@ -1039,30 +1151,47 @@ class AndroidPeerServer(private val context: Context) {
         else -> "application/octet-stream"
     }
 
-    private fun sendHtml(out: OutputStream, html: String) {
+    private fun sendHtml(out: OutputStream, html: String, keepAlive: Boolean = true) {
         val bytes = html.toByteArray(Charsets.UTF_8)
-        sendBytes(out, bytes, "text/html; charset=utf-8", headOnly = false)
+        sendBytes(out, bytes, "text/html; charset=utf-8", headOnly = false, keepAlive = keepAlive)
     }
 
-    private fun sendJson(out: OutputStream, status: Int, body: String, headOnly: Boolean = false) {
+    private fun sendJson(
+        out: OutputStream,
+        status: Int,
+        body: String,
+        headOnly: Boolean = false,
+        keepAlive: Boolean = true,
+    ) {
         val bytes = body.toByteArray(Charsets.UTF_8)
         val header = buildString {
             append("HTTP/1.1 $status ${statusText(status)}\r\n")
             append("Content-Type: application/json; charset=utf-8\r\n")
             append("Content-Length: ${bytes.size}\r\n")
-            append("Connection: close\r\n\r\n")
+            append("Cache-Control: no-store\r\n")
+            append(connectionHeader(keepAlive))
+            append("\r\n")
         }
         out.write(header.toByteArray(Charsets.US_ASCII))
         if (!headOnly) out.write(bytes)
         out.flush()
     }
 
-    private fun sendBytes(out: OutputStream, bytes: ByteArray, mime: String, headOnly: Boolean) {
+    private fun sendBytes(
+        out: OutputStream,
+        bytes: ByteArray,
+        mime: String,
+        headOnly: Boolean,
+        keepAlive: Boolean = true,
+        cacheSeconds: Int = 0,
+    ) {
         val header = buildString {
             append("HTTP/1.1 200 OK\r\n")
             append("Content-Type: $mime\r\n")
             append("Content-Length: ${bytes.size}\r\n")
-            append("Connection: close\r\n\r\n")
+            if (cacheSeconds > 0) append("Cache-Control: public, max-age=$cacheSeconds\r\n")
+            append(connectionHeader(keepAlive))
+            append("\r\n")
         }
         out.write(header.toByteArray(Charsets.US_ASCII))
         if (!headOnly) out.write(bytes)
@@ -1075,43 +1204,22 @@ class AndroidPeerServer(private val context: Context) {
         mime: String,
         headers: Map<String, String>,
         headOnly: Boolean,
+        keepAlive: Boolean = true,
+        cacheSeconds: Int = 0,
     ) {
         if (!file.isFile) throw java.io.FileNotFoundException(file.path)
         val size = file.length()
-        val range = headers["range"]
-        var start = 0L
-        var end = (size - 1L).coerceAtLeast(0L)
-        var status = 200
-
-        if (range != null && range.startsWith("bytes=") && size > 0L) {
-            val spec = range.substring(6).split(",")[0].trim()
-            val dash = spec.indexOf('-')
-            if (dash >= 0) {
-                val a = spec.substring(0, dash).trim()
-                val b = spec.substring(dash + 1).trim()
-                if (a.isNotEmpty()) {
-                    start = a.toLongOrNull()?.coerceIn(0L, size - 1L) ?: 0L
-                    end = b.toLongOrNull()?.coerceIn(start, size - 1L) ?: (size - 1L)
-                    status = 206
-                } else if (b.isNotEmpty()) {
-                    val suffix = b.toLongOrNull() ?: size
-                    start = (size - suffix).coerceAtLeast(0L)
-                    end = size - 1L
-                    status = 206
-                }
-            }
-        }
-
+        val (status, start, end) = parseByteRange(headers["range"], size)
         val length = if (size == 0L) 0L else (end - start + 1L).coerceAtLeast(0L)
         val respHeaders = buildString {
             append("HTTP/1.1 $status ${statusText(status)}\r\n")
             append("Content-Type: $mime\r\n")
             append("Accept-Ranges: bytes\r\n")
             append("Content-Length: $length\r\n")
-            if (status == 206) {
-                append("Content-Range: bytes $start-$end/$size\r\n")
-            }
-            append("Connection: close\r\n\r\n")
+            if (cacheSeconds > 0) append("Cache-Control: public, max-age=$cacheSeconds\r\n")
+            if (status == 206) append("Content-Range: bytes $start-$end/$size\r\n")
+            append(connectionHeader(keepAlive))
+            append("\r\n")
         }
         out.write(respHeaders.toByteArray(Charsets.US_ASCII))
         if (!headOnly && length > 0L) {
@@ -1124,6 +1232,51 @@ class AndroidPeerServer(private val context: Context) {
                     if (read < 0) break
                     out.write(buf, 0, read)
                     rem -= read
+                }
+            }
+        }
+        out.flush()
+    }
+
+    private fun sendContentUriStream(
+        out: OutputStream,
+        uriStr: String,
+        headers: Map<String, String>,
+        headOnly: Boolean,
+        keepAlive: Boolean,
+    ) {
+        val uri = Uri.parse(uriStr)
+        val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+        val size = localRepo.getFileLengthAny(uriStr).coerceAtLeast(0L)
+        val (status, start, end) = if (size > 0L) parseByteRange(headers["range"], size) else Triple(200, 0L, 0L)
+        val length = if (size > 0L) (end - start + 1L).coerceAtLeast(0L) else -1L
+        val useKeepAlive = keepAlive && length >= 0L
+        val respHeaders = buildString {
+            append("HTTP/1.1 $status ${statusText(status)}\r\n")
+            append("Content-Type: $mime\r\n")
+            if (size > 0L) {
+                append("Accept-Ranges: bytes\r\n")
+                append("Content-Length: $length\r\n")
+                if (status == 206) append("Content-Range: bytes $start-$end/$size\r\n")
+            }
+            append(connectionHeader(useKeepAlive))
+            append("\r\n")
+        }
+        out.write(respHeaders.toByteArray(Charsets.US_ASCII))
+        if (!headOnly && (length != 0L)) {
+            val afd = context.contentResolver.openAssetFileDescriptor(uri, "r")
+                ?: throw java.io.FileNotFoundException("Cannot open $uriStr")
+            afd.use { fd ->
+                FileInputStream(fd.fileDescriptor).use { fis ->
+                    if (start > 0L) fis.channel.position(fd.startOffset + start)
+                    val buf = ByteArray(128 * 1024)
+                    var rem = if (length > 0L) length else Long.MAX_VALUE
+                    while (rem > 0L) {
+                        val read = fis.read(buf, 0, min(buf.size.toLong(), rem).toInt())
+                        if (read < 0) break
+                        out.write(buf, 0, read)
+                        if (length > 0L) rem -= read
+                    }
                 }
             }
         }

@@ -16,6 +16,7 @@ import gc
 import hashlib
 import io
 from http import HTTPStatus
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import mimetypes
@@ -2138,6 +2139,18 @@ class FleetStore:
             self.hosts.insert(0, host)
             self._save()
 
+    def update_ip(self, host_id: str, new_ip: str) -> None:
+        if not host_id or not new_ip or new_ip.startswith("127."):
+            return
+        with self._lock:
+            changed = False
+            for h in self.hosts:
+                if h.get("hostId") == host_id and h.get("ip") != new_ip:
+                    h["ip"] = new_ip
+                    changed = True
+            if changed:
+                self._save()
+
     def remove(self, host_id: str) -> None:
         with self._lock:
             self.hosts = [h for h in self.hosts if h.get("hostId") != host_id]
@@ -2743,12 +2756,91 @@ class JobManager:
                 self._q.task_done()
 
 
+def resolve_host_ip_by_id(target_host_id: str, udp_port: int = DEFAULT_UDP_PORT, timeout_s: float = 0.9) -> str | None:
+    """Fast UDP ping targeted at a single paired hostId when a phone/laptop IP changes over Wi-Fi."""
+    if not target_host_id:
+        return None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(0.25)
+        targets = {"255.255.255.255"}
+        for ip in get_local_ipv4_addresses():
+            parts = ip.split(".")
+            if len(parts) == 4:
+                targets.add(f"{parts[0]}.{parts[1]}.{parts[2]}.255")
+        deadline = time.time() + timeout_s
+        for _ in range(2):
+            for tgt in targets:
+                try:
+                    sock.sendto(DISCOVERY_MAGIC, (tgt, udp_port))
+                except OSError:
+                    pass
+            while time.time() < deadline:
+                try:
+                    data, addr = sock.recvfrom(4096)
+                    obj = json.loads(data.decode("utf-8"))
+                    if obj.get("service") == "DeckVault" and str(obj.get("hostId", "")) == target_host_id:
+                        cand_ips = [addr[0], *(obj.get("ips") or [])]
+                        for c in cand_ips:
+                            if c and not str(c).startswith("127."):
+                                return str(c)
+                except socket.timeout:
+                    break
+                except Exception:
+                    continue
+    except OSError:
+        return None
+    finally:
+        sock.close()
+    return None
+
+
+class FleetHttpPool:
+    """Thread-safe HTTP/1.1 Keep-Alive connection pool for snappy PC <-> Phone/Laptop proxying."""
+
+    def __init__(self, max_per_host: int = 8) -> None:
+        self._max_per_host = max_per_host
+        self._lock = threading.Lock()
+        self._idle: dict[tuple[str, int], list[http.client.HTTPConnection]] = {}
+
+    def acquire(self, ip: str, port: int, timeout: float = 45.0) -> http.client.HTTPConnection:
+        key = (ip, port)
+        with self._lock:
+            bucket = self._idle.get(key)
+            if bucket:
+                conn = bucket.pop()
+                conn.timeout = timeout
+                return conn
+        conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+        return conn
+
+    def release(self, ip: str, port: int, conn: http.client.HTTPConnection, reusable: bool) -> None:
+        if not reusable:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return
+        key = (ip, port)
+        with self._lock:
+            bucket = self._idle.setdefault(key, [])
+            if len(bucket) < self._max_per_host:
+                bucket.append(conn)
+                return
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 class CompanionRuntime:
     """Shared application state accessed by HTTP handlers and optional GUI."""
 
     def __init__(self) -> None:
         self.config = ServerConfig()
         self.fleet = FleetStore()
+        self.fleet_pool = FleetHttpPool(max_per_host=8)
         self.favorites = FavoritesStore()
         self.desktop_token = secrets.token_urlsafe(32)
         self.cache = MetadataCache(CACHE_DB_PATH)
@@ -3738,8 +3830,10 @@ def make_handler(rt: CompanionRuntime):
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "Only /api/* routes allowed"})
                 return
 
-            target_url = f"http://{host['ip']}:{host['port']}{sub_route}"
-            headers = {"X-DeckVault-Token": host["token"]}
+            headers = {
+                "X-DeckVault-Token": host["token"],
+                "Connection": "keep-alive",
+            }
             rng = self.headers.get("Range")
             if rng:
                 headers["Range"] = rng
@@ -3752,32 +3846,70 @@ def make_handler(rt: CompanionRuntime):
                 clen = int(self.headers.get("Content-Length", "0"))
                 if clen > 0:
                     req_body = self.rfile.read(clen)
+                    headers["Content-Length"] = str(len(req_body))
 
-            req = urllib.request.Request(target_url, data=req_body, headers=headers, method=method)
+            ip = str(host["ip"])
+            port = int(host["port"])
+            timeout_s = 120.0 if ("/api/stream" in sub_route or method == "POST") else 30.0
+
+            def _do_pooled_call(target_ip: str, target_port: int) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+                last_exc: Exception | None = None
+                for attempt in range(2):
+                    conn = rt.fleet_pool.acquire(target_ip, target_port, timeout=timeout_s)
+                    try:
+                        conn.request(method, sub_route, body=req_body, headers=headers)
+                        resp = conn.getresponse()
+                        return conn, resp
+                    except (http.client.HTTPException, OSError) as exc:
+                        last_exc = exc
+                        rt.fleet_pool.release(target_ip, target_port, conn, reusable=False)
+                assert last_exc is not None
+                raise last_exc
+
+            conn: http.client.HTTPConnection | None = None
+            resp: http.client.HTTPResponse | None = None
+            active_ip, active_port = ip, port
             try:
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    self.send_response(resp.status)
-                    for hname in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Cache-Control"):
-                        val = resp.headers.get(hname)
-                        if val is not None:
-                            self.send_header(hname, val)
-                    self.end_headers()
-                    if self.command != "HEAD":
-                        while True:
-                            chunk = resp.read(128 * 1024)
-                            if not chunk:
-                                break
-                            try:
-                                self.wfile.write(chunk)
-                            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                                break
-            except urllib.error.HTTPError as err:
-                raw = err.read()
-                self.send_response(err.code)
-                self.send_header("Content-Type", err.headers.get("Content-Type", "application/json"))
-                self.send_header("Content-Length", str(len(raw)))
+                try:
+                    conn, resp = _do_pooled_call(active_ip, active_port)
+                except OSError:
+                    healed = resolve_host_ip_by_id(host_id)
+                    if healed and healed != active_ip:
+                        rt.fleet.update_ip(host_id, healed)
+                        active_ip = healed
+                        conn, resp = _do_pooled_call(active_ip, active_port)
+                    else:
+                        raise
+
+                self.send_response(resp.status)
+                for hname in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Cache-Control"):
+                    val = resp.getheader(hname)
+                    if val is not None:
+                        self.send_header(hname, val)
                 self.end_headers()
-                self.wfile.write(raw)
+
+                completed_cleanly = True
+                if self.command != "HEAD":
+                    while True:
+                        chunk = resp.read(128 * 1024)
+                        if not chunk:
+                            break
+                        try:
+                            self.wfile.write(chunk)
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                            completed_cleanly = False
+                            break
+                else:
+                    # Drain any empty HEAD response safely
+                    resp.read()
+
+                reusable = completed_cleanly and (not resp.will_close)
+                rt.fleet_pool.release(active_ip, active_port, conn, reusable=reusable)
+                conn = None
+            except Exception as exc:
+                if conn is not None:
+                    rt.fleet_pool.release(active_ip, active_port, conn, reusable=False)
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": f"Peer connection error: {exc}"})
 
         def _handle_fleet_relay(self, body: dict[str, Any]) -> None:
             local_id = rt.config.data["host_id"]

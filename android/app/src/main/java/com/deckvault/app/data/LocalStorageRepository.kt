@@ -84,6 +84,7 @@ class LocalStorageRepository(private val context: Context) {
     private val thumbDir = File(context.cacheDir, "deckvault_local_thumbs").apply { mkdirs() }
     private val storyboardDir = File(context.cacheDir, "deckvault_local_storyboards").apply { mkdirs() }
     private val metaCache = LruCache<String, VideoMeta>(1200)
+    val metaDb = AndroidMetaCache(context)
     private val mmrSemaphore = Semaphore(2)
     private val drivesLock = Any()
 
@@ -132,11 +133,35 @@ class LocalStorageRepository(private val context: Context) {
             data class VolumeCandidate(val canon: String, val file: File, val label: String, val isPrimary: Boolean)
 
             val candidates = linkedMapOf<String, VolumeCandidate>()
+            val primaryDir = Environment.getExternalStorageDirectory()
+            val primaryCanon = runCatching { primaryDir?.canonicalPath }.getOrNull()
+            val primaryDevId = primaryCanon?.let { runCatching { android.system.Os.stat(it).st_dev }.getOrNull() }
+
+            fun isGenuineRemovableExternal(dir: File, canon: String): Boolean {
+                if (canon == primaryCanon) return false
+                val lower = canon.lowercase(Locale.US)
+                if (lower.startsWith("/storage/emulated") ||
+                    lower.startsWith("/storage/self") ||
+                    lower.startsWith("/storage/knox") ||
+                    lower.startsWith("/storage/enc_emulated")
+                ) return false
+                // Require Android OS removable check + distinct block device st_dev so Dual Messenger / Work Profile clones never look like an SD Card
+                val osRemovable = runCatching {
+                    Environment.isExternalStorageRemovable(dir) && !Environment.isExternalStorageEmulated(dir)
+                }.getOrDefault(false)
+                if (!osRemovable) return false
+                if (primaryDevId != null) {
+                    val devId = runCatching { android.system.Os.stat(canon).st_dev }.getOrNull()
+                    if (devId != null && devId == primaryDevId) return false
+                }
+                return true
+            }
 
             fun addCandidate(dir: File?, labelHint: String?, isPrimary: Boolean) {
                 if (dir == null || !dir.exists()) return
                 val canon = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath }
-                if (canon == "/storage" || canon == "/storage/emulated") return
+                if (canon == "/storage" || canon == "/storage/emulated" || canon == "/storage/self") return
+                if (!isPrimary && !isGenuineRemovableExternal(dir, canon)) return
                 val existing = candidates[canon]
                 if (existing == null || (isPrimary && !existing.isPrimary)) {
                     val label = when {
@@ -148,12 +173,14 @@ class LocalStorageRepository(private val context: Context) {
                 }
             }
 
-            // 1. StorageManager.storageVolumes gives authoritative Internal + SD Card + USB labels & roots
+            // 1. StorageManager.storageVolumes gives authoritative Internal + truly removable SD Card / USB drives
             runCatching {
                 val sm = context.getSystemService(StorageManager::class.java)
                 sm?.storageVolumes?.forEach { vol ->
                     val state = vol.state
                     if (state == Environment.MEDIA_MOUNTED || state == Environment.MEDIA_MOUNTED_READ_ONLY) {
+                        // Skip Samsung Dual Messenger / Work Profile / Private Space emulated secondary volumes
+                        if (!vol.isPrimary && (vol.isEmulated || !vol.isRemovable)) return@forEach
                         val volDir: File? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                             vol.directory
                         } else {
@@ -163,8 +190,9 @@ class LocalStorageRepository(private val context: Context) {
                         val desc = runCatching { vol.getDescription(context) }.getOrNull().orEmpty()
                         val label = when {
                             vol.isPrimary -> "Internal Storage"
+                            desc.contains("USB", ignoreCase = true) -> desc
                             desc.isNotBlank() && !desc.equals("External storage", ignoreCase = true) ->
-                                if (desc.contains("SD", true) || desc.contains("USB", true)) desc else "SD Card ($desc)"
+                                if (desc.contains("SD", true)) desc else "SD Card ($desc)"
                             else -> "SD Card (${volDir?.name ?: vol.uuid ?: "External"})"
                         }
                         addCandidate(volDir, label, vol.isPrimary)
@@ -173,18 +201,16 @@ class LocalStorageRepository(private val context: Context) {
             }
 
             // 2. Primary storage fallback
-            addCandidate(Environment.getExternalStorageDirectory(), "Internal Storage", true)
+            addCandidate(primaryDir, "Internal Storage", true)
 
-            // 3. getExternalFilesDirs ancestors (detects external SD & USB roots even on older OEMs)
+            // 3. getExternalFilesDirs ancestors (detects external SD & USB roots even on older OEMs; verified removable)
             context.getExternalFilesDirs(null).filterNotNull().forEach { appDir ->
                 var curDir: File? = appDir
                 while (curDir != null && curDir.parentFile != null) {
                     if (curDir.name.equals("Android", ignoreCase = true)) {
                         val volRoot = curDir.parentFile
                         if (volRoot != null) {
-                            val isPrim = runCatching {
-                                volRoot.canonicalPath == Environment.getExternalStorageDirectory()?.canonicalPath
-                            }.getOrDefault(false)
+                            val isPrim = runCatching { volRoot.canonicalPath == primaryCanon }.getOrDefault(false)
                             addCandidate(volRoot, if (isPrim) "Internal Storage" else "SD Card (${volRoot.name})", isPrim)
                         }
                         break
@@ -193,7 +219,7 @@ class LocalStorageRepository(private val context: Context) {
                 }
             }
 
-            // 4. Direct /storage/<uuid> scan fallback for mounted SD/USB volumes
+            // 4. Direct /storage/<uuid> scan fallback for mounted physical SD/USB volumes
             runCatching {
                 File("/storage").listFiles()?.forEach { entry ->
                     val name = entry.name
@@ -290,7 +316,11 @@ class LocalStorageRepository(private val context: Context) {
 
     fun resolveSafePath(raw: String): File {
         if (raw.isBlank()) throw IllegalArgumentException("Empty path")
-        val target = File(raw).canonicalFile
+        val normalizedRaw = if (raw == "/sdcard" || raw.startsWith("/sdcard/")) {
+            val primary = Environment.getExternalStorageDirectory()?.absolutePath ?: raw
+            raw.replaceFirst("/sdcard", primary)
+        } else raw
+        val target = File(normalizedRaw).canonicalFile
         val targetCanon = target.canonicalPath
         val roots = detectStorageDrives().map { it.path }
         val allowed = roots.any { root ->
@@ -311,8 +341,11 @@ class LocalStorageRepository(private val context: Context) {
             MediaStore.Video.Media.DURATION,
             MediaStore.Video.Media.WIDTH,
             MediaStore.Video.Media.HEIGHT,
+            MediaStore.Video.Media.SIZE,
+            MediaStore.Video.Media.DATE_MODIFIED,
         )
         runCatching {
+            val batch = ArrayList<CachedVideoMetaRow>(128)
             context.contentResolver.query(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
                 cols,
@@ -324,6 +357,8 @@ class LocalStorageRepository(private val context: Context) {
                 val durIdx = c.getColumnIndex(MediaStore.Video.Media.DURATION)
                 val wIdx = c.getColumnIndex(MediaStore.Video.Media.WIDTH)
                 val hIdx = c.getColumnIndex(MediaStore.Video.Media.HEIGHT)
+                val szIdx = c.getColumnIndex(MediaStore.Video.Media.SIZE)
+                val mIdx = c.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED)
                 var count = 0
                 while (c.moveToNext() && count < 1500) {
                     val p = if (dataIdx >= 0) c.getString(dataIdx) else null
@@ -331,16 +366,26 @@ class LocalStorageRepository(private val context: Context) {
                     val dur = if (durIdx >= 0) c.getLong(durIdx) else 0L
                     val w = if (wIdx >= 0) c.getInt(wIdx) else 0
                     val h = if (hIdx >= 0) c.getInt(hIdx) else 0
+                    val sz = if (szIdx >= 0) c.getLong(szIdx) else 0L
+                    val mtime = if (mIdx >= 0) c.getLong(mIdx) * 1000L else 0L
                     if (dur > 0L || w > 0) {
-                        metaCache.put(p, VideoMeta(durationMs = dur, width = w, height = h))
+                        val meta = VideoMeta(durationMs = dur, width = w, height = h)
+                        metaCache.put(p, meta)
+                        batch.add(CachedVideoMetaRow(p, mtime, sz, meta))
                     }
                     count++
                 }
             }
+            if (batch.isNotEmpty()) metaDb.putBatch(batch)
         }
     }
 
-    fun getCachedVideoMeta(rawPath: String): VideoMeta? = metaCache.get(rawPath)
+    fun getCachedVideoMeta(rawPath: String, sizeBytes: Long = -1L): VideoMeta? {
+        metaCache.get(rawPath)?.let { return it }
+        val fromDb = if (sizeBytes >= 0L) metaDb.getByPathAndSize(rawPath, sizeBytes) else metaDb.getByPath(rawPath)
+        if (fromDb != null) metaCache.put(rawPath, fromDb)
+        return fromDb
+    }
 
     suspend fun listDirectory(
         rawPath: String,
@@ -456,7 +501,7 @@ class LocalStorageRepository(private val context: Context) {
                 val mtype = classifyMedia(entry.name)
                 if (mtype == "video" || mtype == "image") mediaCount++
                 if (matchesMediaFilter(mtype, sz, filter)) {
-                    val meta = if (mtype == "video") metaCache.get(canon) ?: metaCache.get(entry.absolutePath) else null
+                    val meta = if (mtype == "video") getCachedVideoMeta(canon, sz) ?: getCachedVideoMeta(entry.absolutePath, sz) else null
                     files.add(
                         FileItem(
                             name = entry.name,
@@ -720,11 +765,21 @@ class LocalStorageRepository(private val context: Context) {
 
     fun probeVideoMeta(rawPath: String): VideoMeta? {
         metaCache.get(rawPath)?.let { return it }
+        val file = if (!isContentUriPath(rawPath)) runCatching { resolveSafePath(rawPath) }.getOrNull() else null
+        val keyPath = file?.canonicalPath ?: rawPath
+        val sz = file?.length() ?: -1L
+        if (sz >= 0L) {
+            metaDb.getByPathAndSize(keyPath, sz)?.let {
+                metaCache.put(rawPath, it)
+                metaCache.put(keyPath, it)
+                return it
+            }
+        }
         return runCatching {
             val mmr = MediaMetadataRetriever()
             try {
-                if (isContentUriPath(rawPath)) mmr.setDataSource(context, Uri.parse(rawPath))
-                else mmr.setDataSource(resolveSafePath(rawPath).canonicalPath)
+                if (file == null) mmr.setDataSource(context, Uri.parse(rawPath))
+                else mmr.setDataSource(keyPath)
                 val dur = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
                 val w = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
                 val h = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
@@ -736,6 +791,8 @@ class LocalStorageRepository(private val context: Context) {
                     bitrate = br,
                 )
                 metaCache.put(rawPath, meta)
+                metaCache.put(keyPath, meta)
+                if (file != null) metaDb.put(keyPath, file.lastModified(), sz, meta)
                 meta
             } finally {
                 runCatching { mmr.release() }

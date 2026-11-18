@@ -30,6 +30,14 @@ class DeckVaultModelsTest {
         assertTrue(local.isLocalDevice)
         assertFalse(pc.isLocalDevice)
         assertEquals("This Device", local.displayName)
+
+        // Verify alternateIps failover + backward-compatible JSON deserialization
+        val legacyJson = """{"hostId":"phone-1","name":"Fold 5","ip":"192.168.1.40","token":"tok"}"""
+        val decoded = json.decodeFromString(SavedHost.serializer(), legacyJson)
+        assertEquals(emptyList<String>(), decoded.alternateIps)
+        val healed = decoded.withPrimaryIp("192.168.1.99", listOf("192.168.1.40", "127.0.0.1"))
+        assertEquals("192.168.1.99", healed.ip)
+        assertEquals(listOf("192.168.1.99", "192.168.1.40"), healed.candidateIps())
     }
 
     @Test

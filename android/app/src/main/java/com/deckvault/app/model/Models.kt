@@ -13,10 +13,26 @@ data class SavedHost(
     val lastKnownFreeBytes: Long = 0L,
     val lastKnownTotalBytes: Long = 0L,
     val os: String = "Windows",
+    val alternateIps: List<String> = emptyList(),
 ) {
     val displayName: String get() = label.ifBlank { name }
     val baseUrl: String get() = "http://$ip:$port"
     val isLocalDevice: Boolean get() = hostId == LOCAL_DEVICE_ID
+
+    fun candidateIps(): List<String> =
+        (listOf(ip) + alternateIps)
+            .filter { it.isNotBlank() && it != "127.0.0.1" }
+            .distinct()
+
+    fun withPrimaryIp(newIp: String, extraIps: List<String> = emptyList()): SavedHost {
+        val merged = (listOf(newIp) + extraIps + listOf(ip) + alternateIps)
+            .filter { it.isNotBlank() && it != "127.0.0.1" }
+            .distinct()
+        return copy(
+            ip = merged.firstOrNull() ?: ip,
+            alternateIps = merged.drop(1),
+        )
+    }
 
     companion object {
         const val LOCAL_DEVICE_ID = "local_android_device"

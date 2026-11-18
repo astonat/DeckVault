@@ -64,6 +64,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.deckvault.app.model.DiscoveredHost
 import com.deckvault.app.model.SavedHost
+import com.deckvault.app.peer.DeckVaultPeerService
 import com.deckvault.app.peer.PeerServiceStatus
 import com.deckvault.app.ui.theme.OledColors
 import com.deckvault.app.ui.util.Formatters
@@ -370,6 +371,18 @@ fun HostsModalDialog(
                                 shape = RoundedCornerShape(50),
                             ) {
                                 Text("Grant All Files Access for Phone/Tablet Browsing")
+                            }
+                        }
+                        if (!DeckVaultPeerService.isIgnoringBatteryOptimizations(context)) {
+                            OutlinedButton(
+                                onClick = {
+                                    runCatching {
+                                        context.startActivity(DeckVaultPeerService.batteryOptimizationIntent(context))
+                                    }
+                                },
+                                shape = RoundedCornerShape(50),
+                            ) {
+                                Text("Keep Wi-Fi Fast (Unrestricted Battery)")
                             }
                         }
                     }

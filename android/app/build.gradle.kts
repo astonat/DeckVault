@@ -12,7 +12,7 @@ android {
         applicationId = "com.deckvault.app"
                 minSdk = 28
         targetSdk = 36
-        versionCode = 8
+        versionCode = 9
         versionName = "1.4.1"
 
         ndk {
