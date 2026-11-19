@@ -179,10 +179,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             rootsCache.clear()
             folderCache.evictAll()
             treeCache.evictAll()
+            localRepo.invalidateFolderStatsCache()
         } else {
             rootsCache.remove(hostId)
             folderCache.snapshot().keys.filter { it.startsWith("$hostId|") }.forEach { folderCache.remove(it) }
             treeCache.snapshot().keys.filter { it.startsWith("$hostId|") }.forEach { treeCache.remove(it) }
+            if (hostId == SavedHost.LOCAL_DEVICE_ID) {
+                localRepo.invalidateFolderStatsCache()
+            }
         }
     }
 
@@ -266,7 +270,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun pairedPcHosts(): List<SavedHost> =
-        preferences.value.hosts.filter { !it.isLocalDevice }
+        preferences.value.hosts.filter { it.isDesktopPcHost }
 
     fun activeHost(): SavedHost =
         preferences.value.hosts.firstOrNull { it.hostId == preferences.value.activeHostId }
@@ -430,7 +434,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun resolveTree(host: SavedHost, path: String, treeSort: String): TreeResponse {
-        if (host.isLocalDevice) return localRepo.getTree(path)
+        if (host.isLocalDevice) return localRepo.getTree(path, sortBySize = treeSort != "name")
         return api.getTree(host, path, treeSort)
     }
 
@@ -484,6 +488,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             resolveRoots(host)
         }.onSuccess { roots ->
             rootsCache[host.hostId] = roots
+            if (!host.isLocalDevice && roots.os.isNotBlank() && !roots.os.equals(host.os, ignoreCase = true)) {
+                prefsRepo.update { cur ->
+                    cur.copy(hosts = cur.hosts.map { if (it.hostId == host.hostId) it.copy(os = roots.os) else it })
+                }
+            }
             if (connectGen != browseGeneration) return
             val overridePath = pendingNavigatePath
             pendingNavigatePath = null
@@ -525,14 +534,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleTreeSort() {
         val host = activeHost()
         val nextSortBySize = !_ui.value.treeSortBySize
-        _ui.update { it.copy(treeSortBySize = nextSortBySize) }
+        val sortKey = if (nextSortBySize) "size" else "name"
+        _ui.update { cur ->
+            val resorted = if (nextSortBySize) {
+                cur.treeFolders.sortedWith(compareByDescending<FolderItem> { it.sizeBytes }.thenBy { it.name.lowercase() })
+            } else {
+                cur.treeFolders.sortedBy { it.name.lowercase() }
+            }
+            cur.copy(treeSortBySize = nextSortBySize, treeFolders = resorted)
+        }
         val path = _ui.value.currentPath
         if (path.isNotBlank()) {
             viewModelScope.launch {
                 runCatching {
-                    resolveTree(host, path, if (nextSortBySize) "size" else "name")
+                    resolveTree(host, path, sortKey)
                 }.onSuccess { tree ->
-                    _ui.update { it.copy(treeFolders = tree.children) }
+                    treeCache.put("${host.hostId}|$path|$sortKey", tree)
+                    _ui.update {
+                        it.copy(
+                            treeFolders = tree.children,
+                            currentFolderSizeBytes = maxOf(it.currentFolderSizeBytes, tree.sizeBytes),
+                        )
+                    }
                 }
             }
         }
@@ -697,7 +720,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val treeResp = treeDef.await()
                 if (treeResp != null) treeCache.put(tKey, treeResp)
                 if (myGen == browseGeneration && treeResp != null) {
-                    _ui.update { it.copy(treeFolders = treeResp.children) }
+                    _ui.update {
+                        it.copy(
+                            treeFolders = treeResp.children,
+                            currentFolderSizeBytes = maxOf(it.currentFolderSizeBytes, treeResp.sizeBytes),
+                        )
+                    }
                 }
             }
         }.onFailure { err ->
@@ -1079,7 +1107,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun submitExportGif(req: GifExportRequest, offloadHost: SavedHost?) {
         val name = File(req.path).name.ifBlank { "Video" }
         val host = activeHost()
-        val isAndroidSource = host.isLocalDevice || host.os.equals("Android", ignoreCase = true)
+        val isAndroidSource = host.isAndroidDevice
         val tgt = if (isAndroidSource) JobExecutionTarget.PC_OFFLOAD else JobExecutionTarget.PC_REMOTE
         val pc = if (isAndroidSource) (offloadHost ?: pairedPcHosts().firstOrNull()) else host
         if (pc == null) {
@@ -1155,7 +1183,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
             )
         }
-        val effectiveTarget = if (target == JobExecutionTarget.PC_REMOTE && (srcHost.isLocalDevice || srcHost.os.equals("Android", ignoreCase = true))) {
+        val effectiveTarget = if (target == JobExecutionTarget.PC_REMOTE && srcHost.isAndroidDevice) {
             JobExecutionTarget.ON_DEVICE
         } else {
             target
@@ -1239,7 +1267,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             File(sourcePath).parent.orEmpty()
         } else ""
 
-        val effectiveTarget = if (target == JobExecutionTarget.PC_REMOTE && (srcHost.isLocalDevice || srcHost.os.equals("Android", ignoreCase = true))) {
+        val effectiveTarget = if (target == JobExecutionTarget.PC_REMOTE && srcHost.isAndroidDevice) {
             JobExecutionTarget.ON_DEVICE
         } else {
             target
@@ -1390,7 +1418,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         remotePaths: List<String> = emptyList(),
         localSpecFallback: LocalTaskSpec? = null,
     ) {
-        if (host.os.equals("Android", ignoreCase = true)) {
+        if (host.isAndroidDevice) {
             runRemotePullAndLocalProcess(jobId, host, jobType, remotePaths, localSpecFallback)
             return
         }
@@ -2299,13 +2327,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _ui.update { it.copy(isRefreshingAllDrives = true) }
             val localName = "${Build.MANUFACTURER} ${Build.MODEL}".trim().ifBlank { "This Device" }
-            val remoteHosts = pairedPcHosts()
+            val remoteHosts = preferences.value.hosts.filter { !it.isLocalDevice }
 
             val remoteSnapshots = coroutineScope {
                 remoteHosts.map { host ->
                     async(Dispatchers.IO) {
                         runCatching { api.getRoots(host) }.fold(
                             onSuccess = { roots ->
+                                if (roots.os.isNotBlank() && !roots.os.equals(host.os, ignoreCase = true)) {
+                                    prefsRepo.update { cur ->
+                                        cur.copy(hosts = cur.hosts.map { if (it.hostId == host.hostId) it.copy(os = roots.os) else it })
+                                    }
+                                }
                                 HostDrivesSnapshot(
                                     host = host,
                                     isLocalDevice = false,

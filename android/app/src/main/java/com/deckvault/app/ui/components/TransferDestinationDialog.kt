@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Laptop
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.TabletAndroid
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -227,7 +228,8 @@ fun TransferDestinationDialog(
                             leadingIcon = {
                                 Icon(
                                     imageVector = when {
-                                        host.isLocalDevice -> Icons.Rounded.PhoneAndroid
+                                        host.isTabletDevice -> Icons.Rounded.TabletAndroid
+                                        host.isAndroidDevice -> Icons.Rounded.PhoneAndroid
                                         isLaptop -> Icons.Rounded.Laptop
                                         else -> Icons.Rounded.Computer
                                     },

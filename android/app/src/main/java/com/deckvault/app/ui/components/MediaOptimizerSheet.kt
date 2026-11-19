@@ -191,6 +191,7 @@ fun MediaOptimizerDialog(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
+                        .weight(1f, fill = false)
                         .verticalScroll(rememberScrollState())
                         .padding(horizontal = 18.dp, vertical = 14.dp),
                 ) {
@@ -379,6 +380,7 @@ fun MediaOptimizerDialog(
                             }
                         }
 
+                        val hasPcEngine = (!isLocalSource && !sourceHostIsAndroid) || pairedPcHosts.isNotEmpty()
                         Text("Enhancement Profile", style = MaterialTheme.typography.labelLarge, color = surfaces.textPrimary)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
                             listOf(
@@ -386,7 +388,7 @@ fun MediaOptimizerDialog(
                                 "anime" to "Anime Smooth (PC)",
                                 "restore" to "Restore Old Video (PC)",
                             ).forEach { (m, lbl) ->
-                                val enabled = !isLocalSource || m == "cas" || pairedPcHosts.isNotEmpty()
+                                val enabled = m == "cas" || hasPcEngine
                                 FilterChip(
                                     selected = upscaleMode == m,
                                     enabled = enabled,
@@ -405,7 +407,7 @@ fun MediaOptimizerDialog(
                                 listOf("off" to "Off", "fast" to "Fast 3D", "hq" to "HQ NLMeans").forEach { (d, lbl) ->
                                     FilterChip(
                                         selected = denoiseMode == d,
-                                        enabled = !isLocalSource || d == "off" || pairedPcHosts.isNotEmpty(),
+                                        enabled = d == "off" || hasPcEngine,
                                         onClick = { denoiseMode = d },
                                         label = { Text(lbl) },
                                     )
@@ -416,7 +418,7 @@ fun MediaOptimizerDialog(
                                 Text("60 FPS Motion Interpolation (PC)", color = surfaces.textPrimary, style = MaterialTheme.typography.bodyMedium)
                                 Switch(
                                     checked = fps60,
-                                    enabled = !isLocalSource || pairedPcHosts.isNotEmpty(),
+                                    enabled = hasPcEngine,
                                     onCheckedChange = { fps60 = it },
                                 )
                             }
@@ -424,7 +426,7 @@ fun MediaOptimizerDialog(
                                 Text("Remove Gradient Banding (PC)", color = surfaces.textPrimary, style = MaterialTheme.typography.bodyMedium)
                                 Switch(
                                     checked = deband,
-                                    enabled = !isLocalSource || pairedPcHosts.isNotEmpty(),
+                                    enabled = hasPcEngine,
                                     onCheckedChange = { deband = it },
                                 )
                             }
@@ -432,7 +434,7 @@ fun MediaOptimizerDialog(
                                 Text("Deshake Video Stabilizer (PC)", color = surfaces.textPrimary, style = MaterialTheme.typography.bodyMedium)
                                 Switch(
                                     checked = stabilize,
-                                    enabled = !isLocalSource || pairedPcHosts.isNotEmpty(),
+                                    enabled = hasPcEngine,
                                     onCheckedChange = { stabilize = it },
                                 )
                             }
@@ -441,9 +443,14 @@ fun MediaOptimizerDialog(
 
                     // Output mode
                     Text("Save Output As", style = MaterialTheme.typography.labelLarge, color = surfaces.textPrimary)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
                         FilterChip(selected = saveMode == "copy", onClick = { saveMode = "copy" }, label = { Text("New Copy (Safe)") })
-                        FilterChip(selected = saveMode == "overwrite", onClick = { saveMode = "overwrite" }, label = { Text("Replace Original (Recycle Old)") })
+                        FilterChip(
+                            selected = saveMode == "overwrite",
+                            enabled = isLocalSource || executionTarget == JobExecutionTarget.PC_REMOTE,
+                            onClick = { saveMode = "overwrite" },
+                            label = { Text("Replace Original") },
+                        )
                     }
                 }
 
@@ -490,7 +497,7 @@ fun MediaOptimizerDialog(
                     ) {
                         Icon(Icons.Rounded.Queue, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Add to Queue")
+                        Text("Queue")
                     }
 
                     Button(
@@ -529,7 +536,7 @@ fun MediaOptimizerDialog(
                     ) {
                         Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Run Now")
+                        Text(if (executionTarget == JobExecutionTarget.ON_DEVICE) "Render Here" else "Render on PC")
                     }
                 }
             }
@@ -584,7 +591,10 @@ fun MergeVideosDialog(
                 }
                 HorizontalDivider(color = surfaces.hairlineBorder)
 
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                ) {
                     clips.forEachIndexed { idx, clip ->
                         Text(
                             "${idx + 1}. ${clip.name} (${Formatters.formatBytes(clip.sizeBytes)})",

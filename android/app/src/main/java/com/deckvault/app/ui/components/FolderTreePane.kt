@@ -30,6 +30,8 @@ import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Laptop
+import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.TabletAndroid
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Storage
@@ -108,10 +110,11 @@ fun FolderTreePane(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                     ) {
                         Icon(
-                            imageVector = if (activeHost?.displayName?.contains("laptop", ignoreCase = true) == true) {
-                                Icons.Rounded.Laptop
-                            } else {
-                                Icons.Rounded.Computer
+                            imageVector = when {
+                                activeHost?.isTabletDevice == true -> Icons.Rounded.TabletAndroid
+                                activeHost?.isAndroidDevice == true -> Icons.Rounded.PhoneAndroid
+                                activeHost?.displayName?.contains("laptop", ignoreCase = true) == true -> Icons.Rounded.Laptop
+                                else -> Icons.Rounded.Computer
                             },
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,

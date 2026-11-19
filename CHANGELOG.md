@@ -2,6 +2,19 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.4.5] - 2026-11-18
+
+### Android Local Folder Sizing & Size Sort, Optimizer Render Button Fix & PC Offload Filtering
+- **Fixed Local & Android-Peer Folders Stuck on `"Indexing..."` and Alphabetical Order (`LocalStorageRepository.kt`, `MainViewModel.kt`, `AndroidPeerServer.kt`)**:
+  - Replaced hardcoded `sizeBytes = -1L` and alphabetical-only sorting in `LocalStorageRepository.getTree` with a fast, bounded, TTL-cached recursive folder stats walker shared by both `listDirectory` and `getTree`.
+  - Populated real folder sizes, file/media counts, `percentOfParent` storage bars, and recursive parent totals, and wired `Size ↓` / `A–Z` tree sorting locally and over `/api/tree`.
+- **Fixed Missing Render Button in Media Optimizer (`MediaOptimizerSheet.kt`)**:
+  - Added `.weight(1f, fill = false)` to the scrollable body of `MediaOptimizerDialog` (and `MergeVideosDialog` clip list) so the sticky bottom action bar (`Queue` + `Render Here` / `Render on PC`) is always pinned and visible on every screen size.
+- **Fixed Paired Android Tablets/Phones Appearing as PC Offload Targets (`Models.kt`, `MainViewModel.kt`, `MainActivity.kt`, `DeckVaultApi.kt`, `MediaBrowserPane.kt`, `FolderTreePane.kt`, `TransferDestinationDialog.kt`)**:
+  - Added `SavedHost.isAndroidDevice`, `isTabletDevice`, and `isDesktopPcHost` helpers and filtered `pairedPcHosts()` strictly to desktop PCs (while keeping all devices visible in All-Drives Dashboard and self-healing `SavedHost.os` from `/api/roots`).
+  - Updated device switcher, rail, folder pane, and transfer dialog icons so Android tablets (e.g. `Samsung SM-X900`) and phones display tablet/phone icons instead of PC icons.
+- *(Desktop Companion `DeckVault.exe` remains untouched on `v1.4.1` and 100% compatible.)*
+
 ## [v1.4.4] - 2026-11-18
 
 ### Android LibVLC Crop & Peek Pixel-Lock Fix, Target Clarity & 404 Render Fallback

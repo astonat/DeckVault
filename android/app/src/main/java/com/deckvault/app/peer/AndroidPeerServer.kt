@@ -411,12 +411,13 @@ class AndroidPeerServer(private val context: Context) {
             "/api/tree" -> {
                 val rawPath = qs["path"].orEmpty()
                 val sort = qs["sort"] ?: "size"
-                val baseTree = runBlocking { localRepo.getTree(rawPath) }
+                val sortBySize = sort != "name"
+                val baseTree = runBlocking { localRepo.getTree(rawPath, sortBySize = sortBySize) }
                 val sorted = baseTree.children
                     .filterNot { it.name == "Android" }
                     .let { list ->
-                        if (sort == "name") list.sortedBy { it.name.lowercase(Locale.US) }
-                        else list.sortedByDescending { it.sizeBytes }
+                        if (sortBySize) list.sortedWith(compareByDescending<FolderItem> { it.sizeBytes }.thenBy { it.name.lowercase(Locale.US) })
+                        else list.sortedBy { it.name.lowercase(Locale.US) }
                     }
                 val resp = baseTree.copy(children = sorted)
                 sendJson(output, 200, json.encodeToString(resp), headOnly, keepAlive)

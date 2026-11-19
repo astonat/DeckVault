@@ -480,7 +480,7 @@ class DeckVaultApi {
     }
 
     fun playableStreamUrlOrNull(host: SavedHost, path: String, startSec: Double = 0.0, cacheBust: Long = 0L): String? =
-        if (host.isLocalDevice || host.os.equals("Android", ignoreCase = true)) null
+        if (host.isAndroidDevice) null
         else playableStreamUrl(host, path, startSec, cacheBust)
 
     fun playableStreamUrl(host: SavedHost, path: String, startSec: Double = 0.0, cacheBust: Long = 0L): String =

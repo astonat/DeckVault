@@ -45,6 +45,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 import kotlin.math.max
 import kotlin.math.min
@@ -83,12 +84,78 @@ class LocalStorageRepository(private val context: Context) {
         }
     }
 
+    private data class CachedFolderStats(
+        val sizeBytes: Long,
+        val fileCount: Int,
+        val mediaCount: Int,
+        val hasSubfolders: Boolean,
+        val computedAtMs: Long,
+    )
+
     private val thumbDir = File(context.cacheDir, "deckvault_local_thumbs").apply { mkdirs() }
     private val storyboardDir = File(context.cacheDir, "deckvault_local_storyboards").apply { mkdirs() }
     private val metaCache = LruCache<String, VideoMeta>(1200)
+    private val folderStatsCache = ConcurrentHashMap<String, CachedFolderStats>()
     val metaDb = AndroidMetaCache(context)
     private val mmrSemaphore = Semaphore(2)
     private val drivesLock = Any()
+
+    fun invalidateFolderStatsCache() {
+        folderStatsCache.clear()
+    }
+
+    private fun computeFolderStats(dir: File, maxDepth: Int = 5, maxEntries: Int = 10_000): CachedFolderStats {
+        val canon = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath }
+        val now = System.currentTimeMillis()
+        folderStatsCache[canon]?.let { cached ->
+            if ((now - cached.computedAtMs) < 45_000L) return cached
+        }
+
+        var totalBytes = 0L
+        var filesCount = 0
+        var mediaCount = 0
+        var hasDirectSubs = false
+        var visited = 0
+
+        val queue = ArrayDeque<Pair<File, Int>>()
+        queue.add(dir to 0)
+        while (queue.isNotEmpty() && visited < maxEntries) {
+            val (cur, depth) = queue.removeFirst()
+            val children = cur.listFiles() ?: continue
+            for (child in children) {
+                if (visited >= maxEntries) break
+                val name = child.name
+                if (name == "." || name == "..") continue
+                if (name.startsWith(".") && name != TRASH_DIR_NAME) continue
+                visited++
+                if (child.isDirectory) {
+                    if (depth == 0) hasDirectSubs = true
+                    if (depth < maxDepth) {
+                        val isRestrictedAndroid = cur.name.equals("Android", ignoreCase = true) &&
+                            (name.equals("data", ignoreCase = true) || name.equals("obb", ignoreCase = true))
+                        if (!isRestrictedAndroid) {
+                            queue.add(child to (depth + 1))
+                        }
+                    }
+                } else if (child.isFile) {
+                    totalBytes += child.length().coerceAtLeast(0L)
+                    filesCount++
+                    val mtype = classifyMedia(name)
+                    if (mtype == "video" || mtype == "image") mediaCount++
+                }
+            }
+        }
+
+        val stats = CachedFolderStats(
+            sizeBytes = totalBytes,
+            fileCount = filesCount,
+            mediaCount = mediaCount,
+            hasSubfolders = hasDirectSubs,
+            computedAtMs = now,
+        )
+        folderStatsCache[canon] = stats
+        return stats
+    }
 
     @Volatile
     private var cachedDrives: List<DriveInfo> = emptyList()
@@ -457,44 +524,24 @@ class LocalStorageRepository(private val context: Context) {
         val files = mutableListOf<FileItem>()
         var totalFileBytes = 0L
         var mediaCount = 0
-        val fastFolderMode = entries.size > 40
+        val dirCount = entries.count { it.isDirectory && !it.name.startsWith(".") }
+        val statDepth = if (dirCount > 50) 2 else 5
+        val statCap = if (dirCount > 50) 1_500 else 10_000
 
         entries.forEach { entry ->
             if (entry.name == "." || entry.name == "..") return@forEach
             if (entry.name.startsWith(".") && entry.name != TRASH_DIR_NAME) return@forEach
             val canon = runCatching { entry.canonicalPath }.getOrElse { entry.absolutePath }
             if (entry.isDirectory) {
-                var immediateBytes = -1L
-                var immediateFiles = -1
-                var hasSubs = true
-                if (!fastFolderMode) {
-                    val children = entry.listFiles()
-                    if (children != null) {
-                        var sum = 0L
-                        var cnt = 0
-                        var subFlag = false
-                        children.forEach { child ->
-                            if (!child.name.startsWith(".")) {
-                                if (child.isDirectory) subFlag = true
-                                else {
-                                    sum += child.length()
-                                    cnt++
-                                }
-                            }
-                        }
-                        immediateBytes = sum
-                        immediateFiles = cnt
-                        hasSubs = subFlag
-                    }
-                }
+                val stats = computeFolderStats(entry, maxDepth = statDepth, maxEntries = statCap)
                 folders.add(
                     FolderItem(
                         name = if (entry.name == TRASH_DIR_NAME) "Recycle Bin (.deckvault_trash)" else entry.name,
                         path = canon,
-                        sizeBytes = immediateBytes,
-                        fileCount = immediateFiles,
-                        mediaCount = -1,
-                        hasSubfolders = hasSubs,
+                        sizeBytes = stats.sizeBytes,
+                        fileCount = stats.fileCount,
+                        mediaCount = stats.mediaCount,
+                        hasSubfolders = stats.hasSubfolders,
                     )
                 )
             } else if (entry.isFile) {
@@ -537,7 +584,7 @@ class LocalStorageRepository(private val context: Context) {
         )
     }
 
-    suspend fun getTree(rawPath: String): TreeResponse = withContext(Dispatchers.IO) {
+    suspend fun getTree(rawPath: String, sortBySize: Boolean = true): TreeResponse = withContext(Dispatchers.IO) {
         if (isVirtualMediaStorePath(rawPath)) {
             return@withContext TreeResponse(path = rawPath, sizeBytes = 0L, children = emptyList())
         }
@@ -552,28 +599,63 @@ class LocalStorageRepository(private val context: Context) {
                     .map { File(safe, it) }
                     .filter { it.exists() && it.isDirectory }
                     .map { sub ->
+                        val st = computeFolderStats(sub)
                         FolderItem(
                             name = sub.name,
                             path = runCatching { sub.canonicalPath }.getOrElse { sub.absolutePath },
-                            sizeBytes = -1L,
-                            hasSubfolders = true,
+                            sizeBytes = st.sizeBytes,
+                            fileCount = st.fileCount,
+                            mediaCount = st.mediaCount,
+                            hasSubfolders = st.hasSubfolders,
                         )
                     }
             } else emptyList()
-            return@withContext TreeResponse(path = safeCanon, sizeBytes = 0L, children = fallbackDirs)
-        }
-        val childrenDirs = entries
-            .filter { it.isDirectory && !it.name.startsWith(".") }
-            .map { dir ->
-                FolderItem(
-                    name = dir.name,
-                    path = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath },
-                    sizeBytes = -1L,
-                    hasSubfolders = true,
-                )
+            val fbTotal = fallbackDirs.sumOf { it.sizeBytes.coerceAtLeast(0L) }
+            val fbWithPct = fallbackDirs.map {
+                it.copy(percentOfParent = if (fbTotal > 0L) (it.sizeBytes * 100.0 / fbTotal) else 0.0)
+            }.let { list ->
+                if (sortBySize) list.sortedWith(compareByDescending<FolderItem> { it.sizeBytes }.thenBy { it.name.lowercase(Locale.US) })
+                else list.sortedBy { it.name.lowercase(Locale.US) }
             }
-            .sortedBy { it.name.lowercase(Locale.US) }
-        TreeResponse(path = safeCanon, sizeBytes = 0L, children = childrenDirs)
+            return@withContext TreeResponse(path = safeCanon, sizeBytes = fbTotal, children = fbWithPct)
+        }
+        var directFileBytes = 0L
+        val subDirs = mutableListOf<File>()
+        entries.forEach { entry ->
+            val name = entry.name
+            if (name == "." || name == "..") return@forEach
+            if (name.startsWith(".") && name != TRASH_DIR_NAME) return@forEach
+            if (entry.isDirectory) {
+                subDirs.add(entry)
+            } else if (entry.isFile) {
+                directFileBytes += entry.length().coerceAtLeast(0L)
+            }
+        }
+        val statDepth = if (subDirs.size > 50) 2 else 5
+        val statCap = if (subDirs.size > 50) 1_500 else 10_000
+        val rawChildren = subDirs.map { dir ->
+            val st = computeFolderStats(dir, maxDepth = statDepth, maxEntries = statCap)
+            FolderItem(
+                name = if (dir.name == TRASH_DIR_NAME) "Recycle Bin (.deckvault_trash)" else dir.name,
+                path = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath },
+                sizeBytes = st.sizeBytes,
+                fileCount = st.fileCount,
+                mediaCount = st.mediaCount,
+                hasSubfolders = st.hasSubfolders,
+            )
+        }
+        val parentTotalBytes = directFileBytes + rawChildren.sumOf { it.sizeBytes.coerceAtLeast(0L) }
+        val childrenWithPct = rawChildren.map { item ->
+            item.copy(
+                percentOfParent = if (parentTotalBytes > 0L) (item.sizeBytes * 100.0 / parentTotalBytes) else 0.0
+            )
+        }
+        val sortedChildren = if (sortBySize) {
+            childrenWithPct.sortedWith(compareByDescending<FolderItem> { it.sizeBytes }.thenBy { it.name.lowercase(Locale.US) })
+        } else {
+            childrenWithPct.sortedBy { it.name.lowercase(Locale.US) }
+        }
+        TreeResponse(path = safeCanon, sizeBytes = parentTotalBytes, children = sortedChildren)
     }
 
     suspend fun findLargest(rootPath: String?, limit: Int = 80): LargestResponse = withContext(Dispatchers.IO) {

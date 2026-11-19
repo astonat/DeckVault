@@ -43,6 +43,7 @@ import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Laptop
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.TabletAndroid
 import androidx.compose.material.icons.rounded.Queue
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Storage
@@ -644,7 +645,7 @@ private fun DeckVaultRoot(
                     api = vm.api,
                     isLocalSource = activeHost.isLocalDevice,
                     sourceHostName = activeHost.displayName,
-                    sourceHostIsAndroid = activeHost.os.equals("Android", ignoreCase = true),
+                    sourceHostIsAndroid = activeHost.isAndroidDevice,
                     pairedPcHosts = vm.pairedPcHosts(),
                     defaultOffloadHost = vm.pairedPcHosts().firstOrNull(),
                     initialResumePositionMs = prefs.videoResumePositionsMs[videoFile.path] ?: 0L,
@@ -824,7 +825,7 @@ private fun DeckVaultRoot(
                     initialTab = ui.optimizerTab,
                     isLocalSource = activeHost?.isLocalDevice == true,
                     sourceHostName = activeHost?.displayName.orEmpty(),
-                    sourceHostIsAndroid = activeHost?.os?.equals("Android", ignoreCase = true) == true,
+                    sourceHostIsAndroid = activeHost?.isAndroidDevice == true,
                     pairedPcHosts = vm.pairedPcHosts(),
                     defaultPcHost = vm.pairedPcHosts().firstOrNull(),
                     estimateFn = { req -> vm.estimateCompression(req) },
@@ -844,7 +845,7 @@ private fun DeckVaultRoot(
                     clips = ui.mergeCandidates,
                     isLocalSource = activeHost?.isLocalDevice == true,
                     sourceHostName = activeHost?.displayName.orEmpty(),
-                    sourceHostIsAndroid = activeHost?.os?.equals("Android", ignoreCase = true) == true,
+                    sourceHostIsAndroid = activeHost?.isAndroidDevice == true,
                     pairedPcHosts = vm.pairedPcHosts(),
                     defaultPcHost = vm.pairedPcHosts().firstOrNull(),
                     onSubmitMerge = { clips, outName, target, offloadHost, runNow ->
@@ -1045,7 +1046,8 @@ private fun ExpressiveSideRail(
                 icon = {
                     Icon(
                         imageVector = when {
-                            host.isLocalDevice -> Icons.Rounded.PhoneAndroid
+                            host.isTabletDevice -> Icons.Rounded.TabletAndroid
+                            host.isAndroidDevice -> Icons.Rounded.PhoneAndroid
                             isLaptop -> Icons.Rounded.Laptop
                             else -> Icons.Rounded.Computer
                         },

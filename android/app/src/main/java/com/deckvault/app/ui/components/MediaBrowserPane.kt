@@ -62,6 +62,7 @@ import androidx.compose.material.icons.rounded.Laptop
 import androidx.compose.material.icons.rounded.Merge
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.TabletAndroid
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Queue
 import androidx.compose.material.icons.rounded.Search
@@ -351,7 +352,8 @@ fun MediaBrowserPane(
                                 ) {
                                     Icon(
                                         imageVector = when {
-                                            sh.isLocalDevice -> Icons.Rounded.PhoneAndroid
+                                            sh.isTabletDevice -> Icons.Rounded.TabletAndroid
+                                            sh.isAndroidDevice -> Icons.Rounded.PhoneAndroid
                                             isLap -> Icons.Rounded.Laptop
                                             else -> Icons.Rounded.Computer
                                         },

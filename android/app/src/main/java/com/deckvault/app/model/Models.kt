@@ -19,6 +19,27 @@ data class SavedHost(
     val baseUrl: String get() = "http://$ip:$port"
     val isLocalDevice: Boolean get() = hostId == LOCAL_DEVICE_ID
 
+    val isAndroidDevice: Boolean
+        get() = isLocalDevice ||
+            os.contains("android", ignoreCase = true) ||
+            isLikelyAndroidName(name) ||
+            isLikelyAndroidName(label)
+
+    val isTabletDevice: Boolean
+        get() = isAndroidDevice && (
+            displayName.contains("sm-x", ignoreCase = true) ||
+                displayName.contains("sm-t", ignoreCase = true) ||
+                displayName.contains("tab", ignoreCase = true) ||
+                displayName.contains("pad", ignoreCase = true) ||
+                name.contains("sm-x", ignoreCase = true) ||
+                name.contains("sm-t", ignoreCase = true) ||
+                name.contains("tab", ignoreCase = true) ||
+                name.contains("pad", ignoreCase = true)
+            )
+
+    val isDesktopPcHost: Boolean
+        get() = !isAndroidDevice
+
     fun candidateIps(): List<String> =
         (listOf(ip) + alternateIps)
             .filter { it.isNotBlank() && it != "127.0.0.1" }
@@ -36,6 +57,21 @@ data class SavedHost(
 
     companion object {
         const val LOCAL_DEVICE_ID = "local_android_device"
+
+        private fun isLikelyAndroidName(raw: String): Boolean {
+            if (raw.isBlank()) return false
+            val s = raw.lowercase()
+            return s.contains("sm-") ||
+                s.contains("galaxy") ||
+                s.contains("pixel ") ||
+                s.contains("oneplus") ||
+                s.contains("redmi") ||
+                s.contains("poco ") ||
+                s.contains("android") ||
+                s.contains("tablet") ||
+                s.contains("fold") ||
+                s.contains("phone")
+        }
 
         fun localDevice(freeBytes: Long = 0L, totalBytes: Long = 0L): SavedHost = SavedHost(
             hostId = LOCAL_DEVICE_ID,

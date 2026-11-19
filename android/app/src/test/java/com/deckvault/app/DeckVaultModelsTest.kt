@@ -118,4 +118,34 @@ class DeckVaultModelsTest {
         assertEquals(125400L, sbDec.durationMs)
         assertEquals(0, sbDec.width)
     }
+
+    @Test
+    fun pcOffloadClassificationExcludesAndroidTabletsAndPhones() {
+        val local = SavedHost.localDevice()
+        val tabletAndroidOs = SavedHost(hostId = "t1", name = "Samsung SM-X900", ip = "192.168.1.20", token = "t", os = "Android 15")
+        val tabletLegacyOs = SavedHost(hostId = "t2", name = "Samsung SM-X900", ip = "192.168.1.21", token = "t", os = "Windows")
+        val phonePeer = SavedHost(hostId = "p1", name = "Galaxy Z Fold5", ip = "192.168.1.22", token = "t", os = "Android")
+        val laptop = SavedHost(hostId = "pc1", name = "LAPTOP-HPO4UOFN", ip = "192.168.1.30", token = "t", os = "Windows")
+        val desktop = SavedHost(hostId = "pc2", name = "DESKTOP-MAIN", ip = "192.168.1.31", token = "t", os = "Windows")
+
+        assertTrue(local.isAndroidDevice)
+        assertFalse(local.isDesktopPcHost)
+
+        assertTrue(tabletAndroidOs.isAndroidDevice)
+        assertTrue(tabletAndroidOs.isTabletDevice)
+        assertFalse(tabletAndroidOs.isDesktopPcHost)
+
+        assertTrue(tabletLegacyOs.isAndroidDevice)
+        assertTrue(tabletLegacyOs.isTabletDevice)
+        assertFalse(tabletLegacyOs.isDesktopPcHost)
+
+        assertTrue(phonePeer.isAndroidDevice)
+        assertFalse(phonePeer.isTabletDevice)
+        assertFalse(phonePeer.isDesktopPcHost)
+
+        assertFalse(laptop.isAndroidDevice)
+        assertTrue(laptop.isDesktopPcHost)
+        assertFalse(desktop.isAndroidDevice)
+        assertTrue(desktop.isDesktopPcHost)
+    }
 }
