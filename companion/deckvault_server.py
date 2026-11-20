@@ -37,10 +37,12 @@ from urllib.parse import parse_qs, quote as url_quote, urlparse
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
 from desktop_ui import DESKTOP_APP_HTML
 
 
-APP_VERSION = "1.4.7"
+APP_VERSION = "1.4.8"
+GITHUB_REPO = "astonat/DeckVault"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
 DISCOVERY_MAGIC = b"DECKVAULT_DISCOVER_V1"
@@ -2885,6 +2887,15 @@ class CompanionRuntime:
         self.active_clients: dict[str, float] = {}
         self._clients_lock = threading.Lock()
         self.events: queue.Queue[str] = queue.Queue(maxsize=200)
+        self.update_lock = threading.Lock()
+        self.update_cache: tuple[float, dict[str, Any]] | None = None
+        self.update_status: dict[str, Any] = {
+            "state": "idle",
+            "progressPct": 0.0,
+            "message": "",
+            "targetVersion": "",
+            "error": "",
+        }
 
     def exec_local_media_op(
         self,
@@ -3192,6 +3203,232 @@ class CompanionRuntime:
         print(line, flush=True)
 
 
+def _parse_version_tuple(raw: str) -> tuple[int, ...]:
+    nums = [int(x) for x in re.findall(r"\d+", str(raw or ""))]
+    return tuple(nums) if nums else (0,)
+
+
+def _check_latest_pc_release(rt: CompanionRuntime, force: bool = False) -> dict[str, Any]:
+    now = time.monotonic()
+    with rt.update_lock:
+        if not force and rt.update_cache is not None and (now - rt.update_cache[0]) < 120.0:
+            return dict(rt.update_cache[1])
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=15"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"DeckVault/{APP_VERSION}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        releases = json.loads(resp.read().decode("utf-8"))
+
+    pc_rel = None
+    pc_asset = None
+    apk_rel = None
+    apk_asset = None
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        assets = rel.get("assets") or []
+        if pc_asset is None:
+            for a in assets:
+                if a.get("name") == "DeckVault-app.zip":
+                    pc_rel = rel
+                    pc_asset = a
+                    break
+        if apk_asset is None:
+            for a in assets:
+                if str(a.get("name", "")).lower().endswith(".apk"):
+                    apk_rel = rel
+                    apk_asset = a
+                    break
+        if pc_asset is not None and apk_asset is not None:
+            break
+
+    latest_tag = str((pc_rel or {}).get("tag_name") or f"v{APP_VERSION}")
+    latest_ver = latest_tag.lstrip("vV")
+    update_available = _parse_version_tuple(latest_ver) > _parse_version_tuple(APP_VERSION)
+    is_frozen = bool(getattr(sys, "frozen", False))
+    install_dir = (
+        os.path.dirname(os.path.abspath(sys.executable))
+        if is_frozen
+        else str(Path(__file__).resolve().parent.parent / "app")
+    )
+    info = {
+        "ok": True,
+        "currentVersion": APP_VERSION,
+        "latestVersion": latest_ver,
+        "latestTag": latest_tag,
+        "updateAvailable": bool(update_available and pc_asset is not None),
+        "downloadUrl": str((pc_asset or {}).get("browser_download_url", "")),
+        "assetSize": int((pc_asset or {}).get("size", 0) or 0),
+        "releaseNotes": str((pc_rel or {}).get("body", ""))[:1200],
+        "releasePage": str((pc_rel or {}).get("html_url", f"https://github.com/{GITHUB_REPO}/releases")),
+        "latestApkVersion": str((apk_rel or {}).get("tag_name", "")).lstrip("vV"),
+        "latestApkUrl": str((apk_asset or {}).get("browser_download_url", "")),
+        "packagedExe": is_frozen,
+        "installDir": install_dir,
+        "repoUrl": f"https://github.com/{GITHUB_REPO}",
+    }
+    with rt.update_lock:
+        rt.update_cache = (now, dict(info))
+    return info
+
+
+def _find_extracted_app_dir(extract_root: Path) -> Path | None:
+    if (extract_root / "DeckVault.exe").is_file():
+        return extract_root
+    if (extract_root / "app" / "DeckVault.exe").is_file():
+        return extract_root / "app"
+    for p in extract_root.rglob("DeckVault.exe"):
+        return p.parent
+    return None
+
+
+def _start_pc_self_update(rt: CompanionRuntime) -> dict[str, Any]:
+    with rt.update_lock:
+        cur_state = rt.update_status.get("state", "idle")
+        if cur_state in ("downloading", "extracting", "restarting"):
+            return {"ok": True, "alreadyRunning": True, "status": dict(rt.update_status)}
+        rt.update_status = {
+            "state": "downloading",
+            "progressPct": 1.0,
+            "message": "Checking GitHub release...",
+            "targetVersion": "",
+            "error": "",
+        }
+
+    def _worker() -> None:
+        import tempfile
+        work_dir = Path(tempfile.gettempdir()) / f"deckvault_selfupdate_{os.getpid()}_{int(time.time())}"
+        try:
+            info = _check_latest_pc_release(rt, force=True)
+            dl_url = info.get("downloadUrl", "")
+            if not dl_url:
+                raise RuntimeError("No DeckVault-app.zip release asset found on GitHub.")
+            target_ver = str(info.get("latestVersion") or "")
+            expected_bytes = max(1, int(info.get("assetSize") or 0))
+
+            work_dir.mkdir(parents=True, exist_ok=True)
+            zip_path = work_dir / "DeckVault-app.zip"
+            extract_dir = work_dir / "extracted"
+
+            with rt.update_lock:
+                rt.update_status.update({
+                    "state": "downloading",
+                    "progressPct": 3.0,
+                    "targetVersion": target_ver,
+                    "message": f"Downloading v{target_ver}...",
+                })
+
+            req = urllib.request.Request(dl_url, headers={"User-Agent": f"DeckVault/{APP_VERSION}"})
+            downloaded = 0
+            with urllib.request.urlopen(req, timeout=180) as resp, open(zip_path, "wb") as out_f:
+                hdr_len = int(resp.headers.get("Content-Length") or expected_bytes or 0)
+                total = max(1, hdr_len)
+                while True:
+                    chunk = resp.read(128 * 1024)
+                    if not chunk:
+                        break
+                    out_f.write(chunk)
+                    downloaded += len(chunk)
+                    frac = min(1.0, downloaded / total)
+                    pct = 3.0 + frac * 72.0
+                    mb_done = downloaded / (1024 * 1024)
+                    mb_tot = total / (1024 * 1024)
+                    with rt.update_lock:
+                        rt.update_status.update({
+                            "progressPct": round(pct, 1),
+                            "message": f"Downloading v{target_ver} ({mb_done:.1f} / {mb_tot:.1f} MB)...",
+                        })
+
+            with rt.update_lock:
+                rt.update_status.update({
+                    "state": "extracting",
+                    "progressPct": 78.0,
+                    "message": "Extracting update package...",
+                })
+
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(extract_dir)
+
+            src_app_dir = _find_extracted_app_dir(extract_dir)
+            if src_app_dir is None or not (src_app_dir / "DeckVault.exe").is_file():
+                raise RuntimeError("Downloaded archive did not contain DeckVault.exe")
+
+            is_frozen = bool(getattr(sys, "frozen", False))
+            if is_frozen:
+                target_app_dir = Path(sys.executable).resolve().parent
+                relaunch_cmd = f'start "" "{target_app_dir / "DeckVault.exe"}" --app'
+            else:
+                repo_root = Path(__file__).resolve().parent.parent
+                target_app_dir = repo_root / "app"
+                comp_dir = Path(__file__).resolve().parent
+                internal_dir = src_app_dir / "_internal"
+                for py_name in ("deckvault_server.py", "desktop_ui.py"):
+                    cand = internal_dir / py_name
+                    if cand.is_file():
+                        shutil.copy2(cand, comp_dir / py_name)
+                if (target_app_dir / "DeckVault.exe").is_file():
+                    relaunch_cmd = f'start "" "{target_app_dir / "DeckVault.exe"}" --app'
+                else:
+                    relaunch_cmd = f'start "" "{sys.executable}" "{Path(__file__).resolve()}" --app'
+
+            target_app_dir.mkdir(parents=True, exist_ok=True)
+            bat_path = work_dir / "apply_update.bat"
+            bat_text = (
+                "@echo off\r\n"
+                "timeout /t 2 /nobreak >nul\r\n"
+                "taskkill /F /IM DeckVault.exe /T >nul 2>&1\r\n"
+                "timeout /t 1 /nobreak >nul\r\n"
+                f'robocopy "{src_app_dir}" "{target_app_dir}" /E /R:6 /W:1 /NFL /NDL /NJH /NJS /NC /NS >nul\r\n'
+                "if %ERRORLEVEL% GEQ 8 exit /b 1\r\n"
+                f"{relaunch_cmd}\r\n"
+                "timeout /t 2 /nobreak >nul\r\n"
+                f'rmdir /S /Q "{work_dir}" >nul 2>&1\r\n'
+            )
+            bat_path.write_text(bat_text, encoding="utf-8")
+
+            with rt.update_lock:
+                rt.update_status = {
+                    "state": "restarting",
+                    "progressPct": 100.0,
+                    "targetVersion": target_ver,
+                    "message": f"Installing v{target_ver} & restarting DeckVault...",
+                    "error": "",
+                }
+            rt.log(f"Self-updating DeckVault to v{target_ver} in {target_app_dir}...")
+            time.sleep(0.95)
+
+            det_flags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+            subprocess.Popen(["cmd.exe", "/c", str(bat_path)], creationflags=det_flags, close_fds=True)
+            time.sleep(0.25)
+            _kill_all_deckvault_processes(os.getpid())
+            os._exit(0)
+        except Exception as exc:
+            rt.log(f"PC self-update error: {exc}")
+            with rt.update_lock:
+                rt.update_status = {
+                    "state": "error",
+                    "progressPct": 0.0,
+                    "targetVersion": "",
+                    "message": f"Update failed: {exc}",
+                    "error": str(exc),
+                }
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    threading.Thread(target=_worker, daemon=True, name="DeckVaultSelfUpdate").start()
+    return {"ok": True, "started": True}
+
+
 def make_handler(rt: CompanionRuntime):
     """Create the HTTP/1.1 request handler bound to CompanionRuntime."""
 
@@ -3422,6 +3659,16 @@ def make_handler(rt: CompanionRuntime):
                     self._send_json(HTTPStatus.OK, {"cloudProviders": detect_cloud_storage_providers(rt.config.data)})
                 elif route == "/api/jobs":
                     self._send_json(HTTPStatus.OK, rt.jobs.snapshot())
+                elif route == "/api/desktop/update/check":
+                    if not self._is_loopback():
+                        raise PermissionError("Localhost only")
+                    force = (qs.get("force") or ["0"])[0] == "1"
+                    self._send_json(HTTPStatus.OK, _check_latest_pc_release(rt, force=force))
+                elif route == "/api/desktop/update/status":
+                    if not self._is_loopback():
+                        raise PermissionError("Localhost only")
+                    with rt.update_lock:
+                        self._send_json(HTTPStatus.OK, dict(rt.update_status))
                 elif route == "/api/stream/playable":
                     raw_path = (qs.get("path") or [""])[0]
                     start_s = float((qs.get("start") or ["0"])[0] or "0")
@@ -3647,6 +3894,10 @@ def make_handler(rt: CompanionRuntime):
                         raise PermissionError("Localhost only")
                     ok_fw, msg_fw = add_windows_firewall_rule(int(rt.config.data["http_port"]), int(rt.config.data["udp_port"]))
                     self._send_json(HTTPStatus.OK, {"ok": ok_fw, "message": msg_fw})
+                elif route == "/api/desktop/update/apply":
+                    if not self._is_loopback():
+                        raise PermissionError("Localhost only")
+                    self._send_json(HTTPStatus.OK, _start_pc_self_update(rt))
                 elif route == "/api/file/rename":
                     safe = rt.config.resolve_safe_path(str(body.get("path", "")))
                     new_name = os.path.basename(str(body.get("newName", "")).strip())

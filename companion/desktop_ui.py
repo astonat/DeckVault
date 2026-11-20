@@ -307,6 +307,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       <span class="brand-name">DeckVault</span>
       <span class="title-pill" id="titleStatusPill">Connecting...</span>
     </div>
+    <button class="mini-btn" id="titleUpdateBtn" style="display:none;border-color:var(--primary);color:var(--primary)" onclick="openSettingsModal()" title="PC Companion update available">Update</button>
     <button class="mini-btn" onclick="openAllDrives()" title="All Drives & Devices">All Drives</button>
     <button class="mini-btn" onclick="openDevicesModal()" title="Pair Devices">Pair</button>
     <button class="mini-btn" onclick="openSettingsModal()" title="Settings">Settings</button>
@@ -1528,6 +1529,7 @@ async function initApp(){
       renderFavoritesStrip();
       applyJobsSnapshot(d.jobs || {jobs:[]});
       await selectHost(state.hosts[0].hostId);
+      setTimeout(() => checkPcUpdate(false, true), 2500);
       return;
     }
   }catch{}
@@ -3640,9 +3642,23 @@ function openSettingsModal(){
       </div>
     </div>
     <div class="section-card">
-      <strong style="font-size:13px">This PC Companion Server &amp; Paired Devices</strong>
-      <div style="font-size:12px;color:var(--muted)">Wi-Fi IPs: <b>${state.localIps.join(", ")||ip}</b> : 48720<br/>Pairing PIN: <b style="color:var(--primary)">${state.localPin}</b><br/>Browser / iPhone URL: <b>http://${ip}:48720/</b><br/>Android APK URL: <b>http://${ip}:48720/DeckVault.apk</b></div>
+      <strong style="font-size:13px">This PC Companion Server &amp; 1-Click Auto-Update</strong>
+      <div id="pcUpdateBox" style="font-size:12px;color:var(--muted);line-height:1.5">
+        Running Companion <b>v${escHtml(state.updateInfo?.currentVersion || state.serverVersion || "1.4.8")}</b>
+        ${state.updateInfo ? (state.updateInfo.updateAvailable
+          ? ` &bull; <b style="color:var(--success)">v${escHtml(state.updateInfo.latestVersion)} available (${fmt(state.updateInfo.assetSize)})</b>`
+          : ` &bull; <span style="color:var(--success)">Up to date (latest: v${escHtml(state.updateInfo.latestVersion)})</span>`) : ""}
+        <br/>Wi-Fi IPs: <b>${state.localIps.join(", ")||ip}</b> : 48720
+        <br/>Pairing PIN: <b style="color:var(--primary)">${state.localPin}</b>
+        <br/>Browser / iPhone URL: <b>http://${ip}:48720/</b> &bull; APK URL: <b>http://${ip}:48720/DeckVault.apk</b>
+      </div>
+      <div id="pcUpdateProgressWrap" style="display:none;flex-direction:column;gap:4px">
+        <div style="display:flex;justify-content:space-between;font-size:11px"><span id="pcUpdateProgMsg" style="color:var(--primary)">Updating...</span><b id="pcUpdateProgPct">0%</b></div>
+        <div class="bar"><div id="pcUpdateProgBar" style="width:0%"></div></div>
+      </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="pill-btn" onclick="checkPcUpdate(true, false)">Check for Updates</button>
+        ${state.updateInfo?.downloadUrl ? `<button class="pill-btn primary" id="pcUpdateApplyBtn" onclick="applyPcUpdate()">${state.updateInfo.updateAvailable ? `1-Click Update to v${escHtml(state.updateInfo.latestVersion)} &amp; Restart` : "Reinstall Latest Release"}</button>` : ""}
         <button class="pill-btn" onclick="rotatePcPin()">Generate New PIN</button>
         <button class="pill-btn" onclick="rescanActive()">Rescan Disks</button>
         <button class="pill-btn" onclick="ensureFirewall()">Allow Firewall Port</button>
@@ -3651,6 +3667,85 @@ function openSettingsModal(){
     </div>
   `;
   document.getElementById("settingsModal").classList.add("open");
+}
+
+let _pcUpdatePoll = null;
+async function checkPcUpdate(force=false, silent=false){
+  try{
+    const info = await sysFetch("/api/desktop/update/check" + (force ? "?force=1" : ""), { silent });
+    state.updateInfo = info;
+    state.serverVersion = info.currentVersion || state.serverVersion;
+    const badge = document.getElementById("titleUpdateBtn");
+    if(badge){
+      if(info.updateAvailable){
+        badge.style.display = "inline-flex";
+        badge.textContent = "Update v" + info.latestVersion;
+      }else{
+        badge.style.display = "none";
+      }
+    }
+    if(document.getElementById("settingsModal")?.classList.contains("open")) openSettingsModal();
+    if(!silent){
+      showToast(info.updateAvailable ? `Update v${info.latestVersion} available!` : `You're on the latest version (v${info.currentVersion})`);
+    }
+  }catch(e){
+    if(!silent) showToast("Update check failed: " + e.message);
+  }
+}
+
+async function applyPcUpdate(){
+  const btn = document.getElementById("pcUpdateApplyBtn");
+  if(btn){ btn.disabled = true; btn.textContent = "Starting Update..."; }
+  const wrap = document.getElementById("pcUpdateProgressWrap");
+  if(wrap) wrap.style.display = "flex";
+  try{
+    await sysFetch("/api/desktop/update/apply", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:"{}", silent:true
+    });
+    if(_pcUpdatePoll) clearInterval(_pcUpdatePoll);
+    _pcUpdatePoll = setInterval(async ()=>{
+      try{
+        const st = await sysFetch("/api/desktop/update/status", { silent:true });
+        const msgEl = document.getElementById("pcUpdateProgMsg");
+        const pctEl = document.getElementById("pcUpdateProgPct");
+        const barEl = document.getElementById("pcUpdateProgBar");
+        const pct = Math.max(0, Math.min(100, Number(st.progressPct || 0)));
+        if(msgEl) msgEl.textContent = st.message || "Updating...";
+        if(pctEl) pctEl.textContent = Math.round(pct) + "%";
+        if(barEl) barEl.style.width = pct.toFixed(1) + "%";
+        if(st.state === "error"){
+          clearInterval(_pcUpdatePoll); _pcUpdatePoll = null;
+          showToast(st.message || "Update failed");
+          if(btn){ btn.disabled = false; btn.textContent = "Retry Update"; }
+        }else if(st.state === "restarting"){
+          clearInterval(_pcUpdatePoll); _pcUpdatePoll = null;
+          showToast("Restarting DeckVault Companion...");
+          waitForReconnectAndReload();
+        }
+      }catch{
+        clearInterval(_pcUpdatePoll); _pcUpdatePoll = null;
+        waitForReconnectAndReload();
+      }
+    }, 350);
+  }catch(e){
+    showToast("Could not start update: " + e.message);
+    if(btn){ btn.disabled = false; btn.textContent = "Retry Update"; }
+  }
+}
+
+function waitForReconnectAndReload(){
+  let tries = 0;
+  const t = setInterval(async ()=>{
+    tries++;
+    try{
+      const r = await fetch("/api/ping", { cache:"no-store" });
+      if(r.ok && tries >= 3){
+        clearInterval(t);
+        location.reload();
+      }
+    }catch{}
+    if(tries > 45) clearInterval(t);
+  }, 600);
 }
 
 async function rotatePcPin(){ const r=await sysFetch("/api/desktop/pin/new",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"}); state.localPin=r.pin; showToast("New PC PIN: "+r.pin); openSettingsModal(); updateFooter(document.getElementById("footerLeft").textContent); }

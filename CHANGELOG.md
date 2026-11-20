@@ -2,6 +2,14 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.4.8] - 2026-11-20
+
+### Windows Desktop Companion: 1-Click Auto-Updater from GitHub Releases
+- **1-Click Self-Updater (`companion/deckvault_server.py`, `companion/desktop_ui.py`)**:
+  - Added `GET /api/desktop/update/check`, `GET /api/desktop/update/status`, and `POST /api/desktop/update/apply` (localhost-restricted) to check GitHub Releases for the newest `DeckVault-app.zip`, stream download with live progress, extract safely, replace the installed `app\` files cleanly via detached `robocopy` after exiting locks, and relaunch `DeckVault.exe --app` automatically.
+  - Added silent startup update check + titlebar `Update` pill when a newer version is published, plus live progress bar and auto-reload in **Settings**.
+- *(Android APK remains on `v1.4.6`.)*
+
 ## [v1.4.7] - 2026-11-20
 
 ### Windows Desktop Companion: Full Android Material 3 Themes, OLED Surface Modes & Expanded Settings
