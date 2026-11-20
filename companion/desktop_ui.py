@@ -307,7 +307,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
       <span class="brand-name">DeckVault</span>
       <span class="title-pill" id="titleStatusPill">Connecting...</span>
     </div>
-    <button class="mini-btn" id="titleUpdateBtn" style="display:none;border-color:var(--primary);color:var(--primary)" onclick="openSettingsModal()" title="PC Companion update available">Update</button>
+    <button class="mini-btn" id="titleUpdateBtn" onclick="openUpdatesModal()" title="Check GitHub Updates &amp; Changelog">Updates</button>
     <button class="mini-btn" onclick="openAllDrives()" title="All Drives & Devices">All Drives</button>
     <button class="mini-btn" onclick="openDevicesModal()" title="Pair Devices">Pair</button>
     <button class="mini-btn" onclick="openSettingsModal()" title="Settings">Settings</button>
@@ -835,6 +835,20 @@ DESKTOP_APP_HTML = r"""<!doctype html>
   </div>
 </div>
 
+<!-- Updates & Full GitHub Changelog Modal -->
+<div class="dialog-bg" id="updatesModal">
+  <div class="dialog" style="max-width:780px">
+    <div class="dialog-hdr">
+      <strong>DeckVault Updates &amp; Changelog</strong>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="pill-btn" onclick="checkPcUpdate(true, false)">Check GitHub</button>
+        <button class="pill-btn" onclick="closeDialog('updatesModal')">Close</button>
+      </div>
+    </div>
+    <div class="dialog-body" id="updatesBody"></div>
+  </div>
+</div>
+
 <!-- LAN Browser Login Modal -->
 <div class="dialog-bg" id="lanLoginModal">
   <div class="dialog" style="max-width:390px">
@@ -1031,6 +1045,7 @@ const DEFAULT_PREFS = {
   defaultTrimMode: "lossless",
   defaultCrf: 22,
   recycleDefault: true,
+  autoCheckUpdates: true,
   folderWidthPx: 300,
   inspectorWidthPx: 280,
 };
@@ -1529,7 +1544,7 @@ async function initApp(){
       renderFavoritesStrip();
       applyJobsSnapshot(d.jobs || {jobs:[]});
       await selectHost(state.hosts[0].hostId);
-      setTimeout(() => checkPcUpdate(false, true), 2500);
+      if(prefs.autoCheckUpdates !== false) setTimeout(() => checkPcUpdate(false, true), 2500);
       return;
     }
   }catch{}
@@ -3644,7 +3659,7 @@ function openSettingsModal(){
     <div class="section-card">
       <strong style="font-size:13px">This PC Companion Server &amp; 1-Click Auto-Update</strong>
       <div id="pcUpdateBox" style="font-size:12px;color:var(--muted);line-height:1.5">
-        Running Companion <b>v${escHtml(state.updateInfo?.currentVersion || state.serverVersion || "1.4.8")}</b>
+        Running Companion <b>v${escHtml(state.updateInfo?.currentVersion || state.serverVersion || "1.4.9")}</b>
         ${state.updateInfo ? (state.updateInfo.updateAvailable
           ? ` &bull; <b style="color:var(--success)">v${escHtml(state.updateInfo.latestVersion)} available (${fmt(state.updateInfo.assetSize)})</b>`
           : ` &bull; <span style="color:var(--success)">Up to date (latest: v${escHtml(state.updateInfo.latestVersion)})</span>`) : ""}
@@ -3652,13 +3667,9 @@ function openSettingsModal(){
         <br/>Pairing PIN: <b style="color:var(--primary)">${state.localPin}</b>
         <br/>Browser / iPhone URL: <b>http://${ip}:48720/</b> &bull; APK URL: <b>http://${ip}:48720/DeckVault.apk</b>
       </div>
-      <div id="pcUpdateProgressWrap" style="display:none;flex-direction:column;gap:4px">
-        <div style="display:flex;justify-content:space-between;font-size:11px"><span id="pcUpdateProgMsg" style="color:var(--primary)">Updating...</span><b id="pcUpdateProgPct">0%</b></div>
-        <div class="bar"><div id="pcUpdateProgBar" style="width:0%"></div></div>
-      </div>
+      <label style="display:flex;justify-content:space-between;font-size:12px"><span>Auto-check GitHub for updates on startup</span><input type="checkbox" ${prefs.autoCheckUpdates!==false?"checked":""} onchange="setPref('autoCheckUpdates',this.checked)"/></label>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="pill-btn" onclick="checkPcUpdate(true, false)">Check for Updates</button>
-        ${state.updateInfo?.downloadUrl ? `<button class="pill-btn primary" id="pcUpdateApplyBtn" onclick="applyPcUpdate()">${state.updateInfo.updateAvailable ? `1-Click Update to v${escHtml(state.updateInfo.latestVersion)} &amp; Restart` : "Reinstall Latest Release"}</button>` : ""}
+        <button class="pill-btn primary" onclick="closeDialog('settingsModal');openUpdatesModal()">Updates &amp; Changelog</button>
         <button class="pill-btn" onclick="rotatePcPin()">Generate New PIN</button>
         <button class="pill-btn" onclick="rescanActive()">Rescan Disks</button>
         <button class="pill-btn" onclick="ensureFirewall()">Allow Firewall Port</button>
@@ -3667,6 +3678,123 @@ function openSettingsModal(){
     </div>
   `;
   document.getElementById("settingsModal").classList.add("open");
+}
+
+function renderChangelogMarkdown(md){
+  const lines = String(md || "").split(/\r?\n/);
+  const out = [];
+  const fmtInline = (s) => escHtml(s)
+    .replace(/`([^`]+)`/g, '<code style="background:var(--elev);border:1px solid var(--border);border-radius:5px;padding:1px 5px;font-size:11px">$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong style="color:var(--text)">$1</strong>');
+  for(const raw of lines){
+    const line = raw.trimEnd();
+    const tr = line.trim();
+    if(!tr) continue;
+    if(tr.startsWith("# ")) continue;
+    if(tr.startsWith("## ")){
+      out.push(`<div style="margin-top:12px;padding:6px 10px;border-radius:9px;background:var(--primary-container);color:var(--on-primary-container,var(--primary));font-weight:800;font-size:12px">${fmtInline(tr.slice(3))}</div>`);
+    }else if(tr.startsWith("### ")){
+      out.push(`<div style="margin-top:8px;font-weight:700;font-size:12px;color:var(--primary)">${fmtInline(tr.slice(4))}</div>`);
+    }else if(tr.startsWith("- ") || tr.startsWith("* ")){
+      const indent = line.length - line.trimStart().length;
+      const ml = indent >= 2 ? 20 : 8;
+      out.push(`<div style="margin-left:${ml}px;margin-top:3px;font-size:12px;color:var(--muted);line-height:1.45">&bull; ${fmtInline(tr.slice(2))}</div>`);
+    }else{
+      out.push(`<div style="margin-top:4px;font-size:12px;color:var(--muted);line-height:1.45">${fmtInline(tr)}</div>`);
+    }
+  }
+  return out.join("") || '<div style="font-size:12px;color:var(--muted)">No changelog entries available yet.</div>';
+}
+
+function setUpdatesTab(tab){
+  state.updatesTab = tab;
+  renderUpdatesModal();
+}
+
+async function openUpdatesModal(){
+  document.getElementById("updatesModal").classList.add("open");
+  if(!state.updateInfo){
+    document.getElementById("updatesBody").innerHTML = '<div style="font-size:12px;color:var(--muted);padding:16px">Checking GitHub releases &amp; changelog...</div>';
+    await checkPcUpdate(true, true);
+  }
+  renderUpdatesModal();
+}
+
+function renderUpdatesModal(){
+  const body = document.getElementById("updatesBody");
+  if(!body) return;
+  const info = state.updateInfo;
+  if(!info){
+    body.innerHTML = `<div class="section-card"><div style="font-size:12px;color:var(--muted)">Could not load GitHub release info yet. Click <b>Check GitHub</b> above to retry.</div></div>`;
+    return;
+  }
+  const tab = state.updatesTab || (info.updateAvailable ? "new" : "changelog");
+  const releases = info.releases || [];
+  const newerReleases = releases.filter(r => r.isNewer);
+  const relCardsHtml = (list) => list.length ? list.map(r => `
+    <div class="section-card" style="padding:11px;gap:6px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:6px">
+          <strong style="font-size:12px;color:${r.isNewer?"var(--primary)":"var(--text)"}">${escHtml(r.name || r.tag)}</strong>
+          ${r.isNewer ? `<span class="badge" style="position:static;background:var(--primary-container);color:var(--on-primary-container,var(--primary));border-color:var(--primary)">NEW</span>` : ""}
+          ${r.hasPcZip ? `<span class="badge" style="position:static">Windows</span>` : ""}
+          ${r.hasApk ? `<span class="badge" style="position:static">Android APK</span>` : ""}
+        </div>
+        <span style="font-size:11px;color:var(--muted)">${r.publishedAt ? new Date(r.publishedAt).toLocaleDateString() : ""}</span>
+      </div>
+      <div>${renderChangelogMarkdown(r.notes)}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        ${r.hasApk ? `<a href="${escHtml(r.apkUrl)}" target="_blank"><button class="mini-btn" type="button">Download APK</button></a>` : ""}
+        ${r.htmlUrl ? `<a href="${escHtml(r.htmlUrl)}" target="_blank"><button class="mini-btn" type="button">View on GitHub</button></a>` : ""}
+      </div>
+    </div>
+  `).join("") : `<div class="section-card"><div style="font-size:12px;color:var(--muted)">No newer releases found — you're running the latest build (<b>v${escHtml(info.currentVersion)}</b>).</div></div>`;
+
+  let tabContent = "";
+  if(tab === "new"){
+    tabContent = newerReleases.length
+      ? relCardsHtml(newerReleases)
+      : relCardsHtml(releases.filter(r => r.version === info.latestVersion).slice(0, 1));
+  }else if(tab === "releases"){
+    tabContent = relCardsHtml(releases);
+  }else{
+    tabContent = `<div class="section-card">${renderChangelogMarkdown(info.changelogMarkdown)}</div>`;
+  }
+
+  body.innerHTML = `
+    <div class="section-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:13px;font-weight:700">
+            Installed: <span style="color:var(--primary)">v${escHtml(info.currentVersion)}</span>
+            &bull;
+            ${info.updateAvailable
+              ? `<span style="color:var(--success)">v${escHtml(info.latestVersion)} Available (${fmt(info.assetSize)})</span>`
+              : `<span style="color:var(--success)">Up to date (Latest Windows: v${escHtml(info.latestVersion)})</span>`}
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:3px">
+            Latest Android APK: <b>v${escHtml(info.latestApkVersion || "1.4.6")}</b>
+            ${info.latestApkUrl ? ` &bull; <a href="${escHtml(info.latestApkUrl)}" target="_blank" style="color:var(--primary)">Download APK</a>` : ""}
+            &bull; Install Dir: <code style="font-size:10px">${escHtml(info.installDir || "")}</code>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${info.downloadUrl ? `<button class="pill-btn ${info.updateAvailable?"primary":""}" id="pcUpdateApplyBtn" onclick="applyPcUpdate()">${info.updateAvailable ? `1-Click Update to v${escHtml(info.latestVersion)} &amp; Restart` : "Reinstall Latest v" + escHtml(info.latestVersion)}</button>` : ""}
+        </div>
+      </div>
+      <label style="display:flex;justify-content:space-between;font-size:12px;margin-top:4px"><span>Auto-check GitHub for updates when opening DeckVault</span><input type="checkbox" ${prefs.autoCheckUpdates!==false?"checked":""} onchange="setPref('autoCheckUpdates',this.checked)"/></label>
+      <div id="pcUpdateProgressWrap" style="display:none;flex-direction:column;gap:4px">
+        <div style="display:flex;justify-content:space-between;font-size:11px"><span id="pcUpdateProgMsg" style="color:var(--primary)">Updating...</span><b id="pcUpdateProgPct">0%</b></div>
+        <div class="bar"><div id="pcUpdateProgBar" style="width:0%"></div></div>
+      </div>
+    </div>
+    <div class="chip-row">
+      <button class="chip ${tab==="new"?"active":""}" onclick="setUpdatesTab('new')">${newerReleases.length ? `What's New (${newerReleases.length})` : "Latest Release Notes"}</button>
+      <button class="chip ${tab==="changelog"?"active":""}" onclick="setUpdatesTab('changelog')">Full Changelog</button>
+      <button class="chip ${tab==="releases"?"active":""}" onclick="setUpdatesTab('releases')">All GitHub Releases (${releases.length})</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">${tabContent}</div>
+  `;
 }
 
 let _pcUpdatePoll = null;
@@ -3679,14 +3807,22 @@ async function checkPcUpdate(force=false, silent=false){
     if(badge){
       if(info.updateAvailable){
         badge.style.display = "inline-flex";
+        badge.style.borderColor = "var(--primary)";
+        badge.style.color = "var(--primary)";
         badge.textContent = "Update v" + info.latestVersion;
       }else{
-        badge.style.display = "none";
+        badge.style.display = "inline-flex";
+        badge.style.borderColor = "";
+        badge.style.color = "";
+        badge.textContent = "Updates";
       }
     }
+    if(document.getElementById("updatesModal")?.classList.contains("open")) renderUpdatesModal();
     if(document.getElementById("settingsModal")?.classList.contains("open")) openSettingsModal();
     if(!silent){
       showToast(info.updateAvailable ? `Update v${info.latestVersion} available!` : `You're on the latest version (v${info.currentVersion})`);
+    }else if(info.updateAvailable){
+      showToast(`DeckVault v${info.latestVersion} is ready — click Updates to see What's New & update`);
     }
   }catch(e){
     if(!silent) showToast("Update check failed: " + e.message);
@@ -3846,7 +3982,7 @@ window.addEventListener("keydown",(e)=>{
     else if(e.key==="Escape"){
       clearSelection();
       ["allDrivesOverlay","imageOverlay","docOverlay"].forEach(closeOverlay);
-      ["devicesModal","transferModal","settingsModal","cloudModal","optimizeModal"].forEach(closeDialog);
+      ["devicesModal","transferModal","settingsModal","updatesModal","cloudModal","optimizeModal"].forEach(closeDialog);
     }
   }
 });

@@ -41,7 +41,7 @@ import zipfile
 from desktop_ui import DESKTOP_APP_HTML
 
 
-APP_VERSION = "1.4.8"
+APP_VERSION = "1.4.9"
 GITHUB_REPO = "astonat/DeckVault"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
@@ -3214,7 +3214,7 @@ def _check_latest_pc_release(rt: CompanionRuntime, force: bool = False) -> dict[
         if not force and rt.update_cache is not None and (now - rt.update_cache[0]) < 120.0:
             return dict(rt.update_cache[1])
 
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=15"
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=25"
     req = urllib.request.Request(
         url,
         headers={
@@ -3225,32 +3225,58 @@ def _check_latest_pc_release(rt: CompanionRuntime, force: bool = False) -> dict[
     with urllib.request.urlopen(req, timeout=10) as resp:
         releases = json.loads(resp.read().decode("utf-8"))
 
+    cur_tuple = _parse_version_tuple(APP_VERSION)
     pc_rel = None
     pc_asset = None
     apk_rel = None
     apk_asset = None
+    rel_items: list[dict[str, Any]] = []
     for rel in releases:
         if rel.get("draft"):
             continue
         assets = rel.get("assets") or []
-        if pc_asset is None:
-            for a in assets:
-                if a.get("name") == "DeckVault-app.zip":
-                    pc_rel = rel
-                    pc_asset = a
-                    break
-        if apk_asset is None:
-            for a in assets:
-                if str(a.get("name", "")).lower().endswith(".apk"):
-                    apk_rel = rel
-                    apk_asset = a
-                    break
-        if pc_asset is not None and apk_asset is not None:
-            break
+        rel_pc = next((a for a in assets if a.get("name") == "DeckVault-app.zip"), None)
+        rel_apk = next((a for a in assets if str(a.get("name", "")).lower().endswith(".apk")), None)
+        if pc_asset is None and rel_pc is not None:
+            pc_rel = rel
+            pc_asset = rel_pc
+        if apk_asset is None and rel_apk is not None:
+            apk_rel = rel
+            apk_asset = rel_apk
+
+        r_tag = str(rel.get("tag_name") or "")
+        r_ver = r_tag.lstrip("vV")
+        rel_items.append({
+            "tag": r_tag,
+            "version": r_ver,
+            "name": str(rel.get("name") or r_tag),
+            "publishedAt": str(rel.get("published_at") or ""),
+            "notes": str(rel.get("body") or ""),
+            "isNewer": _parse_version_tuple(r_ver) > cur_tuple,
+            "hasPcZip": rel_pc is not None,
+            "pcAssetSize": int((rel_pc or {}).get("size", 0) or 0),
+            "pcUrl": str((rel_pc or {}).get("browser_download_url", "")),
+            "hasApk": rel_apk is not None,
+            "apkUrl": str((rel_apk or {}).get("browser_download_url", "")),
+            "htmlUrl": str(rel.get("html_url") or ""),
+        })
+
+    changelog_md = ""
+    try:
+        cl_req = urllib.request.Request(
+            f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/CHANGELOG.md",
+            headers={"User-Agent": f"DeckVault/{APP_VERSION}"},
+        )
+        with urllib.request.urlopen(cl_req, timeout=6) as cl_resp:
+            changelog_md = cl_resp.read().decode("utf-8", errors="replace")[:64_000]
+    except Exception:
+        local_cl = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
+        if local_cl.is_file():
+            changelog_md = local_cl.read_text(encoding="utf-8", errors="replace")[:64_000]
 
     latest_tag = str((pc_rel or {}).get("tag_name") or f"v{APP_VERSION}")
     latest_ver = latest_tag.lstrip("vV")
-    update_available = _parse_version_tuple(latest_ver) > _parse_version_tuple(APP_VERSION)
+    update_available = _parse_version_tuple(latest_ver) > cur_tuple
     is_frozen = bool(getattr(sys, "frozen", False))
     install_dir = (
         os.path.dirname(os.path.abspath(sys.executable))
@@ -3265,10 +3291,12 @@ def _check_latest_pc_release(rt: CompanionRuntime, force: bool = False) -> dict[
         "updateAvailable": bool(update_available and pc_asset is not None),
         "downloadUrl": str((pc_asset or {}).get("browser_download_url", "")),
         "assetSize": int((pc_asset or {}).get("size", 0) or 0),
-        "releaseNotes": str((pc_rel or {}).get("body", ""))[:1200],
+        "releaseNotes": str((pc_rel or {}).get("body", ""))[:2400],
         "releasePage": str((pc_rel or {}).get("html_url", f"https://github.com/{GITHUB_REPO}/releases")),
         "latestApkVersion": str((apk_rel or {}).get("tag_name", "")).lstrip("vV"),
         "latestApkUrl": str((apk_asset or {}).get("browser_download_url", "")),
+        "releases": rel_items,
+        "changelogMarkdown": changelog_md,
         "packagedExe": is_frozen,
         "installDir": install_dir,
         "repoUrl": f"https://github.com/{GITHUB_REPO}",

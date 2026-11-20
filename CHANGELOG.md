@@ -2,6 +2,14 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.4.9] - 2026-11-20
+
+### Built-in Desktop Updates & Changelog Center
+- **Dedicated Updates & Full GitHub Changelog Modal (`companion/desktop_ui.py`, `companion/deckvault_server.py`)**:
+  - Added a dedicated **Updates** button right in the titlebar (automatically highlights as **`Update vX.Y.Z`** when a newer release exists on GitHub) plus **Updates & Changelog** inside Settings.
+  - Fetches live GitHub Release history AND `CHANGELOG.md` so you can browse **What's New** across every release since your installed version, inspect the **Full Changelog** formatted with headers & bullets, see Android APK updates, toggle startup auto-checks, and run **1-Click Update & Restart** directly from GitHub.
+- *(Android APK remains on `v1.4.6`.)*
+
 ## [v1.4.8] - 2026-11-20
 
 ### Windows Desktop Companion: 1-Click Auto-Updater from GitHub Releases
