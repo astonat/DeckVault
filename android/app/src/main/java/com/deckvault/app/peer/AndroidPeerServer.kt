@@ -949,7 +949,7 @@ class AndroidPeerServer(private val context: Context) {
         val out = File(dir, "$key.jpg")
         if (out.exists() && out.length() > 100) return out
 
-        mediaSem.acquire()
+        if (!mediaSem.tryAcquire(10, TimeUnit.SECONDS)) throw java.io.IOException("Thumbnail busy")
         return try {
             if (out.exists() && out.length() > 100) return out
             val tmp = File(dir, "$key.tmp.jpg")
@@ -982,7 +982,7 @@ class AndroidPeerServer(private val context: Context) {
         val out = File(dir, "$key.jpg")
         if (out.exists() && out.length() > 100) return out
 
-        mediaSem.acquire()
+        if (!mediaSem.tryAcquire(10, TimeUnit.SECONDS)) throw java.io.IOException("Thumbnail busy")
         return try {
             if (out.exists() && out.length() > 100) return out
             val tmp = File(dir, "$key.tmp.jpg")
@@ -1046,7 +1046,7 @@ class AndroidPeerServer(private val context: Context) {
         val out = File(dir, "$key.jpg")
         if (out.exists() && out.length() > 64L) return out
 
-        mediaSem.acquire()
+        if (!mediaSem.tryAcquire(10, TimeUnit.SECONDS)) throw java.io.IOException("Thumbnail busy")
         return try {
             if (out.exists() && out.length() > 64L) return out
             val tmp = File(dir, "$key.tmp.jpg")
@@ -1083,7 +1083,7 @@ class AndroidPeerServer(private val context: Context) {
         val out = File(dir, "$digest.jpg")
         if (out.exists() && out.length() > 64L) return out
 
-        mediaSem.acquire()
+        if (!mediaSem.tryAcquire(10, TimeUnit.SECONDS)) throw java.io.IOException("Thumbnail busy")
         return try {
             if (out.exists() && out.length() > 64L) return out
             val tmp = File(dir, "$digest.tmp.jpg")

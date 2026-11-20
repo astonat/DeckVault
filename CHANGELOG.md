@@ -2,6 +2,18 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.4.6] - 2026-11-19
+
+### Bidirectional Android ↔ PC Stability, Parallel IP Failover & Non-Blocking Folder Stats
+- **Fixed Local & `PC → Android` Browsing Hangs (`LocalStorageRepository.kt`, `AndroidPeerServer.kt`)**:
+  - Added a strict `240 ms` per-pass (`22 ms` per-folder) time budget to `computeFolderStats` with background warm-up (`warmFolderStatsAsync`) so deep folders on Android FUSE storage never block `/api/list`, `/api/tree`, or local Fold 5 browsing.
+  - Replaced unbounded `mediaSem.acquire()` waits in `AndroidPeerServer` thumbnail/storyboard builders with bounded `tryAcquire(10s)` backpressure.
+- **Fixed `Android → PC` Stalls & Infinite Loading (`DeckVaultApi.kt`, `MainViewModel.kt`)**:
+  - Added a fast `metaClient` (`1.8s` connect, `12s` read timeout) for directory/root/search calls and parallelized `probeFirstReachableIp` in `executeWithIpFailover` (`<900ms` instead of `3s × N` sequential waits per unreachable alternate IP).
+  - Added `withTimeout` (`10s` roots / `14s` folder load) in `MainViewModel` so unreachable or sleeping hosts always clear the loading spinner with a clear retryable message.
+- **Fixed `PC → Android` Stale Connection Pool & 21-Second TCP Connect Hang (`companion/deckvault_server.py`)**:
+  - Added `14s` idle connection expiry to `FleetHttpPool` (shorter than Android's `25s` socket timeout) and a fast `2.5s` TCP connect timeout before applying request read timeouts, eliminating half-closed socket retries and multi-second Windows SYN stalls when a phone changes IP.
+
 ## [v1.4.5] - 2026-11-18
 
 ### Android Local Folder Sizing & Size Sort, Optimizer Render Button Fix & PC Offload Filtering

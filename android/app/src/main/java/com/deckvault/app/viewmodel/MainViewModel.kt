@@ -53,11 +53,13 @@ import com.deckvault.app.ui.util.Formatters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -485,7 +487,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         runCatching {
-            resolveRoots(host)
+            if (host.isLocalDevice) resolveRoots(host)
+            else withTimeout(10_000L) { resolveRoots(host) }
         }.onSuccess { roots ->
             rootsCache[host.hostId] = roots
             if (!host.isLocalDevice && roots.os.isNotBlank() && !roots.os.equals(host.os, ignoreCase = true)) {
@@ -515,9 +518,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _ui.update { it.copy(isLoading = false) }
             }
         }.onFailure { err ->
-            if (err is kotlinx.coroutines.CancellationException) throw err
+            if (err is CancellationException && err !is TimeoutCancellationException) throw err
             if (connectGen == browseGeneration) {
-                handleStorageFailure(err, "${host.displayName}: ${err.message}")
+                val msg = if (err is TimeoutCancellationException) {
+                    "Connection to ${host.displayName} timed out — check Wi-Fi & Companion"
+                } else {
+                    "${host.displayName}: ${err.message}"
+                }
+                handleStorageFailure(err, msg)
             }
         }
     }
@@ -680,60 +688,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         runCatching {
-            coroutineScope {
-                val treeDef = async { runCatching { resolveTree(host, path, treeSort) }.getOrNull() }
-                val listDef = async { resolveListFolder(host, path, prefs, if (recursive) "" else query) }
-                val recDef = if (recursive) {
-                    async {
-                        val searched = if (host.isLocalDevice) {
-                            localRepo.searchFiles(query, path, prefs.mediaFilter, 100).files
-                        } else {
-                            api.search(host, path, query).files
+            val block: suspend () -> Unit = {
+                coroutineScope {
+                    val treeDef = async { runCatching { resolveTree(host, path, treeSort) }.getOrNull() }
+                    val listDef = async { resolveListFolder(host, path, prefs, if (recursive) "" else query) }
+                    val recDef = if (recursive) {
+                        async {
+                            val searched = if (host.isLocalDevice) {
+                                localRepo.searchFiles(query, path, prefs.mediaFilter, 100).files
+                            } else {
+                                api.search(host, path, query).files
+                            }
+                            val comparator = when (prefs.sortBy.apiKey) {
+                                "size" -> compareBy<FileItem> { it.sizeBytes }
+                                "date" -> compareBy<FileItem> { it.modifiedMs }
+                                "type" -> compareBy<FileItem> { it.extension.lowercase() }.thenBy { it.name.lowercase() }
+                                else -> compareBy<FileItem> { it.name.lowercase() }
+                            }
+                            if (prefs.sortDescending) searched.sortedWith(comparator.reversed()) else searched.sortedWith(comparator)
                         }
-                        val comparator = when (prefs.sortBy.apiKey) {
-                            "size" -> compareBy<FileItem> { it.sizeBytes }
-                            "date" -> compareBy<FileItem> { it.modifiedMs }
-                            "type" -> compareBy<FileItem> { it.extension.lowercase() }.thenBy { it.name.lowercase() }
-                            else -> compareBy<FileItem> { it.name.lowercase() }
-                        }
-                        if (prefs.sortDescending) searched.sortedWith(comparator.reversed()) else searched.sortedWith(comparator)
-                    }
-                } else null
+                    } else null
 
-                val listResp = listDef.await()
-                if (!recursive) folderCache.put(fKey, listResp)
-                val recursiveFiles = recDef?.await()
-                if (myGen == browseGeneration) {
-                    _ui.update {
-                        it.copy(
-                            isLoading = false,
-                            currentPath = listResp.path,
-                            folderName = listResp.name,
-                            parentPath = listResp.parentPath,
-                            currentFolderSizeBytes = listResp.totalSizeBytes,
-                            isIndexing = listResp.indexer.scanning,
-                            listFolders = if (recursiveFiles != null) emptyList() else listResp.folders,
-                            files = recursiveFiles ?: listResp.files,
-                        )
+                    val listResp = listDef.await()
+                    if (!recursive) folderCache.put(fKey, listResp)
+                    val recursiveFiles = recDef?.await()
+                    if (myGen == browseGeneration) {
+                        _ui.update {
+                            it.copy(
+                                isLoading = false,
+                                currentPath = listResp.path,
+                                folderName = listResp.name,
+                                parentPath = listResp.parentPath,
+                                currentFolderSizeBytes = listResp.totalSizeBytes,
+                                isIndexing = listResp.indexer.scanning,
+                                listFolders = if (recursiveFiles != null) emptyList() else listResp.folders,
+                                files = recursiveFiles ?: listResp.files,
+                            )
+                        }
                     }
-                }
-                val treeResp = treeDef.await()
-                if (treeResp != null) treeCache.put(tKey, treeResp)
-                if (myGen == browseGeneration && treeResp != null) {
-                    _ui.update {
-                        it.copy(
-                            treeFolders = treeResp.children,
-                            currentFolderSizeBytes = maxOf(it.currentFolderSizeBytes, treeResp.sizeBytes),
-                        )
+                    val treeResp = treeDef.await()
+                    if (treeResp != null) treeCache.put(tKey, treeResp)
+                    if (myGen == browseGeneration && treeResp != null) {
+                        _ui.update {
+                            it.copy(
+                                treeFolders = treeResp.children,
+                                currentFolderSizeBytes = maxOf(it.currentFolderSizeBytes, treeResp.sizeBytes),
+                            )
+                        }
                     }
                 }
             }
+            if (host.isLocalDevice) block() else withTimeout(14_000L) { block() }
         }.onFailure { err ->
-            if (err is kotlinx.coroutines.CancellationException) throw err
+            if (err is CancellationException && err !is TimeoutCancellationException) throw err
+            val msg = if (err is TimeoutCancellationException) {
+                "Timed out loading folder on ${host.displayName}"
+            } else {
+                err.message ?: "Failed to load folder"
+            }
             if (myGen == browseGeneration && cachedList == null) {
-                handleStorageFailure(err, err.message ?: "Failed to load folder")
+                handleStorageFailure(err, msg)
             } else if (myGen == browseGeneration) {
-                _ui.update { it.copy(isLoading = false) }
+                _ui.update { it.copy(isLoading = false, toastMessage = if (err is TimeoutCancellationException) msg else it.toastMessage) }
             }
         }
     }

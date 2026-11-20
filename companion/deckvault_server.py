@@ -40,7 +40,7 @@ import uuid
 from desktop_ui import DESKTOP_APP_HTML
 
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.6"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
 DISCOVERY_MAGIC = b"DECKVAULT_DISCOVER_V1"
@@ -2799,20 +2799,54 @@ def resolve_host_ip_by_id(target_host_id: str, udp_port: int = DEFAULT_UDP_PORT,
 class FleetHttpPool:
     """Thread-safe HTTP/1.1 Keep-Alive connection pool for snappy PC <-> Phone/Laptop proxying."""
 
+    MAX_IDLE_AGE_SEC = 14.0
+
     def __init__(self, max_per_host: int = 8) -> None:
         self._max_per_host = max_per_host
         self._lock = threading.Lock()
-        self._idle: dict[tuple[str, int], list[http.client.HTTPConnection]] = {}
+        self._idle: dict[tuple[str, int], list[tuple[http.client.HTTPConnection, float]]] = {}
 
-    def acquire(self, ip: str, port: int, timeout: float = 45.0) -> http.client.HTTPConnection:
+    def acquire(
+        self,
+        ip: str,
+        port: int,
+        timeout: float = 45.0,
+        connect_timeout: float = 2.5,
+    ) -> http.client.HTTPConnection:
         key = (ip, port)
+        now = time.monotonic()
+        stale: list[http.client.HTTPConnection] = []
+        chosen: http.client.HTTPConnection | None = None
         with self._lock:
             bucket = self._idle.get(key)
-            if bucket:
-                conn = bucket.pop()
-                conn.timeout = timeout
-                return conn
-        conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+            while bucket:
+                conn, last_used = bucket.pop()
+                if (now - last_used) <= self.MAX_IDLE_AGE_SEC and conn.sock is not None:
+                    chosen = conn
+                    break
+                stale.append(conn)
+        for old in stale:
+            try:
+                old.close()
+            except Exception:
+                pass
+        if chosen is not None:
+            chosen.timeout = timeout
+            try:
+                if chosen.sock is not None:
+                    chosen.sock.settimeout(timeout)
+                return chosen
+            except Exception:
+                try:
+                    chosen.close()
+                except Exception:
+                    pass
+
+        conn = http.client.HTTPConnection(ip, port, timeout=connect_timeout)
+        conn.connect()
+        conn.timeout = timeout
+        if conn.sock is not None:
+            conn.sock.settimeout(timeout)
         return conn
 
     def release(self, ip: str, port: int, conn: http.client.HTTPConnection, reusable: bool) -> None:
@@ -2823,10 +2857,11 @@ class FleetHttpPool:
                 pass
             return
         key = (ip, port)
+        now = time.monotonic()
         with self._lock:
             bucket = self._idle.setdefault(key, [])
             if len(bucket) < self._max_per_host:
-                bucket.append(conn)
+                bucket.append((conn, now))
                 return
         try:
             conn.close()
@@ -3850,12 +3885,12 @@ def make_handler(rt: CompanionRuntime):
 
             ip = str(host["ip"])
             port = int(host["port"])
-            timeout_s = 120.0 if ("/api/stream" in sub_route or method == "POST") else 30.0
+            timeout_s = 120.0 if ("/api/stream" in sub_route or method == "POST") else 18.0
 
             def _do_pooled_call(target_ip: str, target_port: int) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
                 last_exc: Exception | None = None
                 for attempt in range(2):
-                    conn = rt.fleet_pool.acquire(target_ip, target_port, timeout=timeout_s)
+                    conn = rt.fleet_pool.acquire(target_ip, target_port, timeout=timeout_s, connect_timeout=2.5)
                     try:
                         conn.request(method, sub_route, body=req_body, headers=headers)
                         resp = conn.getresponse()

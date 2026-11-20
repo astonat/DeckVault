@@ -35,7 +35,10 @@ import com.deckvault.app.model.TransferResponse
 import com.deckvault.app.model.TransferredItemResult
 import com.deckvault.app.model.TreeResponse
 import com.deckvault.app.model.VideoMeta
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
@@ -89,6 +92,7 @@ class LocalStorageRepository(private val context: Context) {
         val fileCount: Int,
         val mediaCount: Int,
         val hasSubfolders: Boolean,
+        val complete: Boolean,
         val computedAtMs: Long,
     )
 
@@ -96,6 +100,8 @@ class LocalStorageRepository(private val context: Context) {
     private val storyboardDir = File(context.cacheDir, "deckvault_local_storyboards").apply { mkdirs() }
     private val metaCache = LruCache<String, VideoMeta>(1200)
     private val folderStatsCache = ConcurrentHashMap<String, CachedFolderStats>()
+    private val warmScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val warmingInFlight = ConcurrentHashMap.newKeySet<String>()
     val metaDb = AndroidMetaCache(context)
     private val mmrSemaphore = Semaphore(2)
     private val drivesLock = Any()
@@ -104,26 +110,60 @@ class LocalStorageRepository(private val context: Context) {
         folderStatsCache.clear()
     }
 
-    private fun computeFolderStats(dir: File, maxDepth: Int = 5, maxEntries: Int = 10_000): CachedFolderStats {
+    private fun warmFolderStatsAsync(dirs: List<File>) {
+        if (dirs.isEmpty()) return
+        warmScope.launch {
+            for (dir in dirs.take(24)) {
+                val canon = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath }
+                val existing = folderStatsCache[canon]
+                if (existing != null && existing.complete && (System.currentTimeMillis() - existing.computedAtMs) < 60_000L) {
+                    continue
+                }
+                if (!warmingInFlight.add(canon)) continue
+                try {
+                    computeFolderStats(dir, maxDepth = 4, maxEntries = 6_000, budgetNs = 150_000_000L)
+                } finally {
+                    warmingInFlight.remove(canon)
+                }
+            }
+        }
+    }
+
+    private fun computeFolderStats(
+        dir: File,
+        maxDepth: Int = 4,
+        maxEntries: Int = 2_500,
+        budgetNs: Long = 22_000_000L,
+    ): CachedFolderStats {
         val canon = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath }
         val now = System.currentTimeMillis()
         folderStatsCache[canon]?.let { cached ->
-            if ((now - cached.computedAtMs) < 45_000L) return cached
+            val ttlMs = if (cached.complete) 60_000L else 5_000L
+            if ((now - cached.computedAtMs) < ttlMs) return cached
         }
 
+        val deadlineNs = System.nanoTime() + budgetNs
         var totalBytes = 0L
         var filesCount = 0
         var mediaCount = 0
         var hasDirectSubs = false
         var visited = 0
+        var complete = true
 
         val queue = ArrayDeque<Pair<File, Int>>()
         queue.add(dir to 0)
-        while (queue.isNotEmpty() && visited < maxEntries) {
+        while (queue.isNotEmpty()) {
+            if (visited >= maxEntries || System.nanoTime() > deadlineNs) {
+                complete = false
+                break
+            }
             val (cur, depth) = queue.removeFirst()
             val children = cur.listFiles() ?: continue
             for (child in children) {
-                if (visited >= maxEntries) break
+                if (visited >= maxEntries || System.nanoTime() > deadlineNs) {
+                    complete = false
+                    break
+                }
                 val name = child.name
                 if (name == "." || name == "..") continue
                 if (name.startsWith(".") && name != TRASH_DIR_NAME) continue
@@ -136,6 +176,8 @@ class LocalStorageRepository(private val context: Context) {
                         if (!isRestrictedAndroid) {
                             queue.add(child to (depth + 1))
                         }
+                    } else {
+                        complete = false
                     }
                 } else if (child.isFile) {
                     totalBytes += child.length().coerceAtLeast(0L)
@@ -151,6 +193,7 @@ class LocalStorageRepository(private val context: Context) {
             fileCount = filesCount,
             mediaCount = mediaCount,
             hasSubfolders = hasDirectSubs,
+            complete = complete,
             computedAtMs = now,
         )
         folderStatsCache[canon] = stats
@@ -524,16 +567,24 @@ class LocalStorageRepository(private val context: Context) {
         val files = mutableListOf<FileItem>()
         var totalFileBytes = 0L
         var mediaCount = 0
-        val dirCount = entries.count { it.isDirectory && !it.name.startsWith(".") }
-        val statDepth = if (dirCount > 50) 2 else 5
-        val statCap = if (dirCount > 50) 1_500 else 10_000
+        val passDeadlineNs = System.nanoTime() + 240_000_000L
+        val partialDirs = mutableListOf<File>()
 
         entries.forEach { entry ->
             if (entry.name == "." || entry.name == "..") return@forEach
             if (entry.name.startsWith(".") && entry.name != TRASH_DIR_NAME) return@forEach
             val canon = runCatching { entry.canonicalPath }.getOrElse { entry.absolutePath }
             if (entry.isDirectory) {
-                val stats = computeFolderStats(entry, maxDepth = statDepth, maxEntries = statCap)
+                val cached = folderStatsCache[canon]?.takeIf {
+                    (System.currentTimeMillis() - it.computedAtMs) < (if (it.complete) 60_000L else 5_000L)
+                }
+                val stats = cached ?: if (System.nanoTime() < passDeadlineNs) {
+                    computeFolderStats(entry, maxDepth = 3, maxEntries = 1_500, budgetNs = 18_000_000L)
+                } else {
+                    partialDirs.add(entry)
+                    CachedFolderStats(0L, 0, 0, hasSubfolders = true, complete = false, computedAtMs = 0L)
+                }
+                if (!stats.complete) partialDirs.add(entry)
                 folders.add(
                     FolderItem(
                         name = if (entry.name == TRASH_DIR_NAME) "Recycle Bin (.deckvault_trash)" else entry.name,
@@ -569,6 +620,7 @@ class LocalStorageRepository(private val context: Context) {
         val sortedFolders = folders.sortedWith(compareByDescending<FolderItem> { it.sizeBytes }.thenBy { it.name.lowercase(Locale.US) })
         val sortedFiles = sortFileItems(files, sortBy, descending)
         val (totalDisk, freeDisk) = statVolume(safe)
+        if (partialDirs.isNotEmpty()) warmFolderStatsAsync(partialDirs.distinct())
 
         ListResponse(
             path = safeCanon,
@@ -631,19 +683,30 @@ class LocalStorageRepository(private val context: Context) {
                 directFileBytes += entry.length().coerceAtLeast(0L)
             }
         }
-        val statDepth = if (subDirs.size > 50) 2 else 5
-        val statCap = if (subDirs.size > 50) 1_500 else 10_000
+        val treeDeadlineNs = System.nanoTime() + 240_000_000L
+        val partialDirs = mutableListOf<File>()
         val rawChildren = subDirs.map { dir ->
-            val st = computeFolderStats(dir, maxDepth = statDepth, maxEntries = statCap)
+            val canon = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath }
+            val cached = folderStatsCache[canon]?.takeIf {
+                (System.currentTimeMillis() - it.computedAtMs) < (if (it.complete) 60_000L else 5_000L)
+            }
+            val st = cached ?: if (System.nanoTime() < treeDeadlineNs) {
+                computeFolderStats(dir, maxDepth = 3, maxEntries = 1_500, budgetNs = 18_000_000L)
+            } else {
+                partialDirs.add(dir)
+                CachedFolderStats(0L, 0, 0, hasSubfolders = true, complete = false, computedAtMs = 0L)
+            }
+            if (!st.complete) partialDirs.add(dir)
             FolderItem(
                 name = if (dir.name == TRASH_DIR_NAME) "Recycle Bin (.deckvault_trash)" else dir.name,
-                path = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath },
+                path = canon,
                 sizeBytes = st.sizeBytes,
                 fileCount = st.fileCount,
                 mediaCount = st.mediaCount,
                 hasSubfolders = st.hasSubfolders,
             )
         }
+        if (partialDirs.isNotEmpty()) warmFolderStatsAsync(partialDirs.distinct())
         val parentTotalBytes = directFileBytes + rawChildren.sumOf { it.sizeBytes.coerceAtLeast(0L) }
         val childrenWithPct = rawChildren.map { item ->
             item.copy(

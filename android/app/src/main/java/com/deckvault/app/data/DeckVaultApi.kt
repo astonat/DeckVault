@@ -34,6 +34,9 @@ import com.deckvault.app.model.TrimResponse
 import com.deckvault.app.model.UploadResponse
 import com.deckvault.app.model.UpscaleRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
@@ -58,7 +61,9 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.ConnectException
+import java.net.InetSocketAddress
 import java.net.NoRouteToHostException
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
@@ -87,6 +92,12 @@ class DeckVaultApi {
         .retryOnConnectionFailure(true)
         .build()
 
+    private val metaClient: OkHttpClient = okHttpClient.newBuilder()
+        .connectTimeout(1800, TimeUnit.MILLISECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .build()
+
     private val trimClient: OkHttpClient = okHttpClient.newBuilder()
         .readTimeout(15, TimeUnit.MINUTES)
         .writeTimeout(2, TimeUnit.MINUTES)
@@ -104,14 +115,14 @@ class DeckVaultApi {
     suspend fun ping(ip: String, port: Int): PingResponse = withContext(Dispatchers.IO) {
         val url = "http://$ip:$port/api/ping"
         val req = Request.Builder().url(url).get().build()
-        executeJson(okHttpClient, req, PingResponse.serializer())
+        executeJson(metaClient, req, PingResponse.serializer())
     }
 
     suspend fun pair(ip: String, port: Int, pin: String, clientName: String): PairResponse = withContext(Dispatchers.IO) {
         val url = "http://$ip:$port/api/pair"
         val body = json.encodeToString(PairRequest.serializer(), PairRequest(pin = pin, clientName = clientName))
         val req = Request.Builder().url(url).post(body.toRequestBody(jsonMediaType)).build()
-        executeJson(okHttpClient, req, PairResponse.serializer())
+        executeJson(metaClient, req, PairResponse.serializer())
     }
 
     suspend fun getRoots(host: SavedHost): RootsResponse = withContext(Dispatchers.IO) {
@@ -603,7 +614,25 @@ class DeckVaultApi {
             .header("X-DeckVault-Token", host.token)
             .get()
             .build()
-        executeJson(okHttpClient, req, serializer)
+        executeJson(metaClient, req, serializer)
+    }
+
+    private suspend fun probeFirstReachableIp(ips: List<String>, port: Int, timeoutMs: Int = 900): String? {
+        val clean = ips.distinct().filter { it.isNotBlank() && it != "127.0.0.1" }
+        if (clean.isEmpty()) return null
+        return coroutineScope {
+            clean.map { candidate ->
+                async(Dispatchers.IO) {
+                    val ok = runCatching {
+                        Socket().use { s ->
+                            s.connect(InetSocketAddress(candidate, port), timeoutMs)
+                        }
+                        true
+                    }.getOrDefault(false)
+                    if (ok) candidate else null
+                }
+            }.awaitAll().firstOrNull { it != null }
+        }
     }
 
     private fun isNetworkReachabilityError(t: Throwable): Boolean =
@@ -622,26 +651,26 @@ class DeckVaultApi {
             return block(url)
         } catch (firstErr: Throwable) {
             if (host.isLocalDevice || !isNetworkReachabilityError(firstErr)) throw firstErr
-            // 1. Try saved alternate IPs first
-            for (altIp in host.candidateIps()) {
-                if (altIp == url.host) continue
-                val altUrl = url.newBuilder().host(altIp).build()
+            // 1. Fast parallel TCP probe across saved alternate IPs (<900ms vs 3s x N serial)
+            val alts = host.candidateIps().filter { it != url.host }
+            val fastAlt = probeFirstReachableIp(alts, url.port, timeoutMs = 850)
+            if (fastAlt != null) {
                 try {
-                    val res = block(altUrl)
-                    onHostIpHealed?.invoke(host, altIp, host.candidateIps())
+                    val res = block(url.newBuilder().host(fastAlt).build())
+                    onHostIpHealed?.invoke(host, fastAlt, host.candidateIps())
                     return res
                 } catch (e: Throwable) {
                     if (!isNetworkReachabilityError(e)) throw e
                 }
             }
-            // 2. Ask LAN discovery to resolve current Wi-Fi IP by hostId (~100-900ms)
+            // 2. Ask LAN discovery to resolve current Wi-Fi IP by hostId (~900ms) and probe in parallel
             val resolved = runCatching { onResolveHostIps?.invoke(host).orEmpty() }.getOrDefault(emptyList())
-            for (newIp in resolved) {
-                if (newIp == url.host) continue
-                val altUrl = url.newBuilder().host(newIp).build()
+                .filter { it != url.host }
+            val fastResolved = probeFirstReachableIp(resolved, url.port, timeoutMs = 850)
+            if (fastResolved != null) {
                 try {
-                    val res = block(altUrl)
-                    onHostIpHealed?.invoke(host, newIp, resolved)
+                    val res = block(url.newBuilder().host(fastResolved).build())
+                    onHostIpHealed?.invoke(host, fastResolved, resolved)
                     return res
                 } catch (e: Throwable) {
                     if (!isNetworkReachabilityError(e)) throw e
