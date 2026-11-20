@@ -2,6 +2,15 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.4.7] - 2026-11-20
+
+### Windows Desktop Companion: Full Android Material 3 Themes, OLED Surface Modes & Expanded Settings
+- **Full Material 3 Theme & Surface Library on Windows Desktop (`companion/desktop_ui.py`)**:
+  - Ported all 10 Android Material 3 accent palettes (**Electric Cobalt**, **Emerald Forest**, **Royal Amethyst**, **Crimson Velvet**, **Amber Sunburst**, **Cyber Teal**, **Matte Slate**, **Matte Sage**, **Matte Clay**, **Plain Black**) with interactive 3-dot visual swatch cards.
+  - Added all 3 Dark Surface Styles (**Tonal Dark**, **OLED + Tonal**, **OLED Neon**) with exact Android color interpolation and neon highlight styling.
+- **Expanded Desktop Settings Parity (`companion/desktop_ui.py`)**:
+  - Added **Default View**, **Default Sort Order**, **Thumbnail Aspect Ratio**, **Modified Date Badge toggle**, **Subfolder Size & Usage Bar toggle**, **Auto-Play Videos toggle**, **Default Playback Speed**, **Default Cut Mode** (`Lossless Copy` / `Cut + Compress`), and **Reset UI Defaults**.
+
 ## [v1.4.6] - 2026-11-19
 
 ### Bidirectional Android ↔ PC Stability, Parallel IP Failover & Non-Blocking Folder Stats

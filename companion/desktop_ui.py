@@ -10,15 +10,22 @@ DESKTOP_APP_HTML = r"""<!doctype html>
   :root{
     --bg:#000000; --panel:#090a0d; --card:#111217; --elev:#181a21; --high:#22252f;
     --border:#252833; --text:#ededf2; --muted:#989aa8;
-    --primary:#8eb8ff; --on-primary:#071326; --primary-container:#1b2c47;
-    --secondary:#a4b8d0; --tertiary:#a5c7b4;
-    --success:#8fb8a0; --warn:#d1bc95; --danger:#cf8c92;
+    --primary:#60a5fa; --on-primary:#051c3d; --primary-container:#1a438a; --on-primary-container:#dbeafe;
+    --secondary:#38bdf8; --secondary-container:#123b59; --tertiary:#a5b4fc;
+    --success:#7ad6a2; --warn:#f0c674; --danger:#f28b96;
   }
-  body.soft{ --bg:#0d0e12; --panel:#14151b; --card:#1b1d25; --elev:#22242e; --high:#2c2f3b; --border:#2e313e; }
-  body.pal-sage{ --primary:#95bfa7; --on-primary:#071d12; --primary-container:#1a3627; }
-  body.pal-sand{ --primary:#cdb894; --on-primary:#231907; --primary-container:#3a2f1a; }
-  body.pal-rose{ --primary:#c9969e; --on-primary:#280a10; --primary-container:#3e1f26; }
-  body.pal-stone{ --primary:#b8bcc8; --on-primary:#15171d; --primary-container:#2b2e38; }
+  body.surf-neon .brand-dot{box-shadow:0 0 11px var(--primary)}
+  body.surf-neon .chip.active{box-shadow:0 0 10px color-mix(in srgb,var(--primary) 35%,transparent)}
+  body.surf-neon .pill-btn.primary{box-shadow:0 0 14px color-mix(in srgb,var(--primary) 38%,transparent)}
+  body.surf-neon .media-card:hover{border-color:color-mix(in srgb,var(--primary) 55%,var(--border))}
+  body.surf-neon .media-card.selected{box-shadow:0 0 0 1px var(--primary),0 0 14px color-mix(in srgb,var(--primary) 28%,transparent)}
+  .theme-swatch-row{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+  .swatch-card{flex-shrink:0;min-width:96px;padding:8px 10px;border-radius:12px;border:1px solid var(--border);background:var(--elev);cursor:pointer;display:flex;flex-direction:column;gap:6px;text-align:left;transition:border-color .14s,transform .1s}
+  .swatch-card:hover{border-color:var(--primary)}
+  .swatch-card.active{border-color:var(--primary);background:var(--primary-container);color:var(--on-primary-container,var(--text))}
+  .swatch-dots{display:flex;align-items:center;gap:4px}
+  .swatch-dot{width:13px;height:13px;border-radius:50%;border:1px solid rgba(255,255,255,.22)}
+  .swatch-name{font-size:11px;font-weight:700;white-space:nowrap}
 
   *{box-sizing:border-box;user-select:none}
   input,textarea,pre,.selectable{user-select:text}
@@ -83,7 +90,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
   .chip-row{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;flex-shrink:0}
   .chip{padding:5px 10px;border-radius:99px;border:1px solid var(--border);background:var(--card);color:var(--muted);font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
   .chip:hover{color:var(--text);border-color:var(--high)}
-  .chip.active{background:var(--primary-container);border-color:var(--primary);color:var(--primary)}
+  .chip.active{background:var(--primary-container);border-color:var(--primary);color:var(--on-primary-container,var(--primary))}
   .dot{width:6px;height:6px;border-radius:50%;background:var(--muted)}
   .chip.active .dot{background:var(--success)}
 
@@ -847,9 +854,159 @@ DESKTOP_APP_HTML = r"""<!doctype html>
 <div class="toast" id="toast"></div>
 
 <script>
+const PALETTE_SPECS = {
+  cobalt: {
+    label: "Electric Cobalt",
+    primary: "#60a5fa", onPrimary: "#051c3d", primaryContainer: "#1a438a", onPrimaryContainer: "#dbeafe",
+    secondary: "#38bdf8", secondaryContainer: "#123b59", tertiary: "#a5b4fc",
+    tonalBg: "#091324", tonalPanel: "#0f1d35", tonalCard: "#142544", tonalElevated: "#1b3157", tonalHighest: "#243f6e", tonalBorder: "#2b4b80",
+    textPrimary: "#eff6ff", textSecondary: "#93b7ea",
+  },
+  emerald: {
+    label: "Emerald Forest",
+    primary: "#34d399", onPrimary: "#02291a", primaryContainer: "#0a5c41", onPrimaryContainer: "#d1fae5",
+    secondary: "#2dd4bf", secondaryContainer: "#0f4c45", tertiary: "#a7f3d0",
+    tonalBg: "#071712", tonalPanel: "#0c221a", tonalCard: "#112e24", tonalElevated: "#173c2f", tonalHighest: "#1e4d3c", tonalBorder: "#25614c",
+    textPrimary: "#ecfdf5", textSecondary: "#8cd9b5",
+  },
+  amethyst: {
+    label: "Royal Amethyst",
+    primary: "#c084fc", onPrimary: "#2b094f", primaryContainer: "#561fa6", onPrimaryContainer: "#f3e8ff",
+    secondary: "#f472b6", secondaryContainer: "#661a45", tertiary: "#93c5fd",
+    tonalBg: "#120c20", tonalPanel: "#1b132e", tonalCard: "#23183c", tonalElevated: "#2e204e", tonalHighest: "#3b2963", tonalBorder: "#4a347b",
+    textPrimary: "#f5f3ff", textSecondary: "#c4b5fd",
+  },
+  crimson: {
+    label: "Crimson Velvet",
+    primary: "#fb7185", onPrimary: "#450614", primaryContainer: "#9f1239", onPrimaryContainer: "#ffe4e6",
+    secondary: "#fbbf24", secondaryContainer: "#633a08", tertiary: "#fda4af",
+    tonalBg: "#1b0a10", tonalPanel: "#280f17", tonalCard: "#33141d", tonalElevated: "#421a26", tonalHighest: "#542231", tonalBorder: "#6a2a3d",
+    textPrimary: "#fff1f2", textSecondary: "#f9a8b8",
+  },
+  amber: {
+    label: "Amber Sunburst",
+    primary: "#fbbf24", onPrimary: "#362002", primaryContainer: "#8c4808", onPrimaryContainer: "#fef3c7",
+    secondary: "#fb923c", secondaryContainer: "#6e2f0a", tertiary: "#fde68a",
+    tonalBg: "#191207", tonalPanel: "#241a0b", tonalCard: "#2e220e", tonalElevated: "#3c2c13", tonalHighest: "#4c3818", tonalBorder: "#63481f",
+    textPrimary: "#fffbeb", textSecondary: "#f6c768",
+  },
+  "cyber-teal": {
+    label: "Cyber Teal",
+    primary: "#2dd4bf", onPrimary: "#022923", primaryContainer: "#0d5e57", onPrimaryContainer: "#ccfbf1",
+    secondary: "#f472b6", secondaryContainer: "#661a45", tertiary: "#38bdf8",
+    tonalBg: "#071619", tonalPanel: "#0d2024", tonalCard: "#122b30", tonalElevated: "#18393f", tonalHighest: "#204a52", tonalBorder: "#265a64",
+    textPrimary: "#f0fdfa", textSecondary: "#7be3d4",
+  },
+  slate: {
+    label: "Matte Slate",
+    primary: "#b9c3de", onPrimary: "#1c2233", primaryContainer: "#2b344b", onPrimaryContainer: "#e1e6f5",
+    secondary: "#a0bac2", secondaryContainer: "#202e34", tertiary: "#cbb6bf",
+    tonalBg: "#0d1017", tonalPanel: "#141822", tonalCard: "#1a1f2c", tonalElevated: "#222838", tonalHighest: "#2b3245", tonalBorder: "#353d54",
+    textPrimary: "#edf0f7", textSecondary: "#9ea6ba",
+  },
+  sage: {
+    label: "Matte Sage",
+    primary: "#a8c2b2", onPrimary: "#13261b", primaryContainer: "#23382c", onPrimaryContainer: "#d6e6dc",
+    secondary: "#acbdc7", secondaryContainer: "#212e35", tertiary: "#c7bea8",
+    tonalBg: "#0c120e", tonalPanel: "#131b16", tonalCard: "#19231d", tonalElevated: "#202d25", tonalHighest: "#28382f", tonalBorder: "#31443a",
+    textPrimary: "#edf2ee", textSecondary: "#9baea1",
+  },
+  clay: {
+    label: "Matte Clay",
+    primary: "#d1b3a7", onPrimary: "#2f1d17", primaryContainer: "#3f2b23", onPrimaryContainer: "#f0ddd6",
+    secondary: "#b5bcc7", secondaryContainer: "#252a34", tertiary: "#bebfa7",
+    tonalBg: "#130e0d", tonalPanel: "#1b1513", tonalCard: "#231b18", tonalElevated: "#2d231f", tonalHighest: "#382c27", tonalBorder: "#473731",
+    textPrimary: "#f3efea", textSecondary: "#b3a29b",
+  },
+  "plain-black": {
+    label: "Plain Black",
+    primary: "#e2e2e7", onPrimary: "#141418", primaryContainer: "#282830", onPrimaryContainer: "#f2f2f5",
+    secondary: "#b3b3bc", secondaryContainer: "#1f1f26", tertiary: "#c8c8d0",
+    tonalBg: "#0e0e12", tonalPanel: "#14151a", tonalCard: "#1a1b21", tonalElevated: "#22232b", tonalHighest: "#2b2c36", tonalBorder: "#2e303a",
+    textPrimary: "#ededef", textSecondary: "#a0a1ac",
+  },
+};
+
+const SURFACE_STYLES = {
+  tonal: { label: "Tonal Dark", subtitle: "Rich Material 3 color-tinted surfaces" },
+  hybrid: { label: "OLED + Tonal", subtitle: "Pure #000000 backdrop with tinted Material cards" },
+  neon: { label: "OLED Neon", subtitle: "Pure #000000 backdrop with vivid glowing accents" },
+};
+
+function lerpHex(hexA, hexB, t){
+  const parse = (h) => {
+    const clean = h.replace("#", "");
+    const n = parseInt(clean, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const [r1, g1, b1] = parse(hexA);
+  const [r2, g2, b2] = parse(hexB);
+  const r = Math.round(r1 + (r2 - r1) * t);
+  const g = Math.round(g1 + (g2 - g1) * t);
+  const b = Math.round(b1 + (b2 - b1) * t);
+  return "#" + [r, g, b].map(x => x.toString(16).padStart(2, "0")).join("");
+}
+
+function normalizePaletteKey(raw){
+  const legacyMap = { "":"cobalt", "pal-sage":"sage", "pal-sand":"amber", "pal-rose":"crimson", "pal-stone":"slate" };
+  if(raw in legacyMap) return legacyMap[raw];
+  return PALETTE_SPECS[raw] ? raw : "cobalt";
+}
+
+function applyMaterialTheme(paletteKey, surfaceKey){
+  const pKey = normalizePaletteKey(paletteKey);
+  const sKey = SURFACE_STYLES[surfaceKey] ? surfaceKey : "hybrid";
+  const spec = PALETTE_SPECS[pKey];
+  let bg, panel, card, elev, high, border, muted, primary, success, warn, danger;
+  if(sKey === "tonal"){
+    bg = spec.tonalBg; panel = spec.tonalPanel; card = spec.tonalCard; elev = spec.tonalElevated;
+    high = spec.tonalHighest; border = spec.tonalBorder; muted = spec.textSecondary; primary = spec.primary;
+    success = "#7ad6a2"; warn = "#f0c674"; danger = "#f28b96";
+  }else if(sKey === "neon"){
+    bg = "#000000";
+    panel = lerpHex("#000000", spec.tonalPanel, 0.45);
+    card = lerpHex("#000000", spec.tonalCard, 0.62);
+    elev = lerpHex("#000000", spec.tonalElevated, 0.72);
+    high = lerpHex("#000000", spec.tonalHighest, 0.80);
+    border = lerpHex(spec.tonalBorder, spec.primary, 0.56);
+    muted = lerpHex(spec.textSecondary, spec.primary, 0.14);
+    primary = pKey === "plain-black" ? spec.primary : lerpHex(spec.primary, "#ffffff", 0.10);
+    success = "#5ee89a"; warn = "#fbbf24"; danger = "#fb7185";
+  }else{
+    bg = "#000000";
+    panel = lerpHex("#000000", spec.tonalPanel, 0.72);
+    card = spec.tonalCard; elev = spec.tonalElevated; high = spec.tonalHighest;
+    border = lerpHex(spec.tonalBorder, spec.primary, 0.24);
+    muted = spec.textSecondary; primary = spec.primary;
+    success = "#7ad6a2"; warn = "#f0c674"; danger = "#f28b96";
+  }
+  const rs = document.documentElement.style;
+  rs.setProperty("--bg", bg);
+  rs.setProperty("--panel", panel);
+  rs.setProperty("--card", card);
+  rs.setProperty("--elev", elev);
+  rs.setProperty("--high", high);
+  rs.setProperty("--border", border);
+  rs.setProperty("--text", spec.textPrimary);
+  rs.setProperty("--muted", muted);
+  rs.setProperty("--primary", primary);
+  rs.setProperty("--on-primary", spec.onPrimary);
+  rs.setProperty("--primary-container", spec.primaryContainer);
+  rs.setProperty("--on-primary-container", spec.onPrimaryContainer);
+  rs.setProperty("--secondary", spec.secondary);
+  rs.setProperty("--secondary-container", spec.secondaryContainer);
+  rs.setProperty("--tertiary", spec.tertiary);
+  rs.setProperty("--success", success);
+  rs.setProperty("--warn", warn);
+  rs.setProperty("--danger", danger);
+  document.body.classList.toggle("surf-neon", sKey === "neon");
+  document.body.classList.toggle("soft", sKey === "tonal");
+}
+
 const DEFAULT_PREFS = {
   pureBlack: true,
-  palette: "",
+  surfaceStyle: "hybrid",
+  palette: "cobalt",
   viewMode: localStorage.getItem("dv_view") || "gallery",
   sort: localStorage.getItem("dv_sort") || "size:desc",
   gridCols: 0, // 0 = auto responsive
@@ -860,13 +1017,17 @@ const DEFAULT_PREFS = {
   showInspector: true,
   showDriveStrips: true,
   showQuickFolders: true,
+  showTreeCounts: true,
   showSizes: true,
   showDuration: true,
   showResolution: true,
   showFilenames: true,
+  showDates: true,
   hoverStoryboard: true,
+  autoPlayVideos: true,
   defaultSpeed: 1.0,
   seekStep: 10,
+  defaultTrimMode: "lossless",
   defaultCrf: 22,
   recycleDefault: true,
   folderWidthPx: 300,
@@ -877,8 +1038,14 @@ let prefs = (() => {
   try {
     const saved = JSON.parse(localStorage.getItem("dv_prefs") || "{}");
     const merged = Object.assign({}, DEFAULT_PREFS, saved);
-    if (localStorage.getItem("dv_pure_black") === "0" && saved.pureBlack === undefined) merged.pureBlack = false;
-    if (localStorage.getItem("dv_pal") && !saved.palette) merged.palette = localStorage.getItem("dv_pal");
+    if (localStorage.getItem("dv_pure_black") === "0" && saved.pureBlack === undefined && saved.surfaceStyle === undefined) {
+      merged.pureBlack = false;
+      merged.surfaceStyle = "tonal";
+    }
+    if (!saved.surfaceStyle) {
+      merged.surfaceStyle = merged.pureBlack ? "hybrid" : "tonal";
+    }
+    merged.palette = normalizePaletteKey(saved.palette ?? localStorage.getItem("dv_pal") ?? "cobalt");
     return merged;
   } catch { return Object.assign({}, DEFAULT_PREFS); }
 })();
@@ -1036,7 +1203,7 @@ function winAction(fn){ if(window.pywebview?.api?.[fn]) window.pywebview.api[fn]
 
 /* Apply Theme, Grid Size & Panel Adjustments */
 function applyVisualPrefs(){
-  document.body.className = (!prefs.pureBlack ? "soft " : "") + (prefs.palette || "");
+  applyMaterialTheme(prefs.palette, prefs.surfaceStyle);
   document.getElementById("sideRail").classList.toggle("hidden", !prefs.showRail);
   const insp = document.getElementById("inspPane");
   insp.classList.toggle("hidden", !prefs.showInspector);
@@ -1773,7 +1940,9 @@ async function loadTree(path){
     (t.children||[]).forEach(ch=>{
       const row=document.createElement("button"); row.className="tree-row";
       const pct=Math.max(2, Math.min(100, Math.round(ch.percentOfParent||0)));
-      row.innerHTML=`<div class="tree-row-top"><span style="color:var(--primary)">📁</span><span class="tree-row-name">${ch.name}</span><span style="color:var(--muted);font-size:11px">${fmt(ch.sizeBytes)}</span></div><div class="bar" style="height:3px;margin:0"><div style="width:${pct}%"></div></div>`;
+      const sizeHtml = prefs.showTreeCounts ? `<span style="color:var(--muted);font-size:11px">${fmt(ch.sizeBytes)}</span>` : "";
+      const barHtml = prefs.showTreeCounts ? `<div class="bar" style="height:3px;margin:0"><div style="width:${pct}%"></div></div>` : "";
+      row.innerHTML=`<div class="tree-row-top"><span style="color:var(--primary)">📁</span><span class="tree-row-name">${ch.name}</span>${sizeHtml}</div>${barHtml}`;
       row.onclick=()=>loadFolder(ch.path);
       row.oncontextmenu=(ev)=>showCtxMenu(ev, {name:ch.name, path:ch.path, isDir:true}, state.activeHostId);
       wireDropTarget(row, state.activeHostId, ch.path);
@@ -1840,7 +2009,8 @@ function renderBrowser(){
       const resTxt = prefs.showResolution ? fmtRes(f.meta?.width, f.meta?.height) : "";
       const resBadge = resTxt ? `<span class="badge tl">${resTxt}</span>` : "";
       const sbDiv = sbUrl ? `<div class="sb-hover"></div>` : "";
-      el.innerHTML=`<div class="sel-check" data-act="sel">${sel?"✓":""}</div><div class="thumb-wrap">${thHtml}${sbDiv}${resBadge}${dur}</div><div class="card-body">${prefs.showFilenames?`<div class="card-title" title="${f.name}">${f.name}</div>`:""}<div class="card-meta"><span>${prefs.showSizes?fmt(f.sizeBytes):""}</span><span>${(f.extension||"").toUpperCase()}</span></div><div class="card-actions"><button class="mini-btn" data-act="sel">${sel?"✓":"Select"}</button>${f.mediaType==="video"?`<button class="mini-btn" data-act="trim">Edit</button>`:""}<button class="mini-btn" data-act="move">Move</button><button class="mini-btn" data-act="more">•••</button></div></div>`;
+      const metaRight = prefs.showDates && f.modifiedMs ? new Date(f.modifiedMs).toLocaleDateString() : (f.extension||"").toUpperCase();
+      el.innerHTML=`<div class="sel-check" data-act="sel">${sel?"✓":""}</div><div class="thumb-wrap">${thHtml}${sbDiv}${resBadge}${dur}</div><div class="card-body">${prefs.showFilenames?`<div class="card-title" title="${f.name}">${f.name}</div>`:""}<div class="card-meta"><span>${prefs.showSizes?fmt(f.sizeBytes):""}</span><span>${metaRight}</span></div><div class="card-actions"><button class="mini-btn" data-act="sel">${sel?"✓":"Select"}</button>${f.mediaType==="video"?`<button class="mini-btn" data-act="trim">Edit</button>`:""}<button class="mini-btn" data-act="move">Move</button><button class="mini-btn" data-act="more">•••</button></div></div>`;
       if(sbUrl){
         const tw = el.querySelector(".thumb-wrap"), sbh = el.querySelector(".sb-hover");
         let sbArmed = false, sbTimer = null;
@@ -2249,6 +2419,7 @@ function openVideoOverlay(f, openStudio){
   const m=f.meta||{};
   document.getElementById("vidMeta").textContent=`${fmt(f.sizeBytes)} ${m.width?`• ${m.width}×${m.height}`:""} ${m.fps?`• ${m.fps.toFixed(1)}fps`:""}`;
   document.getElementById("vidCodecBadge").textContent=[fmtRes(m.width,m.height),m.videoCodec,m.audioCodec].filter(Boolean).join(" • ")||"VIDEO";
+  document.getElementById("editQualityMode").value=prefs.defaultTrimMode || "lossless";
   document.getElementById("editCrf").value=prefs.defaultCrf;
   document.getElementById("editRecycle").checked=prefs.recycleDefault;
   document.getElementById("vidSpeed").value=String(prefs.defaultSpeed);
@@ -2316,7 +2487,8 @@ function openVideoOverlay(f, openStudio){
     startTranscodeStream(0);
   }else{
     v.src=hostMediaUrl(state.activeHostId,"/api/stream",{path:f.path, v:Date.now()});
-    v.play().catch(()=>{});
+    if(prefs.autoPlayVideos !== false){ v.play().catch(()=>{}); }
+    else { v.pause(); document.getElementById("playPauseBtn").textContent="Play"; }
   }
 }
 
@@ -3377,37 +3549,81 @@ window.addEventListener("dragover",e=>{if(e.dataTransfer?.types?.includes("Files
 window.addEventListener("dragleave",e=>{if(!e.relatedTarget)document.getElementById("dropMask").classList.remove("open")});
 window.addEventListener("drop",e=>{if(e.dataTransfer?.files?.length){e.preventDefault();document.getElementById("dropMask").classList.remove("open");uploadLocalFiles(e.dataTransfer.files)}});
 
-/* Comprehensive Settings Modal (Matching All Android Settings + Desktop Controls) */
+/* Comprehensive Settings Modal (Matching All Android Material Themes, Surface Styles & Controls) */
 function openSettingsModal(){
   const ip=state.localIps[0]||"127.0.0.1";
   const body=document.getElementById("settingsBody");
-  const pals=[["","Slate Blue"],["pal-sage","Sage Mint"],["pal-sand","Warm Sand"],["pal-rose","Muted Rose"],["pal-stone","Stone Neutral"]];
+  const curPal = normalizePaletteKey(prefs.palette);
+  const curSurf = SURFACE_STYLES[prefs.surfaceStyle] ? prefs.surfaceStyle : "hybrid";
+  const swatchesHtml = Object.entries(PALETTE_SPECS).map(([key, sp])=>{
+    const active = curPal === key;
+    return `<button class="swatch-card ${active?"active":""}" onclick="setPref('palette','${key}');openSettingsModal()">
+      <div class="swatch-dots">
+        <span class="swatch-dot" style="background:${sp.primary}"></span>
+        <span class="swatch-dot" style="background:${sp.secondary}"></span>
+        <span class="swatch-dot" style="background:${sp.tonalCard}"></span>
+      </div>
+      <span class="swatch-name">${sp.label}</span>
+    </button>`;
+  }).join("");
+  const surfChipsHtml = Object.entries(SURFACE_STYLES).map(([key, st])=>{
+    const active = curSurf === key;
+    return `<button class="chip ${active?"active":""}" onclick="prefs.surfaceStyle='${key}';prefs.pureBlack=( '${key}' !== 'tonal' );savePrefs();applyVisualPrefs();openSettingsModal()">${st.label}</button>`;
+  }).join("");
   body.innerHTML=`
     <div class="section-card">
-      <strong style="font-size:13px">Appearance & Theme</strong>
-      <label style="display:flex;justify-content:space-between;font-size:12px"><span>Pure #000000 OLED Black Background</span><input type="checkbox" ${prefs.pureBlack?"checked":""} onchange="setPref('pureBlack',this.checked)"/></label>
-      <div class="chip-row">${pals.map(([v,n])=>`<button class="chip ${prefs.palette===v?"active":""}" onclick="setPref('palette','${v}');openSettingsModal()">${n}</button>`).join("")}</div>
+      <strong style="font-size:13px">Appearance &amp; Material 3 Theme</strong>
+      <div style="font-size:11px;color:var(--muted)">Color Palette (Full Android Material Theme Library)</div>
+      <div class="theme-swatch-row">${swatchesHtml}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Dark Surface Style</div>
+      <div class="chip-row">${surfChipsHtml}</div>
+      <div style="font-size:11px;color:var(--muted)">${SURFACE_STYLES[curSurf].subtitle}</div>
     </div>
     <div class="section-card">
-      <strong style="font-size:13px">Panels & Grid Layout</strong>
+      <strong style="font-size:13px">Panels &amp; Folder Tree</strong>
       <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show Left Navigation Rail</span><input type="checkbox" ${prefs.showRail?"checked":""} onchange="setPref('showRail',this.checked)"/></label>
       <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show Right Details Inspector</span><input type="checkbox" ${prefs.showInspector?"checked":""} onchange="setPref('showInspector',this.checked)"/></label>
       <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show Drive Gauges in Left Panel</span><input type="checkbox" ${prefs.showDriveStrips?"checked":""} onchange="setPref('showDriveStrips',this.checked);renderDriveAndQuickStrips()"/></label>
-      <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show Quick Folders in Left Panel</span><input type="checkbox" ${prefs.showQuickFolders?"checked":""} onchange="setPref('showQuickFolders',this.checked);renderDriveAndQuickStrips()"/></label>
-      <div><div style="display:flex;justify-content:space-between;font-size:12px"><span>Grid Columns (0 = Auto)</span><b>${prefs.gridCols===0?"Auto":prefs.gridCols}</b></div><input type="range" min="0" max="8" value="${prefs.gridCols}" oninput="setPref('gridCols',Number(this.value));openSettingsModal()" style="width:100%"/></div>
-      <div><div style="display:flex;justify-content:space-between;font-size:12px"><span>Auto Card Width</span><b>${prefs.cardMinPx} px</b></div><input type="range" min="130" max="340" step="10" value="${prefs.cardMinPx}" oninput="setPref('cardMinPx',Number(this.value))" style="width:100%"/></div>
+      <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show Quick Folders Strip</span><input type="checkbox" ${prefs.showQuickFolders?"checked":""} onchange="setPref('showQuickFolders',this.checked);renderDriveAndQuickStrips()"/></label>
+      <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show Subfolder Sizes &amp; Usage Bars</span><input type="checkbox" ${prefs.showTreeCounts?"checked":""} onchange="setPref('showTreeCounts',this.checked);if(state.currentPath)loadTree(state.currentPath)"/></label>
     </div>
     <div class="section-card">
-      <strong style="font-size:13px">Cards & Thumbnails</strong>
+      <strong style="font-size:13px">Gallery, Cards &amp; Sorting</strong>
+      <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:12px">
+        <span>Default View</span>
+        <div class="chip-row">
+          <button class="chip ${prefs.viewMode==="gallery"?"active":""}" onclick="setPref('viewMode','gallery');openSettingsModal()">Gallery</button>
+          <button class="chip ${prefs.viewMode==="list"?"active":""}" onclick="setPref('viewMode','list');openSettingsModal()">List</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:12px">
+        <span>Default Sort Order</span>
+        <div class="chip-row">
+          ${[["size:desc","Size ↓"],["name:asc","Name A–Z"],["date:desc","Newest"],["duration:desc","Longest"],["type:asc","Type"]].map(([v,lbl])=>`<button class="chip ${prefs.sort===v?"active":""}" onclick="prefs.sort='${v}';savePrefs();applyVisualPrefs();if(state.currentPath)loadFolder(state.currentPath);openSettingsModal()">${lbl}</button>`).join("")}
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:12px">
+        <span>Thumbnail Aspect Ratio</span>
+        <div class="chip-row">
+          ${[["16/10","16:10"],["16/9","16:9"],["4/3","4:3"],["1/1","1:1"],["3/4","3:4"]].map(([v,lbl])=>`<button class="chip ${prefs.cardAspect===v?"active":""}" onclick="setPref('cardAspect','${v}');openSettingsModal()">${lbl}</button>`).join("")}
+        </div>
+      </div>
+      <div><div style="display:flex;justify-content:space-between;font-size:12px"><span>Grid Columns (0 = Auto)</span><b>${prefs.gridCols===0?"Auto":prefs.gridCols}</b></div><input type="range" min="0" max="8" value="${prefs.gridCols}" oninput="setPref('gridCols',Number(this.value));openSettingsModal()" style="width:100%"/></div>
+      <div><div style="display:flex;justify-content:space-between;font-size:12px"><span>Auto Card Width</span><b>${prefs.cardMinPx} px</b></div><input type="range" min="130" max="340" step="10" value="${prefs.cardMinPx}" oninput="setPref('cardMinPx',Number(this.value))" style="width:100%"/></div>
+      <label style="display:flex;justify-content:space-between;font-size:12px"><span>Compact List Rows</span><input type="checkbox" ${prefs.compactList?"checked":""} onchange="setPref('compactList',this.checked)"/></label>
+      <label style="display:flex;justify-content:space-between;font-size:12px"><span>Hover Storyboard Scrubbing on Video Cards</span><input type="checkbox" ${prefs.hoverStoryboard?"checked":""} onchange="setPref('hoverStoryboard',this.checked)"/></label>
       <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show File Sizes</span><input type="checkbox" ${prefs.showSizes?"checked":""} onchange="setPref('showSizes',this.checked)"/></label>
       <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show Duration Badges</span><input type="checkbox" ${prefs.showDuration?"checked":""} onchange="setPref('showDuration',this.checked)"/></label>
       <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show Resolution Badges (4K/1080p)</span><input type="checkbox" ${prefs.showResolution?"checked":""} onchange="setPref('showResolution',this.checked)"/></label>
       <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show Filenames on Grid Cards</span><input type="checkbox" ${prefs.showFilenames?"checked":""} onchange="setPref('showFilenames',this.checked)"/></label>
-      <label style="display:flex;justify-content:space-between;font-size:12px"><span>Hover Storyboard Scrubbing on Video Cards</span><input type="checkbox" ${prefs.hoverStoryboard?"checked":""} onchange="setPref('hoverStoryboard',this.checked)"/></label>
+      <label style="display:flex;justify-content:space-between;font-size:12px"><span>Show Modified Dates on Cards</span><input type="checkbox" ${prefs.showDates?"checked":""} onchange="setPref('showDates',this.checked)"/></label>
     </div>
     <div class="section-card">
-      <strong style="font-size:13px">VLC Player & Studio Trimmer Defaults</strong>
-      <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:12px"><span>Seek Step Seconds</span><div>${[5,10,15,30].map(s=>`<button class="chip ${prefs.seekStep===s?"active":""}" onclick="setPref('seekStep',${s});openSettingsModal()">${s}s</button>`).join(" ")}</div></div>
+      <strong style="font-size:13px">Video Player &amp; Space-Saver Studio Defaults</strong>
+      <label style="display:flex;justify-content:space-between;font-size:12px"><span>Auto-Play Videos on Open</span><input type="checkbox" ${prefs.autoPlayVideos!==false?"checked":""} onchange="setPref('autoPlayVideos',this.checked)"/></label>
+      <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:12px"><span>Default Playback Speed</span><div class="chip-row">${[0.5,1.0,1.25,1.5,2.0].map(sp=>`<button class="chip ${Math.abs((prefs.defaultSpeed||1)-sp)<0.05?"active":""}" onclick="setPref('defaultSpeed',${sp});openSettingsModal()">${sp}x</button>`).join("")}</div></div>
+      <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:12px"><span>Skip / Seek Step</span><div class="chip-row">${[5,10,15,30].map(s=>`<button class="chip ${prefs.seekStep===s?"active":""}" onclick="setPref('seekStep',${s});openSettingsModal()">${s}s</button>`).join("")}</div></div>
+      <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:12px"><span>Default Cut Mode</span><div class="chip-row">${[["lossless","Lossless Copy"],["compress","Cut + Compress"]].map(([k,lbl])=>`<button class="chip ${(prefs.defaultTrimMode||"lossless")===k?"active":""}" onclick="setPref('defaultTrimMode','${k}');openSettingsModal()">${lbl}</button>`).join("")}</div></div>
       <div><div style="display:flex;justify-content:space-between;font-size:12px"><span>Default Compression Quality (CRF)</span><b>${prefs.defaultCrf}</b></div><input type="range" min="16" max="32" value="${prefs.defaultCrf}" oninput="setPref('defaultCrf',Number(this.value))" style="width:100%"/></div>
       <label style="display:flex;justify-content:space-between;font-size:12px"><span>Send Replaced / Deleted Originals to Recycle Bin</span><input type="checkbox" ${prefs.recycleDefault?"checked":""} onchange="setPref('recycleDefault',this.checked)"/></label>
     </div>
@@ -3424,12 +3640,13 @@ function openSettingsModal(){
       </div>
     </div>
     <div class="section-card">
-      <strong style="font-size:13px">This PC Companion Server & Paired Devices</strong>
+      <strong style="font-size:13px">This PC Companion Server &amp; Paired Devices</strong>
       <div style="font-size:12px;color:var(--muted)">Wi-Fi IPs: <b>${state.localIps.join(", ")||ip}</b> : 48720<br/>Pairing PIN: <b style="color:var(--primary)">${state.localPin}</b><br/>Browser / iPhone URL: <b>http://${ip}:48720/</b><br/>Android APK URL: <b>http://${ip}:48720/DeckVault.apk</b></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="pill-btn" onclick="rotatePcPin()">Generate New PIN</button>
         <button class="pill-btn" onclick="rescanActive()">Rescan Disks</button>
         <button class="pill-btn" onclick="ensureFirewall()">Allow Firewall Port</button>
+        <button class="pill-btn danger" onclick="prefs=Object.assign({},DEFAULT_PREFS);savePrefs();applyVisualPrefs();renderBrowser();openSettingsModal();showToast('Reset UI preferences to defaults')">Reset UI Defaults</button>
       </div>
     </div>
   `;
