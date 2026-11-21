@@ -72,6 +72,8 @@ fun VideoScrubPreview(
     modifier: Modifier = Modifier,
     cols: Int = 4,
     rows: Int = 4,
+    thumbnailCacheKey: String? = null,
+    storyboardCacheKey: String? = null,
 ) {
     val context = LocalContext.current
     var isScrubbing by remember(storyboardUrl) { mutableStateOf(false) }
@@ -86,11 +88,13 @@ fun VideoScrubPreview(
             loadingSprite = true
             runCatching {
                 val loader = SingletonImageLoader.get(context)
-                val request = ImageRequest.Builder(context)
+                val reqBuilder = ImageRequest.Builder(context)
                     .data(storyboardUrl)
                     .allowHardware(false)
-                    .build()
-                val result = loader.execute(request)
+                if (!storyboardCacheKey.isNullOrBlank()) {
+                    reqBuilder.memoryCacheKey(storyboardCacheKey).diskCacheKey(storyboardCacheKey)
+                }
+                val result = loader.execute(reqBuilder.build())
                 if (result is SuccessResult) {
                     spriteBitmap = result.image.toBitmap().asImageBitmap()
                 }
@@ -146,9 +150,20 @@ fun VideoScrubPreview(
             .then(scrubPointerMod)
             .background(Color.Black),
     ) {
-        // Resting thumbnail
+        // Resting thumbnail (stable IP/token-free cache key when supplied)
+        val thumbModel = remember(thumbnailUrl, thumbnailCacheKey) {
+            if (!thumbnailCacheKey.isNullOrBlank()) {
+                ImageRequest.Builder(context)
+                    .data(thumbnailUrl)
+                    .memoryCacheKey(thumbnailCacheKey)
+                    .diskCacheKey(thumbnailCacheKey)
+                    .build()
+            } else {
+                thumbnailUrl
+            }
+        }
         AsyncImage(
-            model = thumbnailUrl,
+            model = thumbModel,
             contentDescription = contentDescription,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),

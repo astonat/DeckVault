@@ -447,7 +447,12 @@ data class UserPreferences(
     val videoResumePositionsMs: Map<String, Long> = emptyMap(),
     val safSdTreeUris: Map<String, String> = emptyMap(),
     val preferPcOffloadWhenPaired: Boolean = false,
-)
+    val thumbnailCacheSizeMb: Int = 0, // 0 = Auto (512 MB on tablets, 256 MB on phones)
+) {
+    fun resolvedThumbnailCacheMb(isTablet: Boolean): Int =
+        if (thumbnailCacheSizeMb > 0) thumbnailCacheSizeMb.coerceIn(128, 4096)
+        else if (isTablet) 512 else 256
+}
 
 @Serializable
 data class CropBoxSpec(

@@ -74,6 +74,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -180,27 +181,23 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Wire Coil 3 to Local Direct Thumbnail Fetcher + Tuned OkHttp + Fast Memory/Disk Cache
+            val isTablet = resources.configuration.smallestScreenWidthDp >= 600
+            val prefs by vm.preferences.collectAsState()
+            val targetCacheMb = prefs.resolvedThumbnailCacheMb(isTablet)
+            var appliedCacheMb by remember { mutableIntStateOf(targetCacheMb) }
+
+            // Wire Coil 3 to Local Direct Thumbnail Fetcher + Tuned OkHttp + User-Configurable Memory/Disk Cache
             LaunchedEffect(Unit) {
                 SingletonImageLoader.setSafe { ctx ->
-                    ImageLoader.Builder(ctx)
-                        .components {
-                            add(DeckVaultLocalFetcherFactory(vm.localRepo))
-                            add(OkHttpNetworkFetcherFactory(callFactory = { vm.api.okHttpClient }))
-                        }
-                        .memoryCache {
-                            MemoryCache.Builder()
-                                .maxSizePercent(ctx, 0.22)
-                                .build()
-                        }
-                        .diskCache {
-                            DiskCache.Builder()
-                                .directory(File(ctx.cacheDir, "coil_image_cache").toOkioPath())
-                                .maxSizeBytes(160L * 1024 * 1024)
-                                .build()
-                        }
-                        .crossfade(100)
-                        .build()
+                    buildDeckVaultImageLoader(ctx, vm, targetCacheMb, isTablet)
+                }
+            }
+            LaunchedEffect(targetCacheMb) {
+                if (targetCacheMb != appliedCacheMb) {
+                    appliedCacheMb = targetCacheMb
+                    SingletonImageLoader.setUnsafe(
+                        buildDeckVaultImageLoader(applicationContext, vm, targetCacheMb, isTablet),
+                    )
                 }
             }
 
@@ -208,8 +205,6 @@ class MainActivity : ComponentActivity() {
             val layoutInfo by WindowInfoTracker.getOrCreate(this)
                 .windowLayoutInfo(this)
                 .collectAsState(initial = WindowLayoutInfo(emptyList()))
-
-            val prefs by vm.preferences.collectAsState()
 
             DeckVaultTheme(
                 accentPalette = prefs.accentPalette,
@@ -225,6 +220,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+private fun buildDeckVaultImageLoader(
+    ctx: android.content.Context,
+    vm: MainViewModel,
+    cacheSizeMb: Int,
+    isTablet: Boolean,
+): ImageLoader = ImageLoader.Builder(ctx)
+    .components {
+        add(DeckVaultLocalFetcherFactory(vm.localRepo))
+        add(OkHttpNetworkFetcherFactory(callFactory = { vm.api.okHttpClient }))
+    }
+    .memoryCache {
+        MemoryCache.Builder()
+            .maxSizePercent(ctx, if (isTablet) 0.25 else 0.22)
+            .build()
+    }
+    .diskCache {
+        DiskCache.Builder()
+            .directory(File(ctx.cacheDir, "coil_image_cache").toOkioPath())
+            .maxSizeBytes(cacheSizeMb.toLong() * 1024L * 1024L)
+            .build()
+    }
+    .crossfade(100)
+    .build()
 
 @Composable
 private fun DeckVaultRoot(
@@ -513,6 +532,8 @@ private fun DeckVaultRoot(
                                 onMergeSelected = { vm.openMergeForSelection() },
                                 activeQueueCount = ui.queueJobs.count { it.status in listOf("queued", "uploading", "running", "downloading") },
                                 onOpenQueue = { vm.openQueueSheet() },
+                                precacheProgressText = ui.precacheProgressText,
+                                onPrecacheCurrentFolder = { vm.precacheCurrentFolderThumbnails() },
                                 modifier = Modifier.weight(1f).fillMaxHeight(),
                             )
                         }
@@ -620,6 +641,8 @@ private fun DeckVaultRoot(
                         onMergeSelected = { vm.openMergeForSelection() },
                         activeQueueCount = ui.queueJobs.count { it.status in listOf("queued", "uploading", "running", "downloading") },
                         onOpenQueue = { vm.openQueueSheet() },
+                        precacheProgressText = ui.precacheProgressText,
+                        onPrecacheCurrentFolder = { vm.precacheCurrentFolderThumbnails() },
                         modifier = Modifier.fillMaxSize(),
                     )
                 }

@@ -397,9 +397,32 @@ fun MediaOptimizerDialog(
                                 )
                             }
                         }
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = surfaces.elevatedSurface,
+                            border = BorderStroke(1.dp, surfaces.hairlineBorder),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            val profileDesc = when (upscaleMode) {
+                                "anime" -> "Anime / Screen Capture: Gentle temporal cleanup + crisp line edges tuned for animation & UI recordings. Runs on PC FFmpeg."
+                                "restore" -> "Restore & Clean: Removes blocky dark gradients (deband) + denoises heavily compressed or older clips before scaling. Runs on PC FFmpeg."
+                                else -> "Sharp CAS: High-detail edge clarity without halos. Ideal all-rounder for camera footage, vlogs & real-world clips."
+                            }
+                            Text(
+                                text = profileDesc,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = surfaces.textSecondary,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            )
+                        }
 
                         Text("Sharpen Clarity (${String.format("%.1f", sharpen)})", style = MaterialTheme.typography.labelLarge, color = surfaces.textPrimary)
                         Slider(value = sharpen, onValueChange = { sharpen = it }, valueRange = 0f..1.5f)
+                        Text(
+                            text = "0.0 = natural soft texture • 0.9 = balanced crisp edges • 1.3+ = strong fine detail",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = surfaces.textSecondary,
+                        )
 
                         if (file.isVideo) {
                             Text("Denoise (PC FFmpeg Pro)", style = MaterialTheme.typography.labelLarge, color = surfaces.textPrimary)
@@ -413,9 +436,21 @@ fun MediaOptimizerDialog(
                                     )
                                 }
                             }
+                            Text(
+                                text = when (denoiseMode) {
+                                    "fast" -> "Fast 3D (hqdn3d): Reduces light grain & compression speckle with modest CPU time."
+                                    "hq" -> "HQ NLMeans: Studio-grade deep noise cleanup — heaviest PC CPU load & slowest render."
+                                    else -> "Off: Fastest encode; keeps natural texture untouched."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (denoiseMode == "hq") MaterialTheme.colorScheme.tertiary else surfaces.textSecondary,
+                            )
 
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                Text("60 FPS Motion Interpolation (PC)", color = surfaces.textPrimary, style = MaterialTheme.typography.bodyMedium)
+                                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                    Text("60 FPS Motion Interpolation (PC)", color = surfaces.textPrimary, style = MaterialTheme.typography.bodyMedium)
+                                    Text("Generates extra intermediate frames for 60fps fluidity (Heavy CPU & slow render)", color = surfaces.textSecondary, style = MaterialTheme.typography.bodySmall)
+                                }
                                 Switch(
                                     checked = fps60,
                                     enabled = hasPcEngine,
@@ -423,7 +458,10 @@ fun MediaOptimizerDialog(
                                 )
                             }
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                Text("Remove Gradient Banding (PC)", color = surfaces.textPrimary, style = MaterialTheme.typography.bodyMedium)
+                                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                    Text("Remove Gradient Banding (PC)", color = surfaces.textPrimary, style = MaterialTheme.typography.bodyMedium)
+                                    Text("Smooths stepped compression blocks in dark scenes, shadows & skies", color = surfaces.textSecondary, style = MaterialTheme.typography.bodySmall)
+                                }
                                 Switch(
                                     checked = deband,
                                     enabled = hasPcEngine,
@@ -431,7 +469,10 @@ fun MediaOptimizerDialog(
                                 )
                             }
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                Text("Deshake Video Stabilizer (PC)", color = surfaces.textPrimary, style = MaterialTheme.typography.bodyMedium)
+                                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                    Text("Deshake Video Stabilizer (PC)", color = surfaces.textPrimary, style = MaterialTheme.typography.bodyMedium)
+                                    Text("Reduces handheld camera jitter before upscaling (moderate CPU cost)", color = surfaces.textSecondary, style = MaterialTheme.typography.bodySmall)
+                                }
                                 Switch(
                                     checked = stabilize,
                                     enabled = hasPcEngine,

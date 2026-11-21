@@ -137,7 +137,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
   .media-card.focused{border-color:var(--secondary)}
   .media-card.selected{border-color:var(--primary);box-shadow:0 0 0 1px var(--primary);background:var(--elev)}
   .sel-check{position:absolute;top:7px;left:7px;width:21px;height:21px;border-radius:99px;border:2px solid rgba(255,255,255,.72);background:rgba(0,0,0,.62);color:#000;font-size:11px;font-weight:900;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .12s;z-index:4;cursor:pointer}
-  .media-card:hover .sel-check,.list-row:hover .sel-check,body.has-selection .sel-check,body.select-mode .sel-check,.selected .sel-check{opacity:1}
+  .media-card:hover .sel-check,.list-row:hover .sel-check,body.has-selection .sel-check,.split-pane.has-selection .sel-check,body.select-mode .sel-check,.selected .sel-check{opacity:1}
   .selected .sel-check{background:var(--primary);border-color:var(--primary);color:var(--on-primary)}
   .thumb-wrap{position:relative;width:100%;aspect-ratio:var(--card-aspect,16/10);background:#07080b;overflow:hidden;display:flex;align-items:center;justify-content:center}
   .thumb-wrap img{width:100%;height:100%;object-fit:cover;display:block}
@@ -459,16 +459,29 @@ DESKTOP_APP_HTML = r"""<!doctype html>
     <section class="main-pane split-pane" id="splitPane" style="display:none">
       <div class="split-hdr">
         <strong style="font-size:12px;color:var(--primary)">◫ Split</strong>
-        <select class="input" id="splitHostSelect" onchange="openInSplitView(this.value)" style="padding:4px 7px;font-size:11px;max-width:130px"></select>
+        <select class="input" id="splitHostSelect" onchange="openInSplitView(this.value)" style="padding:4px 7px;font-size:11px;max-width:140px"></select>
         <button class="mini-btn" id="splitUpBtn" onclick="splitGoUp()">↑ Up</button>
         <button class="mini-btn" onclick="createSplitFolderHere()">+ Folder</button>
+        <button class="mini-btn" id="splitViewBtn" onclick="toggleSplitViewMode()">Grid</button>
+        <select class="input" id="splitSortSelect" onchange="changeSplitSort(this.value)" style="padding:4px 7px;font-size:11px">
+          <option value="size:desc">Size ↓</option>
+          <option value="size:asc">Size ↑</option>
+          <option value="name:asc">Name A-Z</option>
+          <option value="name:desc">Name Z-A</option>
+          <option value="date:desc">Newest</option>
+          <option value="date:asc">Oldest</option>
+        </select>
         <span style="flex:1"></span>
-        <button class="mini-btn" onclick="transferMainToSplit(false)" title="Copy main-pane selected items here">Copy Here</button>
-        <button class="mini-btn" onclick="transferMainToSplit(true)" title="Move main-pane selected items here">Move Here</button>
         <button class="mini-btn" onclick="closeSplitView()">✕</button>
       </div>
+      <div class="split-hdr" style="padding:5px 8px">
+        <input class="input" id="splitSearchBox" placeholder="Search split folder..." oninput="onSplitSearchInput()" style="flex:1;min-width:105px;padding:4px 8px;font-size:11px"/>
+        <div class="chip-row" id="splitFilterRow" style="flex-wrap:nowrap"></div>
+      </div>
+      <div class="chip-row" id="splitRootsStrip" style="flex:0 0 auto"></div>
       <div class="crumbs" id="splitCrumbs" style="flex:0 0 auto"></div>
-      <div class="browser-scroll" id="splitBrowserArea" style="padding-bottom:14px"></div>
+      <div class="split-hdr" id="splitActionBar" style="padding:4px 8px;background:var(--card)"></div>
+      <div class="browser-scroll" id="splitBrowserArea" style="padding-bottom:16px"></div>
     </section>
 
     <!-- Adjustable Right Details / Info + Bottom Job Queue Panel -->
@@ -721,11 +734,12 @@ DESKTOP_APP_HTML = r"""<!doctype html>
         <option value="overwrite">Save Over Original</option>
         <option value="copy">Save as Copy (_edited.mp4)</option>
       </select>
+      <select class="input" id="studioExecTarget" style="padding:4px 8px;display:none" title="Choose which computer runs the FFmpeg encode"></select>
       <label style="font-size:11px;color:var(--muted)"><input type="checkbox" id="editRecycle" checked/> Recycle Original</label>
-      <button class="mini-btn" onclick="queueExtractAudio(state.activeFile, state.activeHostId, true)" title="Extract trimmed Audio (M4A)">🎵 Extract Audio</button>
-      <button class="mini-btn" onclick="queueExportGif(state.activeFile, state.activeHostId, true)" title="Export trimmed & cropped Animated GIF">🎞 Export GIF</button>
+      <button class="mini-btn" onclick="queueExtractAudio(state.activeFile, state.activeFileHostId||state.activeHostId, true)" title="Extract trimmed Audio (M4A)">🎵 Extract Audio</button>
+      <button class="mini-btn" onclick="queueExportGif(state.activeFile, state.activeFileHostId||state.activeHostId, true)" title="Export trimmed & cropped Animated GIF">🎞 Export GIF</button>
       <span style="flex:1"></span>
-      <button class="pill-btn" onclick="executeStudioEdit(true)">+ Add to Queue</button>
+      <button class="pill-btn" id="studioQueueBtn" onclick="executeStudioEdit(true)">+ Add to Queue</button>
       <button class="pill-btn primary" id="exportEditBtn" onclick="executeStudioEdit(false)">Render & Save Edit</button>
     </div>
   </div>
@@ -738,9 +752,9 @@ DESKTOP_APP_HTML = r"""<!doctype html>
     <div style="display:flex;gap:6px">
       <button class="pill-btn" onclick="stepImage(-1)">Prev</button>
       <button class="pill-btn" onclick="stepImage(1)">Next</button>
-      <button class="pill-btn" onclick="openOptimizeModal([state.activeFile],'compress')">Compress</button>
-      <button class="pill-btn" onclick="openOptimizeModal([state.activeFile],'upscale')">Upscale</button>
-      <button class="pill-btn" onclick="openTransferModal([state.activeFile], true)">Move</button>
+      <button class="pill-btn" onclick="openOptimizeModal([state.activeFile],'compress',state.activeFileHostId||state.activeHostId)">Compress</button>
+      <button class="pill-btn" onclick="openOptimizeModal([state.activeFile],'upscale',state.activeFileHostId||state.activeHostId)">Upscale</button>
+      <button class="pill-btn" onclick="openTransferModal([state.activeFile], true, state.activeFileHostId||state.activeHostId)">Move</button>
       <button class="pill-btn danger" onclick="deleteSingleOverlayFile(false)">♻ Recycle</button>
       <button class="pill-btn danger" onclick="deleteSingleOverlayFile(true)">✕ Del Forever</button>
       <button class="pill-btn" onclick="closeOverlay('imageOverlay')">Close</button>
@@ -755,7 +769,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
     <strong id="docTitle" style="flex:1">File</strong>
     <div style="display:flex;gap:6px">
       <a id="docDl" download><button class="pill-btn">Download</button></a>
-      <button class="pill-btn" onclick="openTransferModal([state.activeFile], true)">Move</button>
+      <button class="pill-btn" onclick="openTransferModal([state.activeFile], true, state.activeFileHostId||state.activeHostId)">Move</button>
       <button class="pill-btn danger" onclick="deleteSingleOverlayFile(false)">♻ Recycle</button>
       <button class="pill-btn danger" onclick="deleteSingleOverlayFile(true)">✕ Del Forever</button>
       <button class="pill-btn" onclick="closeDocOverlay()">Close</button>
@@ -1094,6 +1108,8 @@ const state = {
   focusedFile: null,
   discovered: [],
   activeFile: null,
+  activeFileHostId: "",
+  _submittingJob: false,
   transferItems: [],
   transferMove: true,
   transferHostId: "",
@@ -1108,7 +1124,7 @@ const state = {
   gdrive: null,
   cloudProviders: [],
   opt: { items:[], hostId:"", tab:"compress", est:null },
-  split: { open:false, hostId:"", currentPath:"", parentPath:"", folders:[], files:[], widthPx:460 },
+  split: { open:false, hostId:"", currentPath:"", parentPath:"", drives:[], quickFolders:[], folders:[], files:[], selected:new Set(), lastSelectedIdx:-1, viewMode:"gallery", sort:"size:desc", filter:"all", query:"", widthPx:540 },
   jobs: [],
   queueCollapsed: false,
   busyTasks: new Map(),
@@ -1323,10 +1339,13 @@ async function enqueueJobs(type, payloads, openInspector=true){
   return res;
 }
 async function cancelJob(id){
+  document.querySelectorAll(`button[data-cancel-job="${id}"]`).forEach(b=>{ b.disabled=true; b.textContent="Cancelling..."; });
   try{
     const res = await sysFetch("/api/jobs/cancel", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({id})});
     if(res.snapshot) applyJobsSnapshot(res.snapshot);
-    showToast("Cancelled task");
+    showToast("Cancelling task...");
+    setTimeout(()=>refreshJobs(true), 250);
+    setTimeout(()=>refreshJobs(true), 750);
   }catch(e){showToast("Cancel failed: "+e.message)}
 }
 async function clearDoneJobs(){
@@ -1355,10 +1374,11 @@ function updateInlineJobBoxes(){
       document.getElementById("studioProgLabel").textContent = j.status==="done" ? "Done!" : (j.status==="error" ? "Failed" : (j.status==="cancelled" ? "Cancelled" : (j.message||"Rendering...")));
       document.getElementById("studioProgFill").style.width = p + "%";
       document.getElementById("studioProgPct").textContent = p + "%";
-      const btn = document.getElementById("exportEditBtn");
+      const btn = document.getElementById("exportEditBtn"), qBtn = document.getElementById("studioQueueBtn");
       if(j.status==="done"){
         state.activeStudioJobId = "";
         if(btn){ btn.disabled=false; btn.textContent="Render & Save Edit"; }
+        if(qBtn){ qBtn.disabled=false; qBtn.textContent="+ Add to Queue"; }
         setTimeout(()=>{ if(sBox) sBox.style.display="none"; }, 1800);
         if(j.outputPath && state.activeFile && j.outputPath === state.activeFile.path){
           closeVideoOverlay();
@@ -1366,6 +1386,7 @@ function updateInlineJobBoxes(){
       }else if(j.status==="error"||j.status==="cancelled"){
         state.activeStudioJobId = "";
         if(btn){ btn.disabled=false; btn.textContent="Render & Save Edit"; }
+        if(qBtn){ qBtn.disabled=false; qBtn.textContent="+ Add to Queue"; }
       }
     }
   }
@@ -1383,9 +1404,12 @@ function updateInlineJobBoxes(){
         ? `Done (${tracked.length} completed)`
         : (anyErr ? `Error: ${anyErr.error}` : (running.message || running.title));
       const cBtn = document.getElementById("cmpRunBtn"), uBtn = document.getElementById("upRunBtn");
+      const cqBtn = document.getElementById("cmpQueueBtn"), uqBtn = document.getElementById("upQueueBtn");
       if(allDone || tracked.every(j=>["done","error","cancelled"].includes(j.status))){
         if(cBtn){ cBtn.disabled=false; cBtn.textContent=`Run Now (${state.opt.items.length})`; }
         if(uBtn){ uBtn.disabled=false; uBtn.textContent=`Upscale Now (${state.opt.items.length})`; }
+        if(cqBtn){ cqBtn.disabled=false; cqBtn.textContent="+ Add to Queue"; }
+        if(uqBtn){ uqBtn.disabled=false; uqBtn.textContent="+ Add to Queue"; }
         if(allDone){
           const firstOut = tracked[0];
           const actEl = document.getElementById("optProgActions");
@@ -1396,6 +1420,8 @@ function updateInlineJobBoxes(){
               <button class="mini-btn" onclick="closeDialog('optimizeModal');goToQueuedOutputFolder('${firstOut.id}')">📂 Go to Folder</button>
             `;
           }
+          state.activeOptJobIds = [];
+        }else{
           state.activeOptJobIds = [];
         }
       }
@@ -1455,7 +1481,7 @@ function renderQueueDock(){
         ${sizeNote}
       </div>
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:1px">
-        ${isActive?`<button class="mini-btn" style="color:var(--danger)" onclick="cancelJob('${j.id}')">✕ Cancel</button>`:""}
+        ${isActive?`<button class="mini-btn" data-cancel-job="${j.id}" style="color:var(--danger)" onclick="cancelJob('${j.id}')">✕ Cancel</button>`:""}
         ${isDone?`<button class="mini-btn" style="border-color:var(--primary);color:var(--primary)" onclick="openQueuedOutput('${j.id}',false)">▶ Play / Open</button>`:""}
         ${isDone && j.outputMediaType==="video"?`<button class="mini-btn" onclick="openQueuedOutput('${j.id}',true)">✂ Edit / Cut</button>`:""}
         ${isDone && isMedia?`<button class="mini-btn" onclick="optimizeQueuedOutput('${j.id}','compress')">🗜</button><button class="mini-btn" onclick="optimizeQueuedOutput('${j.id}','upscale')">✨</button>`:""}
@@ -1644,8 +1670,11 @@ async function dropItemsInto(destHostId, destPath, payload, move){
 }
 
 function renderCloudSection(){
+  const sec=document.getElementById("cloudStripSection");
+  if(sec) sec.style.display = (!state.activeHostId || state.activeHostId===state.localHostId) ? "" : "none";
   const row=document.getElementById("cloudStripRow");
   if(!row) return;
+  if(state.activeHostId && state.activeHostId!==state.localHostId){ row.innerHTML=""; return; }
   row.innerHTML="";
   const list=state.cloudProviders || [];
   const hasGdrive = list.some(c=>c.provider==="gdrive");
@@ -1791,16 +1820,67 @@ function renderHostBars(){
   }
 }
 
+let _hostSwitchGen = 0;
+let _rootsAbort = null;
 async function selectHost(hostId, targetPath=""){
-  state.activeHostId = hostId; state.spaceHogs = false; clearSelection(); renderHostBars();
+  const myGen = ++_hostSwitchGen;
+  if(_rootsAbort){ try{ _rootsAbort.abort(); }catch{} }
+  if(_navAbort){ try{ _navAbort.abort(); }catch{} }
+  if(_treeAbort){ try{ _treeAbort.abort(); }catch{} }
+  _rootsAbort = new AbortController();
+  const hObj = state.hosts.find(h=>h.hostId===hostId);
+  const hLabel = hObj ? (hObj.label||hObj.name) : "Device";
+
+  state.activeHostId = hostId;
+  state.spaceHogs = false;
+  state.drives = [];
+  state.quickFolders = [];
+  state.folders = [];
+  state.files = [];
+  state.currentPath = "";
+  state.parentPath = "";
+  state.focusedFile = null;
+  clearSelection();
+  renderHostBars();
+  renderDriveAndQuickStrips();
+  renderBreadcrumbs("", `Connecting to ${hLabel}...`);
+  const area = document.getElementById("browserArea");
+  if(area){
+    area.querySelectorAll("img").forEach(im=>{ try{ im.removeAttribute("src"); }catch{} });
+    area.innerHTML = `<div style="padding:48px;text-align:center;color:var(--muted)">Connecting to ${escHtml(hLabel)}...</div>`;
+  }
+  const treeBox = document.getElementById("treeList");
+  if(treeBox) treeBox.innerHTML = `<div style="padding:12px;font-size:12px;color:var(--muted)">Connecting...</div>`;
+
   try{
-    const r = await hostApi(hostId, "/api/roots");
+    const r = await hostApi(hostId, "/api/roots", {signal:_rootsAbort.signal, busyLabel:`Connecting to ${hLabel}...`});
+    if(myGen !== _hostSwitchGen || state.activeHostId !== hostId) return;
     state.drives = r.drives || []; state.quickFolders = r.quickFolders || []; state.spaceSaved = r.spaceSavedBytes || 0;
-    if(hostId === state.localHostId && r.cloudProviders){ state.cloudProviders = r.cloudProviders; renderCloudSection(); }
+    if(hostId === state.localHostId && r.cloudProviders){ state.cloudProviders = r.cloudProviders; }
     updateSavedBadge(); renderDriveAndQuickStrips();
     const first = targetPath || (state.quickFolders.find(q=>q.name==="Videos")?.path) || (state.quickFolders[0]?.path) || (state.drives[0]?.path) || "";
-    if(first) await loadFolder(first);
-  }catch(e){showToast("Could not reach device: "+e.message)}
+    if(first){
+      await loadFolder(first);
+    }else{
+      renderBreadcrumbs("", hLabel);
+      if(area) area.innerHTML = `<div style="padding:48px;text-align:center;color:var(--muted)">No drives or folders reported by ${escHtml(hLabel)}</div>`;
+      if(treeBox) treeBox.innerHTML = "";
+    }
+  }catch(e){
+    if(e?.name === "AbortError" || myGen !== _hostSwitchGen) return;
+    renderBreadcrumbs("", `${hLabel} Offline`);
+    if(treeBox) treeBox.innerHTML = `<div style="padding:12px;font-size:12px;color:var(--danger)">Device unreachable</div>`;
+    if(area) area.innerHTML = `
+      <div style="padding:48px 20px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:12px">
+        <div style="font-size:15px;font-weight:700;color:var(--danger)">Could not reach ${escHtml(hLabel)}</div>
+        <div style="font-size:12px;color:var(--muted);max-width:440px">${escHtml(e.message||"Connection failed")}. Check that DeckVault is open on that device and connected to the same Wi-Fi.</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
+          <button class="pill-btn primary" onclick='selectHost(${JSON.stringify(hostId)},${JSON.stringify(targetPath)})'>Retry</button>
+          ${hostId!==state.localHostId?`<button class="pill-btn" onclick='selectHost(state.localHostId)'>Back to This PC</button>`:""}
+        </div>
+      </div>`;
+    showToast("Could not reach "+hLabel+": "+e.message);
+  }
 }
 
 function updateSavedBadge(){
@@ -1905,11 +1985,14 @@ function renderBreadcrumbs(pathStr, label=""){
 
 let _navAbort = null;
 let _treeAbort = null;
+function resetBrowserScroll(id="browserArea"){ const el=document.getElementById(id); if(el) el.scrollTop=0; }
 async function loadFolder(path, opts={}){
   if(_navAbort){ try{ _navAbort.abort(); }catch{} }
   if(_treeAbort){ try{ _treeAbort.abort(); }catch{} }
   _navAbort = new AbortController();
   const sig = _navAbort.signal;
+  const reqGen = _hostSwitchGen;
+  const reqHostId = state.activeHostId;
   state.currentPath=path; state.spaceHogs=false; clearSelection(); renderDriveAndQuickStrips();
   const [sortBy, order] = prefs.sort.split(":");
   const q = document.getElementById("searchBox").value.trim();
@@ -1918,22 +2001,25 @@ async function loadFolder(path, opts={}){
   const fetchOpts = opts.silent ? {silent:true, signal:sig} : {busyLabel:"Loading folder...", signal:sig};
   try{
     if(state.recursive && q){
-      const d = await hostApi(state.activeHostId, "/api/search?" + new URLSearchParams({path, q}).toString(), fetchOpts);
+      const d = await hostApi(reqHostId, "/api/search?" + new URLSearchParams({path, q}).toString(), fetchOpts);
+      if(reqGen !== _hostSwitchGen || reqHostId !== state.activeHostId) return;
       state.folders=[]; state.files=d.files||[]; state.parentPath="";
       renderBreadcrumbs(path, `Deep Search: "${q}"`);
       updateFooter(`${state.files.length} matches`);
     }else{
-      const d = await hostApi(state.activeHostId, "/api/list?" + qs.toString(), fetchOpts);
+      const d = await hostApi(reqHostId, "/api/list?" + qs.toString(), fetchOpts);
+      if(reqGen !== _hostSwitchGen || reqHostId !== state.activeHostId) return;
       state.folders=d.folders||[]; state.files=d.files||[]; state.parentPath=d.parentPath||"";
       renderBreadcrumbs(d.path||path);
       updateFooter(`${state.folders.length} folders • ${state.files.length} files • ${fmt(d.totalSizeBytes)}`);
     }
   }catch(e){
-    if(e?.name === "AbortError") return;
+    if(e?.name === "AbortError" || reqGen !== _hostSwitchGen || reqHostId !== state.activeHostId) return;
     throw e;
   }
   loadTree(path);
   renderBrowser();
+  if(!opts.preserveScroll) resetBrowserScroll("browserArea");
   if(state.focusedFile){
     const refreshed = state.files.find(x=>x.path===state.focusedFile.path);
     if(refreshed){ state.focusedFile = refreshed; renderInspector(); }
@@ -1950,8 +2036,11 @@ function updateFooter(leftTxt){
 
 async function loadTree(path){
   _treeAbort = new AbortController();
+  const reqGen = _hostSwitchGen;
+  const reqHostId = state.activeHostId;
   try{
-    const t = await hostApi(state.activeHostId, "/api/tree?" + new URLSearchParams({path, sort:state.treeSort}).toString(), {silent:true, signal:_treeAbort.signal});
+    const t = await hostApi(reqHostId, "/api/tree?" + new URLSearchParams({path, sort:state.treeSort}).toString(), {silent:true, signal:_treeAbort.signal});
+    if(reqGen !== _hostSwitchGen || reqHostId !== state.activeHostId) return;
     const box=document.getElementById("treeList"); box.innerHTML="";
     document.getElementById("treeCurInfo").textContent=state.parentPath ? "Subfolder" : "Drive Root";
     (t.children||[]).forEach(ch=>{
@@ -1965,6 +2054,7 @@ async function loadTree(path){
       wireDropTarget(row, state.activeHostId, ch.path);
       box.appendChild(row);
     });
+    box.scrollTop = 0;
   }catch{}
 }
 
@@ -1974,7 +2064,7 @@ function renderFilters(){
   items.forEach(([k,lbl])=>{
     const b=document.createElement("button");
     b.className="chip"+(state.filter===k?" active":""); b.textContent=lbl;
-    b.onclick=()=>{state.filter=k;renderFilters();if(state.currentPath)loadFolder(state.currentPath)};
+    b.onclick=()=>{state.filter=k;renderFilters();resetBrowserScroll("browserArea");if(state.currentPath)loadFolder(state.currentPath)};
     r.appendChild(b);
   });
 }
@@ -2224,11 +2314,11 @@ function toggleGridPopover(force){ const p=document.getElementById("gridPopover"
 function togglePane(){document.getElementById("treePane").classList.toggle("collapsed")}
 function toggleInspector(force){ setPref("showInspector", force!==undefined ? force : !prefs.showInspector); }
 function goUp(){if(state.parentPath)loadFolder(state.parentPath)}
-function toggleTreeSort(){state.treeSort=state.treeSort==="size"?"name":"size";document.getElementById("treeSortBtn").textContent=state.treeSort==="size"?"Size":"Name";if(state.currentPath)loadTree(state.currentPath)}
+function toggleTreeSort(){state.treeSort=state.treeSort==="size"?"name":"size";document.getElementById("treeSortBtn").textContent=state.treeSort==="size"?"Size":"Name";const tl=document.getElementById("treeList");if(tl)tl.scrollTop=0;if(state.currentPath)loadTree(state.currentPath)}
 async function rescanActive(){await hostApi(state.activeHostId,"/api/rescan",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});showToast("Rescanning drives...");setTimeout(()=>selectHost(state.activeHostId,state.currentPath),800)}
-function toggleViewMode(){setPref("viewMode", prefs.viewMode==="gallery"?"list":"gallery"); localStorage.setItem("dv_view", prefs.viewMode);}
-function changeSort(v){setPref("sort", v); localStorage.setItem("dv_sort", v); if(state.currentPath)loadFolder(state.currentPath)}
-function toggleRecursive(){state.recursive=!state.recursive;document.getElementById("recursiveChip").classList.toggle("active",state.recursive);document.getElementById("recursiveChip").textContent="Deep Search: "+(state.recursive?"On":"Off");if(state.currentPath)loadFolder(state.currentPath)}
+function toggleViewMode(){setPref("viewMode", prefs.viewMode==="gallery"?"list":"gallery"); localStorage.setItem("dv_view", prefs.viewMode); resetBrowserScroll("browserArea");}
+function changeSort(v){setPref("sort", v); localStorage.setItem("dv_sort", v); resetBrowserScroll("browserArea"); if(state.currentPath)loadFolder(state.currentPath)}
+function toggleRecursive(){state.recursive=!state.recursive;document.getElementById("recursiveChip").classList.toggle("active",state.recursive);document.getElementById("recursiveChip").textContent="Deep Search: "+(state.recursive?"On":"Off");resetBrowserScroll("browserArea");if(state.currentPath)loadFolder(state.currentPath)}
 function onSearchInput(){clearTimeout(window._st);window._st=setTimeout(()=>{if(state.currentPath)loadFolder(state.currentPath)},240)}
 function showBrowseMode(){closeOverlay("allDrivesOverlay");if(state.spaceHogs&&state.currentPath)loadFolder(state.currentPath)}
 async function createFolderHere(){if(!state.currentPath)return;const n=prompt("Create new folder inside current directory:");if(!n)return;await hostApi(state.activeHostId,"/api/folder/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({parentDir:state.currentPath,name:n})});await loadFolder(state.currentPath);}
@@ -2278,6 +2368,7 @@ async function loadSpaceHogs(){
   state.folders=[]; state.files=d.files||[];
   renderBreadcrumbs(state.currentPath, `Largest Space Hogs (${state.files.length})`);
   renderBrowser();
+  resetBrowserScroll("browserArea");
 }
 
 /* All Devices, Cloud & Drives Dashboard */
@@ -2365,18 +2456,32 @@ async function removePaired(hostId){
 }
 
 /* VLC-Rival Cinema Video Player & Visual Cut / Crop Studio */
-function openFileViewer(f, openStudio){
+function isMobileHostObj(h){ return /android|ios|iphone|ipad/i.test(String(h?.os||"")) || /fold|tab|phone/i.test(String(h?.name||"")); }
+function buildExecTargetOptions(sourceHostId){
+  const localLbl = escHtml(state.localDeviceName || "This PC");
+  let opts = `<option value="local" selected>Run on ${localLbl} (This PC — Fast &amp; Cancellable)</option>`;
+  if(sourceHostId && sourceHostId !== state.localHostId){
+    const h = state.hosts.find(x=>x.hostId===sourceHostId);
+    if(h && !isMobileHostObj(h)){
+      opts += `<option value="remote">Run on ${escHtml(h.label||h.name)} (Remote PC — No file transfer)</option>`;
+    }
+  }
+  return opts;
+}
+function openFileViewer(f, openStudio, hostOverride=""){
+  const fHost = hostOverride || state.activeHostId;
   state.activeFile=f;
+  state.activeFileHostId=fHost;
   const ext=("."+(f.extension||"")).toLowerCase();
-  if(f.mediaType==="video") openVideoOverlay(f, openStudio);
-  else if(f.mediaType==="image") openImageOverlay(f);
-  else if(f.mediaType==="audio") openDocOverlay(f, `<audio src="${hostMediaUrl(state.activeHostId,"/api/stream",{path:f.path})}" controls autoplay style="width:min(560px,90vw)"></audio>`);
-  else if(ext===".pdf") openDocOverlay(f, `<iframe src="${hostMediaUrl(state.activeHostId,"/api/stream",{path:f.path})}" style="width:100%;height:100%;border:0;border-radius:12px"></iframe>`);
+  if(f.mediaType==="video") openVideoOverlay(f, openStudio, fHost);
+  else if(f.mediaType==="image") openImageOverlay(f, fHost);
+  else if(f.mediaType==="audio") openDocOverlay(f, `<audio src="${hostMediaUrl(fHost,"/api/stream",{path:f.path})}" controls autoplay style="width:min(560px,90vw)"></audio>`, fHost);
+  else if(ext===".pdf") openDocOverlay(f, `<iframe src="${hostMediaUrl(fHost,"/api/stream",{path:f.path})}" style="width:100%;height:100%;border:0;border-radius:12px"></iframe>`, fHost);
   else if([".txt",".md",".json",".xml",".csv",".log",".py",".kt",".swift",".js",".html",".css",".ps1",".bat",".ini",".yaml",".yml"].includes(ext)){
-    openDocOverlay(f, `<pre id="txtView" class="selectable" style="width:min(1000px,94vw);height:100%;overflow:auto;background:var(--panel);padding:16px;border-radius:14px;border:1px solid var(--border);font-size:12px;white-space:pre-wrap">Loading...</pre>`);
-    fetch(hostMediaUrl(state.activeHostId,"/api/stream",{path:f.path})).then(r=>r.text()).then(t=>{const el=document.getElementById("txtView");if(el)el.textContent=t.slice(0,300000)});
+    openDocOverlay(f, `<pre id="txtView" class="selectable" style="width:min(1000px,94vw);height:100%;overflow:auto;background:var(--panel);padding:16px;border-radius:14px;border:1px solid var(--border);font-size:12px;white-space:pre-wrap">Loading...</pre>`, fHost);
+    fetch(hostMediaUrl(fHost,"/api/stream",{path:f.path})).then(r=>r.text()).then(t=>{const el=document.getElementById("txtView");if(el)el.textContent=t.slice(0,300000)});
   }else{
-    openDocOverlay(f, `<div class="section-card" style="max-width:460px"><strong>${f.name}</strong><div style="font-size:12px;color:var(--muted)">Size: ${fmt(f.sizeBytes)}<br/>Path: ${f.path}</div></div>`);
+    openDocOverlay(f, `<div class="section-card" style="max-width:460px"><strong>${f.name}</strong><div style="font-size:12px;color:var(--muted)">Size: ${fmt(f.sizeBytes)}<br/>Path: ${f.path}</div></div>`, fHost);
   }
 }
 
@@ -2406,9 +2511,10 @@ function needsLiveTranscode(f){
 function startTranscodeStream(startSec=0){
   if(!state.activeFile) return;
   const v=document.getElementById("vidEl");
+  const fHost = state.activeFileHostId || state.activeHostId;
   state.isTranscode=true;
   state.transcodeOffsetSec=Math.max(0, startSec);
-  v.src=hostMediaUrl(state.activeHostId, "/api/stream/playable", {path:state.activeFile.path, start:state.transcodeOffsetSec.toFixed(2), v:Date.now()});
+  v.src=hostMediaUrl(fHost, "/api/stream/playable", {path:state.activeFile.path, start:state.transcodeOffsetSec.toFixed(2), v:Date.now()});
   v.playbackRate=parseFloat(document.getElementById("vidSpeed").value)||1;
   document.getElementById("vidCodecBadge").textContent="LIVE H.264 STREAM";
   v.play().catch(()=>{});
@@ -2424,8 +2530,10 @@ function seekVideoTo(sec){
   }
 }
 
-function openVideoOverlay(f, openStudio){
+function openVideoOverlay(f, openStudio, hostOverride=""){
+  const fHost = hostOverride || state.activeFileHostId || state.activeHostId;
   state.activeFile=f;
+  state.activeFileHostId=fHost;
   state.edit = { cropActive:false, cropPreview:false, x:0.1, y:0.1, w:0.8, h:0.8, rotate:0, flipH:false, flipV:false, muteOut:false };
   state.abLoop = false;
   state.isTranscode = false;
@@ -2439,6 +2547,14 @@ function openVideoOverlay(f, openStudio){
   document.getElementById("editQualityMode").value=prefs.defaultTrimMode || "lossless";
   document.getElementById("editCrf").value=prefs.defaultCrf;
   document.getElementById("editRecycle").checked=prefs.recycleDefault;
+  const stExec=document.getElementById("studioExecTarget");
+  if(stExec){
+    stExec.innerHTML=buildExecTargetOptions(fHost);
+    stExec.style.display = (fHost !== state.localHostId && !isMobileHostObj(state.hosts.find(x=>x.hostId===fHost))) ? "" : "none";
+  }
+  const sqb=document.getElementById("studioQueueBtn"), seb=document.getElementById("exportEditBtn");
+  if(sqb){ sqb.disabled=false; sqb.textContent="+ Add to Queue"; }
+  if(seb && !state.activeStudioJobId){ seb.disabled=false; seb.textContent="Render & Save Edit"; }
   document.getElementById("vidSpeed").value=String(prefs.defaultSpeed);
   document.getElementById("vidFitSelect").value="contain";
   document.getElementById("vidAspectSelect").value="auto";
@@ -2503,7 +2619,7 @@ function openVideoOverlay(f, openStudio){
   if(needsLiveTranscode(f)){
     startTranscodeStream(0);
   }else{
-    v.src=hostMediaUrl(state.activeHostId,"/api/stream",{path:f.path, v:Date.now()});
+    v.src=hostMediaUrl(fHost,"/api/stream",{path:f.path, v:Date.now()});
     if(prefs.autoPlayVideos !== false){ v.play().catch(()=>{}); }
     else { v.pause(); document.getElementById("playPauseBtn").textContent="Play"; }
   }
@@ -2546,7 +2662,8 @@ function setVideoFit(m){ layoutCinemaVideo(); }
 function setVideoAspect(a){ layoutCinemaVideo(); }
 async function openInExternalPlayer(){
   if(!state.activeFile) return;
-  if(state.activeHostId!==state.localHostId){
+  const fHost = state.activeFileHostId || state.activeHostId;
+  if(fHost!==state.localHostId){
     showToast("External VLC launch is for files on this PC"); return;
   }
   try{
@@ -2563,9 +2680,10 @@ function toggleCinemaFullscreen(){ document.getElementById("videoOverlay").class
   const tl=document.getElementById("vidTimeline"), tip=document.getElementById("vidTip"), img=document.getElementById("vidTipImg"), tm=document.getElementById("vidTipTime");
   tl.onmousemove=(e)=>{
     const d=state.vidDurationSec || document.getElementById("vidEl").duration || 0; if(!d||!state.activeFile)return;
+    const fHost=state.activeFileHostId || state.activeHostId;
     const r=tl.getBoundingClientRect(), frac=Math.max(0,Math.min(0.999,(e.clientX-r.left)/r.width));
     const idx=Math.floor(frac*16), col=idx%4, row=Math.floor(idx/4);
-    const sb=hostMediaUrl(state.activeHostId,"/api/video/storyboard",{path:state.activeFile.path, cols:4, rows:4});
+    const sb=hostMediaUrl(fHost,"/api/video/storyboard",{path:state.activeFile.path, cols:4, rows:4});
     tip.style.display="flex"; tip.style.left=Math.max(76,Math.min(r.width-76, e.clientX-r.left))+"px";
     img.style.backgroundImage=`url("${sb}")`; img.style.backgroundSize="400% 400%";
     img.style.backgroundPosition=`${col*(100/3)}% ${row*(100/3)}%`;
@@ -2576,7 +2694,8 @@ function toggleCinemaFullscreen(){ document.getElementById("videoOverlay").class
 })();
 
 function loadStoryboardCells(path){
-  const sbUrl=hostMediaUrl(state.activeHostId,"/api/video/storyboard",{path, cols:4, rows:4});
+  const fHost=state.activeFileHostId || state.activeHostId;
+  const sbUrl=hostMediaUrl(fHost,"/api/video/storyboard",{path, cols:4, rows:4});
   const row=document.getElementById("sbCells"); row.innerHTML="";
   for(let r=0;r<4;r++)for(let c=0;c<4;c++){
     const d=document.createElement("div"); d.className="sb-cell";
@@ -2865,9 +2984,11 @@ window.addEventListener("resize", ()=>{ if(document.getElementById("videoOverlay
 
 async function takeVideoSnapshot(){
   try{
-    const res=await hostApi(state.activeHostId,"/api/video/snapshot",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:state.activeFile.path, ms:Math.round(currentAbsVideoSec()*1000)})});
+    const fHost=state.activeFileHostId || state.activeHostId;
+    const res=await hostApi(fHost,"/api/video/snapshot",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:state.activeFile.path, ms:Math.round(currentAbsVideoSec()*1000)})});
     showToast("Saved snapshot: "+res.name);
-    await loadFolder(state.currentPath);
+    if(fHost===state.activeHostId && state.currentPath) await loadFolder(state.currentPath);
+    if(state.split.open && fHost===state.split.hostId && state.split.currentPath) await loadSplitFolder(state.split.currentPath);
   }catch(e){showToast("Snapshot failed: "+e.message)}
 }
 
@@ -2905,8 +3026,9 @@ async function queueExtractAudio(item, hostId="", fromStudio=false){
   const startMs = fromStudio ? Math.round(parseFloat(document.getElementById("inRange").value)*1000) : 0;
   const endMs = fromStudio ? Math.round(parseFloat(document.getElementById("outRange").value)*1000) : 0;
   const normalize = fromStudio ? !!document.getElementById("editNormAudio")?.checked : false;
+  const execTarget = fromStudio ? (document.getElementById("studioExecTarget")?.value || "local") : "local";
   try{
-    await enqueueJobs("extract_audio", {hostId:hid, path:item.path, format:"m4a", bitrateKbps:192, normalize, startMs, endMs}, true);
+    await enqueueJobs("extract_audio", {hostId:hid, execTarget, path:item.path, format:"m4a", bitrateKbps:192, normalize, startMs, endMs}, true);
     showToast("Queued audio extraction -> check Info Queue");
   }catch(e){showToast("Queue failed: "+e.message)}
 }
@@ -2918,8 +3040,9 @@ async function queueExportGif(item, hostId="", fromStudio=false){
   const startMs = fromStudio ? Math.round(parseFloat(document.getElementById("inRange").value)*1000) : 0;
   const endMs = fromStudio ? Math.round(parseFloat(document.getElementById("outRange").value)*1000) : 0;
   const speed = fromStudio ? (Number(document.getElementById("editOutSpeed")?.value)||1.0) : 1.0;
+  const execTarget = fromStudio ? (document.getElementById("studioExecTarget")?.value || "local") : "local";
   try{
-    await enqueueJobs("gif", {hostId:hid, path:item.path, startMs, endMs, fps:15, width:640, crop:cropPayload, rotate:fromStudio?e.rotate:0, flipH:fromStudio?e.flipH:false, flipV:fromStudio?e.flipV:false, speed}, true);
+    await enqueueJobs("gif", {hostId:hid, execTarget, path:item.path, startMs, endMs, fps:15, width:640, crop:cropPayload, rotate:fromStudio?e.rotate:0, flipH:fromStudio?e.flipH:false, flipV:fromStudio?e.flipV:false, speed}, true);
     showToast("Queued GIF export -> check Info Queue");
   }catch(e){showToast("Queue failed: "+e.message)}
 }
@@ -2931,6 +3054,7 @@ async function mergeSelectedVideos(){
   try{
     await enqueueJobs("merge", {
       hostId: state.activeHostId,
+      execTarget: "local",
       paths: vids.map(v=>v.path),
       outDir: state.currentPath || "",
       outputName: outName.trim(),
@@ -2943,27 +3067,32 @@ async function mergeSelectedVideos(){
 }
 
 async function executeStudioEdit(queueOnly=false){
-  if(!state.activeFile) return;
-  const btn=document.getElementById("exportEditBtn");
-  if(!queueOnly){ btn.disabled=true; btn.textContent="Rendering..."; }
+  if(!state.activeFile || state._submittingJob) return;
+  const btn=document.getElementById("exportEditBtn"), qBtn=document.getElementById("studioQueueBtn");
+  const fHost = state.activeFileHostId || state.activeHostId;
+  const execTarget = document.getElementById("studioExecTarget")?.value || "local";
+  state._submittingJob = true;
+  if(btn){ btn.disabled=true; if(!queueOnly) btn.textContent="Rendering..."; }
+  if(qBtn){ qBtn.disabled=true; }
   const e=state.edit;
   let cropPayload = (e.cropActive || e.x>0.005 || e.y>0.005 || e.w<0.995 || e.h<0.995) ? {x:e.x, y:e.y, w:e.w, h:e.h} : null;
   try{
-    const isLocalOrSupportsEdit = state.activeHostId===state.localHostId || state.hosts.find(h=>h.hostId===state.activeHostId)?.os==="Windows";
+    const isLocalOrSupportsEdit = fHost===state.localHostId || state.hosts.find(h=>h.hostId===fHost)?.os==="Windows";
     if(cropPayload && isLocalOrSupportsEdit){
       try{
-        const ping = await hostApi(state.activeHostId, "/api/ping", {silent:true});
+        const ping = await hostApi(fHost, "/api/ping", {silent:true});
         if(ping?.videoEditOrder !== "transform_first"){
           cropPayload = toLegacyPreTransformCrop(cropPayload, e.rotate, e.flipH, e.flipV);
         }
       }catch(_){
-        if(state.activeHostId !== state.localHostId){
+        if(fHost !== state.localHostId){
           cropPayload = toLegacyPreTransformCrop(cropPayload, e.rotate, e.flipH, e.flipV);
         }
       }
     }
     const payload = {
-      hostId: state.activeHostId,
+      hostId: fHost,
+      execTarget,
       path: state.activeFile.path,
       startMs: Math.round(parseFloat(document.getElementById("inRange").value)*1000),
       endMs: Math.round(parseFloat(document.getElementById("outRange").value)*1000),
@@ -2993,9 +3122,12 @@ async function executeStudioEdit(queueOnly=false){
     const qRes = await enqueueJobs("edit", payload, true);
     if(queueOnly){
       showToast("Added edit to Info Queue!");
+      if(btn) btn.disabled=false;
+      if(qBtn){ qBtn.disabled=false; qBtn.textContent="+ Add to Queue"; }
       return;
     }
     state.activeStudioJobId = qRes.job.id;
+    if(qBtn){ qBtn.textContent="Queued ✓"; qBtn.disabled=true; }
     const sBox = document.getElementById("studioProgressBox");
     if(sBox){
       sBox.style.display = "flex";
@@ -3006,16 +3138,43 @@ async function executeStudioEdit(queueOnly=false){
     showToast("Rendering in background — tracked in Info Queue!");
   }catch(err){
     showToast("Edit failed: "+err.message);
-    btn.disabled=false; btn.textContent="Render & Save Edit";
+    if(btn){ btn.disabled=false; btn.textContent="Render & Save Edit"; }
+    if(qBtn){ qBtn.disabled=false; qBtn.textContent="+ Add to Queue"; }
+  }finally{
+    state._submittingJob = false;
   }
 }
 
 function closeVideoOverlay(){const v=document.getElementById("vidEl");v.pause();v.removeAttribute("src");v.load();document.getElementById("videoOverlay").classList.remove("fullscreen-all");closeOverlay("videoOverlay")}
-function stepVideo(delta){const list=state.files.filter(f=>f.mediaType==="video"),i=list.findIndex(f=>f.path===state.activeFile?.path);if(i>=0&&list[i+delta])openVideoOverlay(list[i+delta],false)}
+function stepVideo(delta){
+  const fHost=state.activeFileHostId || state.activeHostId;
+  const srcList=(state.split.open && fHost===state.split.hostId && state.split.files.some(x=>x.path===state.activeFile?.path)) ? state.split.files : state.files;
+  const list=srcList.filter(f=>f.mediaType==="video"), i=list.findIndex(f=>f.path===state.activeFile?.path);
+  if(i>=0&&list[i+delta]) openVideoOverlay(list[i+delta], false, fHost);
+}
 
-function openImageOverlay(f){state.activeFile=f;document.getElementById("imgTitle").textContent=f.name;document.getElementById("imgEl").src=hostMediaUrl(state.activeHostId,"/api/image",{path:f.path});document.getElementById("imageOverlay").classList.add("open")}
-function stepImage(delta){const list=state.files.filter(f=>f.mediaType==="image"),i=list.findIndex(f=>f.path===state.activeFile?.path);if(i>=0&&list[i+delta])openImageOverlay(list[i+delta])}
-function openDocOverlay(f,html){state.activeFile=f;document.getElementById("docTitle").textContent=f.name;const dl=document.getElementById("docDl");dl.href=hostMediaUrl(state.activeHostId,"/api/stream",{path:f.path});dl.download=f.name;document.getElementById("docBody").innerHTML=html;document.getElementById("docOverlay").classList.add("open")}
+function openImageOverlay(f, hostOverride=""){
+  const fHost=hostOverride || state.activeFileHostId || state.activeHostId;
+  state.activeFile=f; state.activeFileHostId=fHost;
+  document.getElementById("imgTitle").textContent=f.name;
+  document.getElementById("imgEl").src=hostMediaUrl(fHost,"/api/image",{path:f.path});
+  document.getElementById("imageOverlay").classList.add("open");
+}
+function stepImage(delta){
+  const fHost=state.activeFileHostId || state.activeHostId;
+  const srcList=(state.split.open && fHost===state.split.hostId && state.split.files.some(x=>x.path===state.activeFile?.path)) ? state.split.files : state.files;
+  const list=srcList.filter(f=>f.mediaType==="image"), i=list.findIndex(f=>f.path===state.activeFile?.path);
+  if(i>=0&&list[i+delta]) openImageOverlay(list[i+delta], fHost);
+}
+function openDocOverlay(f,html,hostOverride=""){
+  const fHost=hostOverride || state.activeFileHostId || state.activeHostId;
+  state.activeFile=f; state.activeFileHostId=fHost;
+  document.getElementById("docTitle").textContent=f.name;
+  const dl=document.getElementById("docDl");
+  dl.href=hostMediaUrl(fHost,"/api/stream",{path:f.path}); dl.download=f.name;
+  document.getElementById("docBody").innerHTML=html;
+  document.getElementById("docOverlay").classList.add("open");
+}
 function closeDocOverlay(){document.getElementById("docBody").innerHTML="";closeOverlay("docOverlay")}
 function closeOverlay(id){document.getElementById(id).classList.remove("open")}
 function closeDialog(id){document.getElementById(id).classList.remove("open")}
@@ -3052,7 +3211,7 @@ async function deletePaths(paths, permanent=false, refreshSplit=false, hostOverr
     if(state.split.open && state.split.currentPath && (refreshSplit || hid===state.split.hostId)) await loadSplitFolder(state.split.currentPath);
   }catch(e){ showToast("Delete error: " + e.message); }
 }
-async function deleteSingleOverlayFile(permanent=false){if(!state.activeFile)return;const p=state.activeFile.path;closeVideoOverlay();closeDocOverlay();closeOverlay("imageOverlay");await deletePaths([p], permanent)}
+async function deleteSingleOverlayFile(permanent=false){if(!state.activeFile)return;const p=state.activeFile.path;const fHost=state.activeFileHostId||state.activeHostId;closeVideoOverlay();closeDocOverlay();closeOverlay("imageOverlay");await deletePaths([p], permanent, fHost===state.split.hostId, fHost)}
 async function renamePrompt(f, hostOverride=""){
   if(!f)return; const hid=hostOverride||state.activeHostId;
   const n=prompt("Rename file:",f.name);if(!n||n===f.name)return;
@@ -3091,14 +3250,16 @@ async function copyFilesToWindowsClipboard(hostId, paths){
   }catch(e){ showToast("Clipboard copy failed: " + e.message); }
 }
 
-/* Split Dual-Pane Browser */
+/* Split Dual-Pane Browser (Full Gallery Parity) */
 function toggleSplitView(){
   if(state.split.open) closeSplitView();
   else openInSplitView(state.activeHostId || state.localHostId, "");
 }
 function closeSplitView(){
   state.split.open=false;
+  state.split.selected.clear();
   document.getElementById("splitPane").style.display="none";
+  document.getElementById("splitPane").classList.remove("has-selection");
   document.getElementById("splitResizer").style.display="none";
   const btn=document.getElementById("splitToggleBtn");
   if(btn){ btn.classList.remove("primary"); btn.textContent="◫ Split View"; }
@@ -3107,6 +3268,10 @@ async function openInSplitView(hostId, path=""){
   const hid = hostId || state.activeHostId || state.localHostId;
   state.split.open = true;
   state.split.hostId = hid;
+  state.split.selected.clear();
+  state.split.lastSelectedIdx = -1;
+  state.split.drives = [];
+  state.split.quickFolders = [];
   const sp = document.getElementById("splitPane"), sr = document.getElementById("splitResizer");
   sp.style.display="flex"; sp.style.flex=`0 0 ${state.split.widthPx}px`;
   sr.style.display="flex";
@@ -3121,19 +3286,95 @@ async function openInSplitView(hostId, path=""){
       sel.appendChild(o);
     });
   }
+  const vBtn=document.getElementById("splitViewBtn");
+  if(vBtn) vBtn.textContent = state.split.viewMode==="gallery" ? "Grid" : "List";
+  const sSel=document.getElementById("splitSortSelect");
+  if(sSel) sSel.value = state.split.sort;
+  const sBox=document.getElementById("splitSearchBox");
+  if(sBox) sBox.value = state.split.query || "";
+  renderSplitFilters();
+  updateSplitActionBar();
   try{
-    let target = path;
-    if(!target){
-      const r=await hostApi(hid,"/api/roots");
-      target=(r.drives&&r.drives[0]?.path)||(r.quickFolders&&r.quickFolders[0]?.path)||"";
-    }
+    const r=await hostApi(hid,"/api/roots");
+    state.split.drives = r.drives || [];
+    state.split.quickFolders = r.quickFolders || [];
+    renderSplitRootsStrip();
+    const target = path || (r.quickFolders?.find(q=>q.name==="Videos")?.path) || (r.drives&&r.drives[0]?.path) || (r.quickFolders&&r.quickFolders[0]?.path) || "";
     if(target) await loadSplitFolder(target);
   }catch(e){showToast("Split view error: "+e.message)}
 }
+function renderSplitRootsStrip(){
+  const strip=document.getElementById("splitRootsStrip");
+  if(!strip) return;
+  strip.innerHTML="";
+  state.split.drives.forEach(d=>{
+    const b=document.createElement("button");
+    b.className="chip"+(state.split.currentPath.startsWith(d.path)?" active":"");
+    b.textContent=`💾 ${d.name} (${fmt(d.freeBytes)} free)`;
+    b.onclick=()=>loadSplitFolder(d.path);
+    wireDropTarget(b, state.split.hostId, d.path);
+    strip.appendChild(b);
+  });
+  state.split.quickFolders.forEach(q=>{
+    const b=document.createElement("button");
+    b.className="chip"+(state.split.currentPath===q.path?" active":"");
+    b.textContent=q.name;
+    b.onclick=()=>loadSplitFolder(q.path);
+    wireDropTarget(b, state.split.hostId, q.path);
+    strip.appendChild(b);
+  });
+}
+function renderSplitFilters(){
+  const items=[["all","All"],["video","Video"],["image","Images"],["audio","Audio"],["large","100MB+"]];
+  const r=document.getElementById("splitFilterRow");
+  if(!r) return;
+  r.innerHTML="";
+  items.forEach(([k,lbl])=>{
+    const b=document.createElement("button");
+    b.className="chip"+(state.split.filter===k?" active":"");
+    b.style.padding="4px 8px"; b.style.fontSize="11px";
+    b.textContent=lbl;
+    b.onclick=()=>{
+      state.split.filter=k;
+      renderSplitFilters();
+      resetBrowserScroll("splitBrowserArea");
+      if(state.split.currentPath) loadSplitFolder(state.split.currentPath);
+    };
+    r.appendChild(b);
+  });
+}
+function toggleSplitViewMode(){
+  state.split.viewMode = state.split.viewMode==="gallery" ? "list" : "gallery";
+  const btn=document.getElementById("splitViewBtn");
+  if(btn) btn.textContent = state.split.viewMode==="gallery" ? "Grid" : "List";
+  resetBrowserScroll("splitBrowserArea");
+  renderSplitBrowser();
+}
+function changeSplitSort(v){
+  state.split.sort=v;
+  resetBrowserScroll("splitBrowserArea");
+  if(state.split.currentPath) loadSplitFolder(state.split.currentPath);
+}
+function onSplitSearchInput(){
+  clearTimeout(window._splitSt);
+  window._splitSt=setTimeout(()=>{
+    state.split.query = document.getElementById("splitSearchBox")?.value?.trim() || "";
+    resetBrowserScroll("splitBrowserArea");
+    if(state.split.currentPath) loadSplitFolder(state.split.currentPath);
+  }, 240);
+}
 async function loadSplitFolder(path, opts={}){
   state.split.currentPath = path;
+  state.split.selected.clear();
+  state.split.lastSelectedIdx = -1;
+  renderSplitRootsStrip();
+  updateSplitActionBar();
+  const [sortBy, order] = (state.split.sort || "size:desc").split(":");
+  const q = document.getElementById("splitSearchBox")?.value?.trim() || state.split.query || "";
+  const qs = new URLSearchParams({path, sort:sortBy, order, filter:state.split.filter || "all"});
+  if(q) qs.set("q", q);
   const fetchOpts = opts.silent ? {silent:true} : {busyLabel:"Loading split folder..."};
-  const d = await hostApi(state.split.hostId, "/api/list?" + new URLSearchParams({path, sort:"name", order:"asc", filter:"all"}).toString(), fetchOpts);
+  const d = await hostApi(state.split.hostId, "/api/list?" + qs.toString(), fetchOpts);
   state.split.folders = d.folders || [];
   state.split.files = d.files || [];
   state.split.parentPath = d.parentPath || "";
@@ -3149,6 +3390,7 @@ async function loadSplitFolder(path, opts={}){
     b.textContent=seg; b.onclick=()=>loadSplitFolder(tgt); cb.appendChild(b);
   });
   renderSplitBrowser();
+  if(!opts.preserveScroll) resetBrowserScroll("splitBrowserArea");
 }
 function splitGoUp(){ if(state.split.parentPath) loadSplitFolder(state.split.parentPath); }
 async function createSplitFolderHere(){
@@ -3162,8 +3404,55 @@ async function transferMainToSplit(move){
   if(!paths.length || !state.split.currentPath){ showToast("Select files in main pane first"); return; }
   await dropItemsInto(state.split.hostId, state.split.currentPath, {hostId:state.activeHostId, paths}, move);
 }
+async function transferSplitToMain(move){
+  const paths = Array.from(state.split.selected);
+  if(!paths.length || !state.currentPath){ showToast("Select files in Split View first"); return; }
+  await dropItemsInto(state.activeHostId, state.currentPath, {hostId:state.split.hostId, paths}, move);
+}
+function handleSplitSelectClick(idx, path, shift){
+  if(shift && state.split.lastSelectedIdx>=0 && state.split.files.length){
+    const a=Math.min(state.split.lastSelectedIdx, idx), b=Math.max(state.split.lastSelectedIdx, idx);
+    for(let i=a;i<=b;i++) state.split.selected.add(state.split.files[i].path);
+  }else{
+    if(state.split.selected.has(path)) state.split.selected.delete(path);
+    else state.split.selected.add(path);
+    state.split.lastSelectedIdx = idx;
+  }
+  updateSplitActionBar();
+  renderSplitBrowser();
+}
+function selectAllSplitFiles(){ state.split.files.forEach(f=>state.split.selected.add(f.path)); updateSplitActionBar(); renderSplitBrowser(); }
+function clearSplitSelection(){ state.split.selected.clear(); state.split.lastSelectedIdx=-1; updateSplitActionBar(); renderSplitBrowser(); }
+function updateSplitActionBar(){
+  const bar=document.getElementById("splitActionBar");
+  const sp=document.getElementById("splitPane");
+  if(sp) sp.classList.toggle("has-selection", state.split.selected.size>0);
+  if(!bar) return;
+  const n=state.split.selected.size;
+  if(n>0){
+    bar.innerHTML=`
+      <strong style="font-size:11px;color:var(--primary)">${n} selected</strong>
+      <button class="mini-btn" onclick="selectAllSplitFiles()">All</button>
+      <button class="mini-btn" onclick="clearSplitSelection()">Clear</button>
+      <span style="flex:1"></span>
+      <button class="mini-btn" onclick="transferSplitToMain(false)" title="Copy selected split items into main folder">← Copy to Main</button>
+      <button class="mini-btn" onclick="transferSplitToMain(true)" title="Move selected split items into main folder">← Move to Main</button>
+      <button class="mini-btn" style="color:var(--danger)" onclick="deletePaths(Array.from(state.split.selected),false,true,state.split.hostId)">♻ Recycle</button>
+    `;
+  }else{
+    bar.innerHTML=`
+      <span style="font-size:11px;color:var(--muted)">${state.split.files.length} item(s)</span>
+      <span style="flex:1"></span>
+      <button class="mini-btn" onclick="transferMainToSplit(false)" title="Copy main-pane selected items here">Copy Main → Split</button>
+      <button class="mini-btn" onclick="transferMainToSplit(true)" title="Move main-pane selected items here">Move Main → Split</button>
+    `;
+  }
+}
 function renderSplitBrowser(){
-  const area=document.getElementById("splitBrowserArea"); area.innerHTML="";
+  const area=document.getElementById("splitBrowserArea");
+  area.querySelectorAll("img").forEach(im=>{ try{ im.removeAttribute("src"); }catch{} });
+  area.innerHTML="";
+  updateSplitActionBar();
   wireDropTarget(area, state.split.hostId, state.split.currentPath);
   if(state.split.folders.length){
     const fs=document.createElement("div"); fs.className="chip-row"; fs.style.marginBottom="8px";
@@ -3176,32 +3465,75 @@ function renderSplitBrowser(){
     });
     area.appendChild(fs);
   }
-  const list=document.createElement("div"); list.className="list-col compact";
-  state.split.files.forEach(f=>{
-    const r=document.createElement("div"); r.className="list-row"; r.draggable=true;
-    const th = f.mediaType==="video"
-      ? `<img class="list-thumb" loading="lazy" src="${hostMediaUrl(state.split.hostId,"/api/video/thumbnail",{path:f.path,w:320})}" draggable="false"/>`
-      : (f.mediaType==="image" ? `<img class="list-thumb" loading="lazy" src="${hostMediaUrl(state.split.hostId,"/api/image",{path:f.path,w:320})}" draggable="false"/>` : `<div class="list-thumb">${(f.extension||"FILE").toUpperCase()}</div>`);
-    r.innerHTML=`${th}<div style="flex:1;min-width:0"><div class="card-title">${f.name}</div><div style="font-size:10px;color:var(--muted)">${fmt(f.sizeBytes)}</div></div><button class="mini-btn" data-act="more">•••</button>`;
-    r.ondragstart=(ev)=>{
+  if(!state.split.files.length){
+    const msg = state.split.folders.length ? "No files in this folder" : "Empty folder — drop files here to copy/move";
+    area.innerHTML += `<div style="padding:36px;text-align:center;color:var(--muted)">${msg}</div>`;
+    return;
+  }
+  const wrap=document.createElement("div");
+  if(state.split.viewMode==="gallery"){
+    wrap.className="grid auto";
+    wrap.style.gridTemplateColumns="repeat(auto-fill,minmax(162px,1fr))";
+  }else{
+    wrap.className="list-col compact";
+  }
+  state.split.files.forEach((f, idx)=>{
+    const sel=state.split.selected.has(f.path);
+    const thumbUrl = f.mediaType==="video"
+      ? hostMediaUrl(state.split.hostId,"/api/video/thumbnail",{path:f.path,w:480})
+      : (f.mediaType==="image" ? hostMediaUrl(state.split.hostId,"/api/image",{path:f.path,w:480}) : "");
+    const sbUrl = (f.mediaType==="video" && prefs.hoverStoryboard)
+      ? hostMediaUrl(state.split.hostId,"/api/video/storyboard",{path:f.path,cols:4,rows:4}) : "";
+    const el=document.createElement("div");
+    el.className=(state.split.viewMode==="gallery"?"media-card":"list-row")+(sel?" selected":"");
+    el.dataset.path=f.path;
+    el.draggable=true;
+
+    if(state.split.viewMode==="gallery"){
+      const thHtml = thumbUrl ? `<img loading="lazy" decoding="async" src="${thumbUrl}" draggable="false"/>` : `<span style="color:var(--primary);font-weight:700;font-size:12px">${(f.extension||f.mediaType||"FILE").toUpperCase()}</span>`;
+      const dur = (prefs.showDuration && f.meta?.durationMs) ? `<span class="badge">${fmtDur(f.meta.durationMs)}</span>` : "";
+      const resTxt = prefs.showResolution ? fmtRes(f.meta?.width, f.meta?.height) : "";
+      const resBadge = resTxt ? `<span class="badge tl">${resTxt}</span>` : "";
+      const sbDiv = sbUrl ? `<div class="sb-hover"></div>` : "";
+      const metaRight = prefs.showDates && f.modifiedMs ? new Date(f.modifiedMs).toLocaleDateString() : (f.extension||"").toUpperCase();
+      el.innerHTML=`<div class="sel-check" data-act="sel">${sel?"✓":""}</div><div class="thumb-wrap">${thHtml}${sbDiv}${resBadge}${dur}</div><div class="card-body"><div class="card-title" title="${escHtml(f.name)}">${escHtml(f.name)}</div><div class="card-meta"><span>${fmt(f.sizeBytes)}</span><span>${metaRight}</span></div><div class="card-actions"><button class="mini-btn" data-act="sel">${sel?"✓":"Select"}</button>${f.mediaType==="video"?`<button class="mini-btn" data-act="trim">Edit</button>`:""}<button class="mini-btn" data-act="move">Move</button><button class="mini-btn" data-act="more">•••</button></div></div>`;
+      if(sbUrl){
+        const tw=el.querySelector(".thumb-wrap"), sbh=el.querySelector(".sb-hover");
+        let sbArmed=false, sbTimer=null;
+        tw.onmouseenter=()=>{ sbTimer=setTimeout(()=>{ sbArmed=true; sbh.style.backgroundImage=`url("${sbUrl}")`; sbh.style.backgroundSize="400% 400%"; }, 220); };
+        tw.onmousemove=(mv)=>{ if(!sbArmed) return; const rect=tw.getBoundingClientRect(); const frac=Math.max(0,Math.min(0.999,(mv.clientX-rect.left)/Math.max(1,rect.width))); const sidx=Math.floor(frac*16), col=sidx%4, row=Math.floor(sidx/4); sbh.style.display="block"; sbh.style.backgroundPosition=`${col*(100/3)}% ${row*(100/3)}%`; };
+        tw.onmouseleave=()=>{ if(sbTimer){clearTimeout(sbTimer);sbTimer=null;} sbArmed=false; sbh.style.display="none"; };
+      }
+    }else{
+      const thHtml = thumbUrl ? `<img class="list-thumb" loading="lazy" decoding="async" src="${thumbUrl}" draggable="false"/>` : `<div class="list-thumb">${(f.extension||"FILE").toUpperCase()}</div>`;
+      el.innerHTML=`<div class="sel-check" data-act="sel">${sel?"✓":""}</div>${thHtml}<div style="flex:1;min-width:0"><div class="card-title">${escHtml(f.name)}</div><div style="font-size:10px;color:var(--muted)">${fmt(f.sizeBytes)} ${f.meta?.durationMs?"• "+fmtDur(f.meta.durationMs):""} ${f.meta?.height?"• "+fmtRes(f.meta.width,f.meta.height):""}</div></div><button class="mini-btn" data-act="sel">${sel?"✓":"Sel"}</button>${f.mediaType==="video"?`<button class="mini-btn" data-act="trim">Edit</button>`:""}<button class="mini-btn" data-act="more">•••</button>`;
+    }
+
+    el.ondragstart=(ev)=>{
+      const dragPaths = state.split.selected.has(f.path) ? Array.from(state.split.selected) : [f.path];
       if(ev.dataTransfer){
         ev.dataTransfer.effectAllowed="copyMove";
-        ev.dataTransfer.setData("application/x-deckvault-items", JSON.stringify({hostId:state.split.hostId, paths:[f.path]}));
+        ev.dataTransfer.setData("application/x-deckvault-items", JSON.stringify({hostId:state.split.hostId, paths:dragPaths}));
         const absUrl=new URL(hostMediaUrl(state.split.hostId,"/api/stream",{path:f.path}), window.location.origin).href;
         ev.dataTransfer.setData("DownloadURL", `application/octet-stream:${f.name}:${absUrl}`);
       }
     };
-    r.onclick=(ev)=>{
-      if(ev.target?.dataset?.act==="more"){ ev.stopPropagation(); showCtxMenu(ev, f, state.split.hostId); }
+    el.onclick=(ev)=>{
+      const act = ev.target?.dataset?.act;
+      if(act==="sel"){ ev.stopPropagation(); handleSplitSelectClick(idx, f.path, ev.shiftKey); return; }
+      if(act==="trim"){ ev.stopPropagation(); openFileViewer(f, true, state.split.hostId); return; }
+      if(act==="move"){ ev.stopPropagation(); openTransferModal([f], true, state.split.hostId); return; }
+      if(act==="more"){ ev.stopPropagation(); showCtxMenu(ev, f, state.split.hostId); return; }
+      if(ev.shiftKey){ handleSplitSelectClick(idx, f.path, true); return; }
+      if(state.split.selected.size>0 || ev.ctrlKey || ev.metaKey){
+        handleSplitSelectClick(idx, f.path, false);
+      }
     };
-    r.ondblclick=()=>{ if(state.split.hostId===state.activeHostId) openFileViewer(f, false); };
-    r.oncontextmenu=(ev)=>showCtxMenu(ev, f, state.split.hostId);
-    list.appendChild(r);
+    el.ondblclick=(ev)=>{ if(!ev.target?.dataset?.act) openFileViewer(f, false, state.split.hostId); };
+    el.oncontextmenu=(ev)=>showCtxMenu(ev, f, state.split.hostId);
+    wrap.appendChild(el);
   });
-  if(!state.split.files.length && !state.split.folders.length){
-    list.innerHTML=`<div style="padding:36px;text-align:center;color:var(--muted)">Empty folder — drop files here to copy/move</div>`;
-  }
-  area.appendChild(list);
+  area.appendChild(wrap);
 }
 
 /* Built-In Compressor & Upscaler Studio */
@@ -3238,6 +3570,12 @@ function renderOptimizeBody(){
   if(!first) return;
   const totalBefore=state.opt.items.reduce((a,x)=>a+(x.sizeBytes||0),0);
   const ow=first.meta?.width || 1920, oh=first.meta?.height || 1080;
+
+  const showExecRow = state.opt.hostId !== state.localHostId && !isMobileHostObj(state.hosts.find(x=>x.hostId===state.opt.hostId));
+  const execRowHtml = showExecRow ? `
+        <label style="font-size:12px">Process On (CPU/FFmpeg Engine)
+          <select class="input" id="${state.opt.tab==="compress"?"cmpExecTarget":"upExecTarget"}" style="width:100%;margin-top:4px">${buildExecTargetOptions(state.opt.hostId)}</select>
+        </label>` : "";
 
   if(state.opt.tab==="compress"){
     body.innerHTML=`
@@ -3284,6 +3622,7 @@ function renderOptimizeBody(){
             <input type="number" class="input" id="cmpTargetMb" min="0" step="1" value="0" oninput="refreshOptimizeEstimate(false)" style="width:100%;margin-top:4px"/>
           </label>
         </div>
+        ${execRowHtml}
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <select class="input" id="cmpSaveMode" style="padding:5px 9px">
             <option value="copy">Save as Copy (_compressed)</option>
@@ -3291,7 +3630,7 @@ function renderOptimizeBody(){
           </select>
           <button class="pill-btn" onclick="refreshOptimizeEstimate(true)" title="Runs 1.5s test encode on PC to predict exact final MB">⚡ Sample Probe Exact Size</button>
           <span style="flex:1"></span>
-          <button class="pill-btn" onclick="executeCompress(true)">+ Add to Queue</button>
+          <button class="pill-btn" id="cmpQueueBtn" onclick="executeCompress(true)">+ Add to Queue</button>
           <button class="pill-btn primary" id="cmpRunBtn" onclick="executeCompress(false)">Run Now (${state.opt.items.length})</button>
         </div>
         <div id="optLiveProgress" class="est-box" style="display:none">
@@ -3309,20 +3648,20 @@ function renderOptimizeBody(){
           <span>Input: <b>${ow} × ${oh}</b> (${fmt(first.sizeBytes)})</span>
           <span>Output: <b id="upOutDims" style="color:var(--primary);font-size:14px">${ow*2} × ${oh*2}</b></span>
         </div>
-        <div style="font-size:11px;color:var(--muted)" id="upNote">Lanczos + Contrast Adaptive Sharpen (CAS), NLM Denoise, Debanding & Video Stabilization</div>
+        <div style="font-size:11px;color:var(--muted)" id="upNote">Hover any setting below or inspect the live guide box to see what each filter does and its CPU cost.</div>
       </div>
       <div class="section-card">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <label style="font-size:12px">Upscale Target
-            <select class="input" id="upPreset" onchange="updateUpscalePreviewInfo()" style="width:100%;margin-top:4px">
+          <label style="font-size:12px" title="Target output resolution. 2x doubles dimensions (capped at 4K); presets target standard widths.">Upscale Target
+            <select class="input" id="upPreset" onchange="updateUpscalePreviewInfo()" style="width:100%;margin-top:4px" title="Choose target dimensions for the upscaled video or photo">
               <option value="2x">2x Resolution Boost</option>
               <option value="4k">4K UHD (3840 wide)</option>
               <option value="1440p">1440p QHD (2560 wide)</option>
               <option value="1080p">1080p FHD (1920 wide)</option>
             </select>
           </label>
-          <label style="font-size:12px">Upscale Engine Mode
-            <select class="input" id="upMode" style="width:100%;margin-top:4px">
+          <label style="font-size:12px" title="CAS: crisp real-world detail • Anime: smooth cel lines + light denoise • Restore: deband + cleanup for compressed footage">Upscale Engine Mode
+            <select class="input" id="upMode" onchange="updateUpscalePreviewInfo()" style="width:100%;margin-top:4px" title="Select enhancement profile matching your footage type">
               <option value="cas" selected>Crisp CAS (Lanczos + Contrast Adaptive Sharpen)</option>
               <option value="anime">Anime / Screen Capture Line-Art</option>
               <option value="restore">Restore & Clean Compressed Video</option>
@@ -3330,31 +3669,42 @@ function renderOptimizeBody(){
           </label>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <label style="font-size:12px">CAS Detail Sharpening
-            <select class="input" id="upSharpen" style="width:100%;margin-top:4px">
+          <label style="font-size:12px" title="Contrast Adaptive Sharpening (CAS) restores crisp texture edges without creating white halos">CAS Detail Sharpening
+            <select class="input" id="upSharpen" onchange="updateUpscalePreviewInfo()" style="width:100%;margin-top:4px" title="Higher values produce crisper edges after upscaling">
               <option value="0.4">Subtle (0.4)</option>
               <option value="0.9" selected>Crisp Enhancement (0.9)</option>
               <option value="1.35">Ultra Sharp (1.35)</option>
             </select>
           </label>
-          <label style="font-size:12px">Denoise Level
-            <select class="input" id="upDenoiseMode" style="width:100%;margin-top:4px">
-              <option value="off">Off (Clean Source)</option>
+          <label style="font-size:12px" title="Off: fastest • Fast Temporal (hqdn3d): light cleanup • Studio HQ (nlmeans): deep grain removal (heaviest CPU, slowest)">Denoise Level
+            <select class="input" id="upDenoiseMode" onchange="updateUpscalePreviewInfo()" style="width:100%;margin-top:4px" title="Grain & compression noise removal intensity">
+              <option value="off">Off (Clean Source — Fastest)</option>
               <option value="fast">Fast Temporal (hqdn3d)</option>
-              <option value="hq">Studio High Quality (nlmeans)</option>
+              <option value="hq">Studio High Quality (nlmeans — Heavy CPU)</option>
             </select>
           </label>
         </div>
-        <label style="display:flex;justify-content:space-between;font-size:12px"><span>De-band Dark Color Compression Blocks</span><input type="checkbox" id="upDeband"/></label>
-        <label style="display:flex;justify-content:space-between;font-size:12px"><span>Stabilize Shaky Camera Motion (deshake)</span><input type="checkbox" id="upStabilize"/></label>
-        <label style="display:flex;justify-content:space-between;font-size:12px"><span>Smooth 60 FPS Motion Interpolation (Video Only)</span><input type="checkbox" id="upFps60"/></label>
+        <div class="est-box" id="upExplainBox" style="gap:5px;font-size:11px;line-height:1.45;padding:9px 11px"></div>
+        <label style="display:flex;justify-content:space-between;align-items:center;font-size:12px;gap:10px" title="Removes stepped blocky bands in dark scenes, shadows, and clear skies">
+          <div><div>De-band Dark Color Compression Blocks</div><div style="font-size:10px;color:var(--muted)">Smooths stepped color gradients in skies & shadows (low CPU cost)</div></div>
+          <input type="checkbox" id="upDeband" onchange="updateUpscalePreviewInfo()"/>
+        </label>
+        <label style="display:flex;justify-content:space-between;align-items:center;font-size:12px;gap:10px" title="Reduces handheld camera jitter using FFmpeg deshake filter">
+          <div><div>Stabilize Shaky Camera Motion (deshake)</div><div style="font-size:10px;color:var(--muted)">Dampens handheld shake before scaling (moderate CPU cost)</div></div>
+          <input type="checkbox" id="upStabilize" onchange="updateUpscalePreviewInfo()"/>
+        </label>
+        <label style="display:flex;justify-content:space-between;align-items:center;font-size:12px;gap:10px" title="Generates intermediate frames via FFmpeg framerate interpolation for 60 FPS playback">
+          <div><div>Smooth 60 FPS Motion Interpolation (Video Only)</div><div style="font-size:10px;color:var(--muted)">Blends intermediate frames to output 60fps — Heavy CPU & longer render</div></div>
+          <input type="checkbox" id="upFps60" onchange="updateUpscalePreviewInfo()"/>
+        </label>
+        ${execRowHtml}
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <select class="input" id="upSaveMode" style="padding:5px 9px">
             <option value="copy">Save as Copy (_upscaled)</option>
             <option value="overwrite">Save Over Original</option>
           </select>
           <span style="flex:1"></span>
-          <button class="pill-btn" onclick="executeUpscale(true)">+ Add to Queue</button>
+          <button class="pill-btn" id="upQueueBtn" onclick="executeUpscale(true)">+ Add to Queue</button>
           <button class="pill-btn primary" id="upRunBtn" onclick="executeUpscale(false)">Upscale Now (${state.opt.items.length})</button>
         </div>
         <div id="optLiveProgress" class="est-box" style="display:none">
@@ -3377,6 +3727,32 @@ function updateUpscalePreviewInfo(){
   else if(p==="1080p"){ nw=1920; nh=Math.round(oh*(1920/Math.max(1,ow))); }
   const lbl=document.getElementById("upOutDims");
   if(lbl) lbl.textContent=`${nw} × ${nh} (${p.toUpperCase()})`;
+
+  const box=document.getElementById("upExplainBox");
+  if(!box) return;
+  const mode=document.getElementById("upMode")?.value||"cas";
+  const sharp=document.getElementById("upSharpen")?.value||"0.9";
+  const dn=document.getElementById("upDenoiseMode")?.value||"off";
+  const deband=!!document.getElementById("upDeband")?.checked;
+  const stab=!!document.getElementById("upStabilize")?.checked;
+  const fps60=!!document.getElementById("upFps60")?.checked;
+
+  const modeDesc = {
+    cas: "<b>Crisp CAS:</b> Lanczos high-precision scaling + Contrast Adaptive Sharpening. Best all-rounder for camera footage, vlogs & gameplay.",
+    anime: "<b>Anime / Line-Art:</b> Applies light temporal cleanup + sharp edge preservation tuned for animation, cartoons & crisp UI captures.",
+    restore: "<b>Restore & Clean:</b> Auto-enables color debanding + temporal denoising before scaling to rescue older or heavily compressed MP4s."
+  }[mode] || "";
+  const dnDesc = {
+    off: "<b>Denoise Off:</b> Fastest render; leaves natural film texture untouched.",
+    fast: "<b>Fast Temporal (hqdn3d):</b> Smooths light digital grain & macroblocks with minimal extra CPU time.",
+    hq: "<b>Studio HQ (nlmeans):</b> Deep non-local means noise removal — very clean results, <b>heavy CPU load &amp; slow render</b>."
+  }[dn] || "";
+  const isHeavy = dn==="hq" || fps60;
+  const isMod = !isHeavy && (dn==="fast" || stab || mode!=="cas");
+  const speedBadge = isHeavy
+    ? `<span style="color:var(--warn);font-weight:700">⚡ Render Load: Heavy CPU (Slow — best run on Main PC)</span>`
+    : (isMod ? `<span style="color:var(--primary);font-weight:700">⚡ Render Load: Moderate</span>` : `<span style="color:var(--success);font-weight:700">⚡ Render Load: Fast</span>`);
+  box.innerHTML = `<div>${modeDesc}</div><div>${dnDesc}</div><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;padding-top:3px;border-top:1px solid rgba(255,255,255,.06)"><span>CAS Strength: <b>${sharp}</b>${deband?" • Deband ON":""}${stab?" • Deshake ON":""}${fps60?" • 60fps ON":""}</span>${speedBadge}</div>`;
 }
 async function refreshOptimizeEstimate(sampleProbe){
   const first=state.opt.items[0]; if(!first) return;
@@ -3414,13 +3790,16 @@ async function refreshOptimizeEstimate(sampleProbe){
   }catch(e){ afterEl.textContent="Estimate unavailable"; }
 }
 async function executeCompress(queueOnly=false){
-  const btn=document.getElementById("cmpRunBtn");
+  if(state._submittingJob) return;
+  const btn=document.getElementById("cmpRunBtn"), qBtn=document.getElementById("cmpQueueBtn");
   const saveMode=document.getElementById("cmpSaveMode").value;
+  const execTarget=document.getElementById("cmpExecTarget")?.value || "local";
   if(!queueOnly && saveMode==="overwrite" && document.getElementById("videoOverlay").classList.contains("open")){
     closeVideoOverlay(); await new Promise(r=>setTimeout(r, 120));
   }
   const payloads = state.opt.items.map(item=>({
     hostId:state.opt.hostId,
+    execTarget,
     path:item.path,
     targetHeight:Number(document.getElementById("cmpHeight").value)||0,
     crf:Number(document.getElementById("cmpCrf").value)||24,
@@ -3430,34 +3809,43 @@ async function executeCompress(queueOnly=false){
     saveMode,
     recycleOriginal:true,
   }));
+  state._submittingJob = true;
+  if(btn){ btn.disabled=true; if(!queueOnly) btn.textContent="Starting..."; }
+  if(qBtn){ qBtn.disabled=true; }
   try{
-    if(!queueOnly && btn){ btn.disabled=true; btn.textContent="Starting..."; }
     const res = await enqueueJobs("compress", payloads, true);
     if(queueOnly){
       showToast(`Added ${payloads.length} file(s) to Info Queue!`);
       closeDialog("optimizeModal");
       return;
     }
+    if(qBtn){ qBtn.textContent="Queued ✓"; qBtn.disabled=true; }
     const jobs = res.jobs || (res.job ? [res.job] : []);
     state.activeOptJobIds = jobs.map(j=>j.id);
     const box=document.getElementById("optLiveProgress");
     if(box){
       box.style.display="flex";
-      document.getElementById("optProgActions").innerHTML = state.activeOptJobIds.map(id=>`<button class="mini-btn" style="color:var(--danger)" onclick="cancelJob('${id}')">Cancel</button>`).slice(0,1).join("");
+      document.getElementById("optProgActions").innerHTML = state.activeOptJobIds.map(id=>`<button class="mini-btn" data-cancel-job="${id}" style="color:var(--danger)" onclick="cancelJob('${id}')">Cancel</button>`).slice(0,1).join("");
     }
   }catch(e){
     showToast("Compression failed: "+e.message);
     if(btn){ btn.disabled=false; btn.textContent=`Run Now (${state.opt.items.length})`; }
+    if(qBtn){ qBtn.disabled=false; qBtn.textContent="+ Add to Queue"; }
+  }finally{
+    state._submittingJob = false;
   }
 }
 async function executeUpscale(queueOnly=false){
-  const btn=document.getElementById("upRunBtn");
+  if(state._submittingJob) return;
+  const btn=document.getElementById("upRunBtn"), qBtn=document.getElementById("upQueueBtn");
   const saveMode=document.getElementById("upSaveMode").value;
+  const execTarget=document.getElementById("upExecTarget")?.value || "local";
   if(!queueOnly && saveMode==="overwrite" && document.getElementById("videoOverlay").classList.contains("open")){
     closeVideoOverlay(); await new Promise(r=>setTimeout(r, 120));
   }
   const payloads = state.opt.items.map(item=>({
     hostId:state.opt.hostId,
+    execTarget,
     path:item.path,
     preset:document.getElementById("upPreset").value,
     mode:document.getElementById("upMode").value,
@@ -3471,24 +3859,30 @@ async function executeUpscale(queueOnly=false){
     saveMode,
     recycleOriginal:true,
   }));
+  state._submittingJob = true;
+  if(btn){ btn.disabled=true; if(!queueOnly) btn.textContent="Starting..."; }
+  if(qBtn){ qBtn.disabled=true; }
   try{
-    if(!queueOnly && btn){ btn.disabled=true; btn.textContent="Starting..."; }
     const res = await enqueueJobs("upscale", payloads, true);
     if(queueOnly){
       showToast(`Added ${payloads.length} upscale job(s) to Info Queue!`);
       closeDialog("optimizeModal");
       return;
     }
+    if(qBtn){ qBtn.textContent="Queued ✓"; qBtn.disabled=true; }
     const jobs = res.jobs || (res.job ? [res.job] : []);
     state.activeOptJobIds = jobs.map(j=>j.id);
     const box=document.getElementById("optLiveProgress");
     if(box){
       box.style.display="flex";
-      document.getElementById("optProgActions").innerHTML = state.activeOptJobIds.map(id=>`<button class="mini-btn" style="color:var(--danger)" onclick="cancelJob('${id}')">Cancel</button>`).slice(0,1).join("");
+      document.getElementById("optProgActions").innerHTML = state.activeOptJobIds.map(id=>`<button class="mini-btn" data-cancel-job="${id}" style="color:var(--danger)" onclick="cancelJob('${id}')">Cancel</button>`).slice(0,1).join("");
     }
   }catch(e){
     showToast("Upscale failed: "+e.message);
     if(btn){ btn.disabled=false; btn.textContent=`Upscale Now (${state.opt.items.length})`; }
+    if(qBtn){ qBtn.disabled=false; qBtn.textContent="+ Add to Queue"; }
+  }finally{
+    state._submittingJob = false;
   }
 }
 

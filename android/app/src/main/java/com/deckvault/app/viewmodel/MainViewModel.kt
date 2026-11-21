@@ -13,7 +13,11 @@ import android.util.LruCache
 import android.webkit.MimeTypeMap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import coil3.SingletonImageLoader
+import coil3.request.CachePolicy
+import coil3.request.ImageRequest
 import com.deckvault.app.data.AllFilesPermissionRequiredException
+import com.deckvault.app.data.AndroidMetaCache
 import com.deckvault.app.data.DeckVaultApi
 import com.deckvault.app.data.HttpStatusException
 import com.deckvault.app.data.LanDiscovery
@@ -49,6 +53,7 @@ import com.deckvault.app.model.UserPreferences
 import com.deckvault.app.model.VideoMeta
 import com.deckvault.app.peer.DeckVaultPeerService
 import com.deckvault.app.ui.components.OptimizerTab
+import com.deckvault.app.ui.util.CoilCacheKeys
 import com.deckvault.app.ui.util.Formatters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -59,7 +64,10 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -133,6 +141,7 @@ data class BrowserUiState(
     val transferStatusText: String = "",
     val transferProgressFraction: Float = 0f,
     val cacheVersion: Long = 0L,
+    val precacheProgressText: String? = null,
     val toastMessage: String? = null,
 )
 
@@ -169,6 +178,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val rootsCache = ConcurrentHashMap<String, RootsResponse>()
     private val folderCache = LruCache<String, ListResponse>(48)
     private val treeCache = LruCache<String, TreeResponse>(48)
+    private val snapshotDb = AndroidMetaCache(application)
+    private var precacheJob: Job? = null
 
     private fun folderCacheKey(hostId: String, path: String, prefs: UserPreferences, query: String): String =
         "$hostId|$path|${prefs.sortBy.apiKey}|${prefs.sortDescending}|${prefs.mediaFilter.apiKey}|$query"
@@ -189,6 +200,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (hostId == SavedHost.LOCAL_DEVICE_ID) {
                 localRepo.invalidateFolderStatsCache()
             }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            snapshotDb.clearSnapshotsForHost(hostId)
         }
     }
 
@@ -307,14 +321,91 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearLocalCache() {
+        precacheJob?.cancel()
+        precacheJob = null
         viewModelScope.launch(Dispatchers.IO) {
             val ctx = getApplication<Application>()
+            runCatching { SingletonImageLoader.get(ctx).memoryCache?.clear() }
+            runCatching { SingletonImageLoader.get(ctx).diskCache?.clear() }
+            snapshotDb.clearSnapshotsForHost(null)
             ctx.cacheDir.listFiles()?.forEach { child ->
                 if (child.name != "datastore") child.deleteRecursively()
             }
             refreshLocalCacheSize()
             _ui.update {
-                it.copy(cacheVersion = System.currentTimeMillis(), toastMessage = "Local preview cache cleared")
+                it.copy(
+                    cacheVersion = System.currentTimeMillis(),
+                    precacheProgressText = null,
+                    toastMessage = "Local preview & snapshot cache cleared",
+                )
+            }
+        }
+    }
+
+    fun precacheCurrentFolderThumbnails() {
+        if (precacheJob?.isActive == true) {
+            precacheJob?.cancel()
+            precacheJob = null
+            _ui.update { it.copy(precacheProgressText = null, toastMessage = "Folder thumbnail caching stopped") }
+            return
+        }
+        val host = activeHost()
+        if (host.isLocalDevice) {
+            _ui.update { it.copy(toastMessage = "Local files generate thumbnails directly") }
+            return
+        }
+        val targets = _ui.value.files.filter { it.isVideo || it.isImage }.take(150)
+        if (targets.isEmpty()) {
+            _ui.update { it.copy(toastMessage = "No photos or videos in this folder to cache") }
+            return
+        }
+        val ver = _ui.value.cacheVersion
+        val total = targets.size
+        precacheJob = viewModelScope.launch(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            val loader = SingletonImageLoader.get(ctx)
+            val sem = Semaphore(4)
+            val doneCount = AtomicInteger(0)
+            _ui.update { it.copy(precacheProgressText = "Caching 0/$total") }
+            try {
+                coroutineScope {
+                    targets.map { file ->
+                        async {
+                            sem.withPermit {
+                                val url = if (file.isVideo) {
+                                    api.videoThumbnailUrl(host, file.path, width = 480, cacheBust = ver)
+                                } else {
+                                    api.imageUrl(host, file.path, width = 480, cacheBust = ver)
+                                }
+                                val key = CoilCacheKeys.mediaKey(
+                                    hostId = host.hostId,
+                                    kind = if (file.isVideo) "vthumb" else "img",
+                                    path = file.path,
+                                    width = 480,
+                                    sizeBytes = file.sizeBytes,
+                                    modifiedMs = file.modifiedMs,
+                                    cacheVersion = ver,
+                                )
+                                val req = ImageRequest.Builder(ctx)
+                                    .data(url)
+                                    .memoryCacheKey(key)
+                                    .diskCacheKey(key)
+                                    .memoryCachePolicy(CachePolicy.DISABLED)
+                                    .diskCachePolicy(CachePolicy.ENABLED)
+                                    .build()
+                                runCatching { loader.execute(req) }
+                                val done = doneCount.incrementAndGet()
+                                _ui.update { it.copy(precacheProgressText = "Caching $done/$total") }
+                            }
+                        }
+                    }.awaitAll()
+                }
+                refreshLocalCacheSize()
+                _ui.update { it.copy(precacheProgressText = null, toastMessage = "Cached $total thumbnails to disk") }
+            } catch (_: CancellationException) {
+                _ui.update { it.copy(precacheProgressText = null) }
+            } finally {
+                precacheJob = null
             }
         }
     }
@@ -442,14 +533,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun connectAndLoadHost(host: SavedHost, prefs: UserPreferences) {
         val connectGen = ++browseGeneration
-        val cachedRoots = rootsCache[host.hostId]
+        var cachedRoots = rootsCache[host.hostId]
+        if (cachedRoots == null && !host.isLocalDevice) {
+            val snapRoots = withContext(Dispatchers.IO) {
+                snapshotDb.getRootsSnapshot(host.hostId)?.let { raw ->
+                    runCatching { api.json.decodeFromString(RootsResponse.serializer(), raw) }.getOrNull()
+                }
+            }
+            if (snapRoots != null) {
+                cachedRoots = snapRoots
+                rootsCache[host.hostId] = snapRoots
+            }
+        }
         val cachedInitialPath = pendingNavigatePath?.takeIf { it.isNotBlank() }
             ?: cachedRoots?.quickFolders?.firstOrNull { it.name.contains("Videos", true) || it.name.contains("Movies", true) }?.path
             ?: cachedRoots?.quickFolders?.firstOrNull()?.path
             ?: cachedRoots?.drives?.firstOrNull()?.path.orEmpty()
-        val cachedInitialList = if (cachedInitialPath.isNotBlank()) {
+        var cachedInitialList = if (cachedInitialPath.isNotBlank()) {
             folderCache.get(folderCacheKey(host.hostId, cachedInitialPath, prefs, ""))
         } else null
+        if (cachedInitialList == null && cachedInitialPath.isNotBlank() && !host.isLocalDevice) {
+            val fKey = folderCacheKey(host.hostId, cachedInitialPath, prefs, "")
+            val snapList = withContext(Dispatchers.IO) {
+                snapshotDb.getFolderSnapshot(fKey)?.let { raw ->
+                    runCatching { api.json.decodeFromString(ListResponse.serializer(), raw) }.getOrNull()
+                }
+            }
+            if (snapList != null) {
+                cachedInitialList = snapList
+                folderCache.put(fKey, snapList)
+            }
+        }
 
         if (cachedRoots != null) {
             // Instant stale-while-revalidate UI switch between phones, tablet, and PC (<2ms)
@@ -491,6 +605,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             else withTimeout(10_000L) { resolveRoots(host) }
         }.onSuccess { roots ->
             rootsCache[host.hostId] = roots
+            if (!host.isLocalDevice) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    runCatching {
+                        snapshotDb.putRootsSnapshot(host.hostId, api.json.encodeToString(RootsResponse.serializer(), roots))
+                    }
+                }
+            }
             if (!host.isLocalDevice && roots.os.isNotBlank() && !roots.os.equals(host.os, ignoreCase = true)) {
                 prefsRepo.update { cur ->
                     cur.copy(hosts = cur.hosts.map { if (it.hostId == host.hostId) it.copy(os = roots.os) else it })
@@ -659,8 +780,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val recursive = _ui.value.recursiveSearch && query.isNotBlank()
         val fKey = folderCacheKey(host.hostId, path, prefs, if (recursive) "" else query)
         val tKey = treeCacheKey(host.hostId, path, treeSort)
-        val cachedList = if (!recursive) folderCache.get(fKey) else null
-        val cachedTree = treeCache.get(tKey)
+        var cachedList = if (!recursive) folderCache.get(fKey) else null
+        var cachedTree = treeCache.get(tKey)
+        if (!host.isLocalDevice && ((cachedList == null && !recursive) || cachedTree == null)) {
+            withContext(Dispatchers.IO) {
+                if (cachedList == null && !recursive) {
+                    snapshotDb.getFolderSnapshot(fKey)?.let { raw ->
+                        runCatching { api.json.decodeFromString(ListResponse.serializer(), raw) }.getOrNull()
+                    }?.also {
+                        cachedList = it
+                        folderCache.put(fKey, it)
+                    }
+                }
+                if (cachedTree == null) {
+                    snapshotDb.getTreeSnapshot(tKey)?.let { raw ->
+                        runCatching { api.json.decodeFromString(TreeResponse.serializer(), raw) }.getOrNull()
+                    }?.also {
+                        cachedTree = it
+                        treeCache.put(tKey, it)
+                    }
+                }
+            }
+        }
 
         if (cachedList != null) {
             _ui.update {
@@ -710,7 +851,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     } else null
 
                     val listResp = listDef.await()
-                    if (!recursive) folderCache.put(fKey, listResp)
+                    if (!recursive) {
+                        folderCache.put(fKey, listResp)
+                        if (!host.isLocalDevice) {
+                            viewModelScope.launch(Dispatchers.IO) {
+                                runCatching {
+                                    snapshotDb.putFolderSnapshot(
+                                        fKey,
+                                        host.hostId,
+                                        api.json.encodeToString(ListResponse.serializer(), listResp),
+                                    )
+                                }
+                            }
+                        }
+                    }
                     val recursiveFiles = recDef?.await()
                     if (myGen == browseGeneration) {
                         _ui.update {
@@ -727,7 +881,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     val treeResp = treeDef.await()
-                    if (treeResp != null) treeCache.put(tKey, treeResp)
+                    if (treeResp != null) {
+                        treeCache.put(tKey, treeResp)
+                        if (!host.isLocalDevice) {
+                            viewModelScope.launch(Dispatchers.IO) {
+                                runCatching {
+                                    snapshotDb.putTreeSnapshot(
+                                        tKey,
+                                        host.hostId,
+                                        api.json.encodeToString(TreeResponse.serializer(), treeResp),
+                                    )
+                                }
+                            }
+                        }
+                    }
                     if (myGen == browseGeneration && treeResp != null) {
                         _ui.update {
                             it.copy(

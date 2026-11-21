@@ -12,10 +12,12 @@ import com.deckvault.app.model.StoryboardInfoResponse
 import com.deckvault.app.model.ThemeSurfaceStyle
 import com.deckvault.app.model.UpscaleRequest
 import com.deckvault.app.model.UserPreferences
+import com.deckvault.app.ui.util.CoilCacheKeys
 import com.deckvault.app.ui.util.Formatters
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -147,5 +149,62 @@ class DeckVaultModelsTest {
         assertTrue(laptop.isDesktopPcHost)
         assertFalse(desktop.isAndroidDevice)
         assertTrue(desktop.isDesktopPcHost)
+    }
+
+    @Test
+    fun tabletCachePreferencesAndStableCoilKeysWorkCorrectly() {
+        val legacyJson = """{"gridColumns":4}"""
+        val decoded = json.decodeFromString(UserPreferences.serializer(), legacyJson)
+        assertEquals(0, decoded.thumbnailCacheSizeMb)
+        assertEquals(512, decoded.resolvedThumbnailCacheMb(isTablet = true))
+        assertEquals(256, decoded.resolvedThumbnailCacheMb(isTablet = false))
+
+        val explicitPrefs = UserPreferences(thumbnailCacheSizeMb = 2048)
+        val roundTripped = json.decodeFromString(
+            UserPreferences.serializer(),
+            json.encodeToString(UserPreferences.serializer(), explicitPrefs),
+        )
+        assertEquals(2048, roundTripped.thumbnailCacheSizeMb)
+        assertEquals(2048, roundTripped.resolvedThumbnailCacheMb(isTablet = false))
+
+        val keyBeforeIpChange = CoilCacheKeys.mediaKey(
+            hostId = "pc-desktop",
+            kind = "vthumb",
+            path = "D:\\Videos\\clip.mp4",
+            width = 480,
+            sizeBytes = 123456L,
+            modifiedMs = 987654321L,
+            cacheVersion = 0L,
+        )
+        val keyAfterIpChange = CoilCacheKeys.mediaKey(
+            hostId = "pc-desktop",
+            kind = "vthumb",
+            path = "D:\\Videos\\clip.mp4",
+            width = 480,
+            sizeBytes = 123456L,
+            modifiedMs = 987654321L,
+            cacheVersion = 0L,
+        )
+        val keyAfterFileEdit = CoilCacheKeys.mediaKey(
+            hostId = "pc-desktop",
+            kind = "vthumb",
+            path = "D:\\Videos\\clip.mp4",
+            width = 480,
+            sizeBytes = 222222L,
+            modifiedMs = 987654321L,
+            cacheVersion = 0L,
+        )
+        val keyAfterClearCache = CoilCacheKeys.mediaKey(
+            hostId = "pc-desktop",
+            kind = "vthumb",
+            path = "D:\\Videos\\clip.mp4",
+            width = 480,
+            sizeBytes = 123456L,
+            modifiedMs = 987654321L,
+            cacheVersion = 1795209999L,
+        )
+        assertEquals(keyBeforeIpChange, keyAfterIpChange)
+        assertNotEquals(keyBeforeIpChange, keyAfterFileEdit)
+        assertNotEquals(keyBeforeIpChange, keyAfterClearCache)
     }
 }

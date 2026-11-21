@@ -36,11 +36,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import coil3.compose.AsyncImage
 import com.deckvault.app.data.DeckVaultApi
 import com.deckvault.app.model.FileItem
 import com.deckvault.app.model.SavedHost
 import com.deckvault.app.ui.theme.OledColors
+import com.deckvault.app.ui.util.CoilCacheKeys
 import com.deckvault.app.ui.util.Formatters
 
 @Composable
@@ -53,6 +55,7 @@ fun ImageViewerOverlay(
     onDismiss: () -> Unit,
     onDeleteImage: (FileItem) -> Unit,
 ) {
+    val context = LocalContext.current
     var index by remember(initialIndex, images.size) { mutableStateOf(initialIndex.coerceIn(0, (images.size - 1).coerceAtLeast(0))) }
     val current = images.getOrNull(index) ?: return
 
@@ -62,7 +65,19 @@ fun ImageViewerOverlay(
     Surface(color = Color.Black, modifier = Modifier.fillMaxSize()) {
         Box(modifier = Modifier.fillMaxSize()) {
             AsyncImage(
-                model = api.imageUrl(host, current.path, width = 0, cacheBust = cacheVersion),
+                model = CoilCacheKeys.request(
+                    context = context,
+                    url = api.imageUrl(host, current.path, width = 0, cacheBust = cacheVersion),
+                    cacheKey = CoilCacheKeys.mediaKey(
+                        hostId = host.hostId,
+                        kind = "imgfull",
+                        path = current.path,
+                        width = 0,
+                        sizeBytes = current.sizeBytes,
+                        modifiedMs = current.modifiedMs,
+                        cacheVersion = cacheVersion,
+                    ),
+                ),
                 contentDescription = current.name,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier

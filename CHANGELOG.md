@@ -2,6 +2,32 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.5.0] - 2026-11-21
+
+### Batch A — Reliability, Audio Preservation, Queue Control & Split Gallery Parity (Desktop + Android)
+- **Fixed Desktop Host-Switch State Bleed & Blank Thumbnails (`companion/desktop_ui.py`)**:
+  - Switching devices (e.g. from Main PC to Phone or Tablet) now atomically cancels in-flight root/folder/tree requests, clears stale drive strips, hides local PC Cloud Storage tabs on remote hosts, clears old `<img>` sources immediately, and shows an explicit **Retry / Back to This PC** screen if a device is unreachable instead of leaving PC folders beneath a Phone header.
+- **Preserved Audio Tracks in FFmpeg Edits, Compressions & Upscales (`companion/deckvault_server.py`)**:
+  - Raised `ffprobe` timeout to `20s`, avoided caching empty failed probes, and removed automatic `-an` audio stripping in `edit_video`, `compress_media`, and `upscale_media` when `probe_video` returned an empty codec (only mutes now when explicitly requested). Also re-encodes incompatible lossless-copy audio streams (`pcm`/`dts`/`mp2` → AAC) when saving to `.mp4`/`.mov`/`.m4v`.
+- **Desktop Execution Target, Live Remote Progress & Instant Cancel (`companion/deckvault_server.py`, `companion/desktop_ui.py`)**:
+  - Added an **Engine (`Run on This PC` vs `Remote PC`)** selector across Compress, Upscale, and Edit Studio (defaulting to **This PC** so jobs don't unexpectedly run at 99% CPU on a laptop or sit stuck at `2%`).
+  - Replaced blocking 1-hour synchronous remote relay POSTs with async `/api/jobs/enqueue` + live 500ms `/api/jobs` progress forwarding & `/api/jobs/cancel` propagation, plus chunked cancellable stage transfers for local execution.
+  - Added Windows `taskkill /F /T /PID` process-tree termination in `_terminate_process_tree` so clicking **Cancel** kills active `ffmpeg` workers immediately instead of hanging, and guarded **Run Now / + Add to Queue** buttons against accidental duplicate job submissions.
+- **Upscale Context Descriptions (`companion/desktop_ui.py`, `MediaOptimizerSheet.kt`)**:
+  - Added dynamic inline explanation boxes, render CPU load indicators (`Fast` / `Moderate` / `Heavy CPU`), switch subtitles, and desktop hover tooltips explaining Upscale Engine Modes (`Crisp CAS`, `Anime`, `Restore`), Sharpening, Denoise (`Off` / `Fast 3D` / `HQ NLMeans`), Deband, Deshake, and 60 FPS Motion Interpolation.
+- **Desktop Split View Full Gallery Parity (`companion/desktop_ui.py`)**:
+  - Upgraded the Split Dual-Pane view with Grid/List view toggle, full `.media-card` thumbnail grid cards with hover video storyboards, Sort selector, Media Filter chips (`All`, `Video`, `Images`, `Audio`, `100MB+`), live Search box, Drives & Quick Folders strip, multi-select (`Select All` / `Clear` / `← Copy to Main` / `← Move to Main` / `Recycle`), and full player/studio context support (`activeFileHostId`).
+- **Auto-Scroll to Top (`companion/desktop_ui.py`, `FolderTreePane.kt`, `MediaBrowserPane.kt`)**:
+  - Switching Size/Name sort, filters, view mode, or navigating folders now automatically resets both the left folder panel and main/split gallery scroll position back to the top.
+
+### Batch B — Android Tablet & Multi-Device Caching Upgrades
+- **Configurable Thumbnail Disk Cache Size (`Models.kt`, `SettingsDialog.kt`, `MainActivity.kt`)**:
+  - Added a **Thumbnail Disk Cache Limit** setting (`Auto`, `256 MB`, `512 MB`, `1 GB`, `2 GB`) with smart defaults (**512 MB** + 25% memory cache on tablets like Galaxy Tab S8 Ultra / **256 MB** on phones) and live usage readout.
+- **Persistent IP-Independent Coil 3 Cache Keys (`CoilCacheKeys.kt`, `VideoScrubPreview.kt`, `MediaBrowserPane.kt`, `ImageViewerSheet.kt`)**:
+  - Keyed Coil memory & disk cache entries by stable `hostId|kind|path|w|sizeBytes|modifiedMs|cacheVersion` rather than transient LAN IP/tokens so Wi-Fi IP refreshes never invalidate cached thumbnails or 4x4 video storyboards.
+- **Persistent SQLite Folder, Tree & Roots Snapshots + Optional Folder Pre-Cache (`AndroidMetaCache.kt`, `MainViewModel.kt`, `MediaBrowserPane.kt`)**:
+  - Upgraded `AndroidMetaCache` to DB v2 with `folder_snapshots`, `tree_snapshots`, and `roots_snapshots` tables so remote device folders render immediately on cold launch while revalidating over LAN, plus a **`Cache Folder`** toolbar chip to pre-warm thumbnails for the current folder cleanly in the background.
+
 ## [v1.4.9] - 2026-11-20
 
 ### Built-in Desktop Updates & Changelog Center

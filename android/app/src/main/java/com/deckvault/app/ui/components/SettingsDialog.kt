@@ -44,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,6 +76,7 @@ fun SettingsDialog(
     onDismiss: () -> Unit,
 ) {
     val surfaces = LocalDeckSurfaces.current
+    val isTablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -453,6 +455,32 @@ fun SettingsDialog(
                             }
                         }
 
+                        Text(
+                            text = "Thumbnail Disk Cache Limit",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = surfaces.textSecondary,
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        ) {
+                            listOf(
+                                0 to "Auto (${if (isTablet) "512 MB" else "256 MB"})",
+                                256 to "256 MB",
+                                512 to "512 MB",
+                                1024 to "1 GB",
+                                2048 to "2 GB",
+                            ).forEach { (limitMb, lbl) ->
+                                FilterChip(
+                                    selected = prefs.thumbnailCacheSizeMb == limitMb,
+                                    onClick = { onUpdatePrefs { it.copy(thumbnailCacheSizeMb = limitMb) } },
+                                    label = { Text(lbl, style = MaterialTheme.typography.labelMedium) },
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = matteChipColors(),
+                                )
+                            }
+                        }
+
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -463,7 +491,7 @@ fun SettingsDialog(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("Local Thumbnail Cache", style = MaterialTheme.typography.bodyMedium, color = surfaces.textPrimary)
                                 Text(
-                                    text = Formatters.formatBytes(localCacheBytes),
+                                    text = "Used ${Formatters.formatBytes(localCacheBytes)} / ${prefs.resolvedThumbnailCacheMb(isTablet)} MB limit • Survives Wi-Fi IP changes",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = surfaces.textSecondary,
                                 )

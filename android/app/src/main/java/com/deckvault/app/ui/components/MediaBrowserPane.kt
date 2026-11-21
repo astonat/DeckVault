@@ -30,7 +30,9 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,6 +46,7 @@ import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -96,6 +99,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -105,6 +109,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -123,6 +128,7 @@ import com.deckvault.app.model.UserPreferences
 import com.deckvault.app.model.ViewMode
 import com.deckvault.app.ui.theme.LocalDeckSurfaces
 import com.deckvault.app.ui.theme.OledColors
+import com.deckvault.app.ui.util.CoilCacheKeys
 import com.deckvault.app.ui.util.Formatters
 import kotlin.math.roundToInt
 
@@ -177,6 +183,8 @@ fun MediaBrowserPane(
     onMergeSelected: () -> Unit = {},
     activeQueueCount: Int = 0,
     onOpenQueue: () -> Unit = {},
+    precacheProgressText: String? = null,
+    onPrecacheCurrentFolder: () -> Unit = {},
 ) {
     var showCustomizeSheet by remember { mutableStateOf(false) }
     var showSortMenu by remember { mutableStateOf(false) }
@@ -184,6 +192,21 @@ fun MediaBrowserPane(
     var contextFile by remember { mutableStateOf<FileItem?>(null) }
     var infoFile by remember { mutableStateOf<FileItem?>(null) }
     var renameTarget by remember { mutableStateOf<FileItem?>(null) }
+
+    val gridState = rememberLazyGridState()
+    val listState = rememberLazyListState()
+    LaunchedEffect(
+        host?.hostId,
+        currentPath,
+        prefs.sortBy,
+        prefs.sortDescending,
+        prefs.mediaFilter,
+        prefs.viewMode,
+        isSpaceHogsMode,
+    ) {
+        gridState.scrollToItem(0)
+        listState.scrollToItem(0)
+    }
 
     val surfaces = LocalDeckSurfaces.current
     val maxFileBytes = remember(files) { files.maxOfOrNull { it.sizeBytes }?.coerceAtLeast(1L) ?: 1L }
@@ -531,6 +554,21 @@ fun MediaBrowserPane(
                             ),
                         )
                     }
+                    if (host != null && !host.isLocalDevice && files.any { it.isVideo || it.isImage }) {
+                        FilterChip(
+                            selected = precacheProgressText != null,
+                            onClick = onPrecacheCurrentFolder,
+                            leadingIcon = { Icon(Icons.Rounded.CloudDownload, null, Modifier.size(15.dp)) },
+                            label = { Text(precacheProgressText ?: "Cache Folder", style = MaterialTheme.typography.labelMedium) },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                                selectedLabelColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                                containerColor = OledColors.CardSurface,
+                                labelColor = OledColors.TextSecondary,
+                            ),
+                        )
+                    }
                 }
             } else {
                 // TABLET & Z FOLD UNFOLDED WIDE HEADER
@@ -801,6 +839,21 @@ fun MediaBrowserPane(
                                 ),
                             )
                         }
+                        if (host != null && !host.isLocalDevice && files.any { it.isVideo || it.isImage }) {
+                            FilterChip(
+                                selected = precacheProgressText != null,
+                                onClick = onPrecacheCurrentFolder,
+                                leadingIcon = { Icon(Icons.Rounded.CloudDownload, null, Modifier.size(15.dp)) },
+                                label = { Text(precacheProgressText ?: "Cache Folder", style = MaterialTheme.typography.labelMedium) },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                                    selectedLabelColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    containerColor = OledColors.CardSurface,
+                                    labelColor = OledColors.TextSecondary,
+                                ),
+                            )
+                        }
                     }
                 }
             }
@@ -860,6 +913,7 @@ fun MediaBrowserPane(
                         }
 
                         LazyVerticalGrid(
+                            state = gridState,
                             columns = GridCells.Fixed(cols),
                             contentPadding = PaddingValues(bottom = if (selectedPaths.isNotEmpty()) 96.dp else 16.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -901,6 +955,7 @@ fun MediaBrowserPane(
                 }
                 else -> {
                     LazyColumn(
+                        state = listState,
                         modifier = Modifier.weight(1f).fillMaxSize(),
                         contentPadding = PaddingValues(bottom = if (selectedPaths.isNotEmpty()) 96.dp else 16.dp),
                         verticalArrangement = Arrangement.spacedBy(if (prefs.compactListMode) 5.dp else 8.dp),
@@ -1330,6 +1385,7 @@ private fun GalleryMediaCard(
             .fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
+        val context = LocalContext.current
         Column {
             Box(
                 modifier = Modifier
@@ -1345,12 +1401,18 @@ private fun GalleryMediaCard(
                             durationMs = file.meta?.durationMs ?: 0L,
                             enableScrub = prefs.enableHoverScrub,
                             contentDescription = file.name,
+                            thumbnailCacheKey = CoilCacheKeys.mediaKey(host.hostId, "vthumb", file.path, 480, file.sizeBytes, file.modifiedMs, cacheVersion),
+                            storyboardCacheKey = CoilCacheKeys.mediaKey(host.hostId, "vsb", file.path, 4, file.sizeBytes, file.modifiedMs, cacheVersion),
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
                     file.isImage -> {
                         AsyncImage(
-                            model = api.imageUrl(host, file.path, width = 480, cacheBust = cacheVersion),
+                            model = CoilCacheKeys.request(
+                                context = context,
+                                url = api.imageUrl(host, file.path, width = 480, cacheBust = cacheVersion),
+                                cacheKey = CoilCacheKeys.mediaKey(host.hostId, "img", file.path, 480, file.sizeBytes, file.modifiedMs, cacheVersion),
+                            ),
                             contentDescription = file.name,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize(),
@@ -1539,6 +1601,7 @@ private fun ListMediaRow(
             Checkbox(checked = isSelected, onCheckedChange = { onLongClick() })
 
             // Scrubbable preview thumbnail even in List View!
+            val listCtx = LocalContext.current
             Box(
                 modifier = Modifier
                     .width(if (compact) 92.dp else 128.dp)
@@ -1554,12 +1617,18 @@ private fun ListMediaRow(
                             durationMs = file.meta?.durationMs ?: 0L,
                             enableScrub = prefs.enableHoverScrub,
                             contentDescription = file.name,
+                            thumbnailCacheKey = CoilCacheKeys.mediaKey(host.hostId, "vthumb", file.path, 360, file.sizeBytes, file.modifiedMs, cacheVersion),
+                            storyboardCacheKey = CoilCacheKeys.mediaKey(host.hostId, "vsb", file.path, 4, file.sizeBytes, file.modifiedMs, cacheVersion),
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
                     file.isImage -> {
                         AsyncImage(
-                            model = api.imageUrl(host, file.path, width = 360, cacheBust = cacheVersion),
+                            model = CoilCacheKeys.request(
+                                context = listCtx,
+                                url = api.imageUrl(host, file.path, width = 360, cacheBust = cacheVersion),
+                                cacheKey = CoilCacheKeys.mediaKey(host.hostId, "img", file.path, 360, file.sizeBytes, file.modifiedMs, cacheVersion),
+                            ),
                             contentDescription = file.name,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize(),

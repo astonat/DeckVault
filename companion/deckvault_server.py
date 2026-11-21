@@ -41,12 +41,41 @@ import zipfile
 from desktop_ui import DESKTOP_APP_HTML
 
 
-APP_VERSION = "1.4.9"
+APP_VERSION = "1.5.0"
 GITHUB_REPO = "astonat/DeckVault"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
 DISCOVERY_MAGIC = b"DECKVAULT_DISCOVER_V1"
 SUBPROCESS_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+
+def _terminate_process_tree(proc: subprocess.Popen | None) -> None:
+    """Terminate an active child process (and its full process tree on Windows) immediately."""
+    if proc is None:
+        return
+    try:
+        if os.name == "nt" and proc.pid:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=SUBPROCESS_FLAGS,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 VIDEO_EXTS = {
     ".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".flv",
@@ -688,19 +717,21 @@ class MediaService:
         ]
         try:
             with self._probe_sem:
-                out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=10, creationflags=SUBPROCESS_FLAGS)
+                out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=20, creationflags=SUBPROCESS_FLAGS)
             parsed = json.loads(out.decode("utf-8", errors="replace"))
         except Exception:
-            return {"durationMs": 0, "width": 0, "height": 0, "fps": 0.0, "videoCodec": "", "audioCodec": "", "bitrate": 0}
+            return {"durationMs": 0, "width": 0, "height": 0, "fps": 0.0, "videoCodec": "", "audioCodec": "", "hasAudio": False, "bitrate": 0}
 
         fmt = parsed.get("format", {})
         streams = parsed.get("streams", [])
-        v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
-        a_stream = next((s for s in streams if s.get("codec_type") == "audio"), {})
+        v_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+        a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        v_d = v_stream or {}
+        a_d = a_stream or {}
 
-        dur_s = float(fmt.get("duration") or v_stream.get("duration") or 0.0)
+        dur_s = float(fmt.get("duration") or v_d.get("duration") or 0.0)
         fps = 0.0
-        rate_str = v_stream.get("r_frame_rate") or v_stream.get("avg_frame_rate") or "0/1"
+        rate_str = v_d.get("r_frame_rate") or v_d.get("avg_frame_rate") or "0/1"
         if "/" in str(rate_str):
             num, den = str(rate_str).split("/", 1)
             try:
@@ -710,16 +741,19 @@ class MediaService:
             except ValueError:
                 fps = 0.0
 
+        audio_codec = str(a_d.get("codec_name") or ("unknown" if a_stream is not None else ""))
         meta = {
             "durationMs": int(dur_s * 1000),
-            "width": int(v_stream.get("width") or 0),
-            "height": int(v_stream.get("height") or 0),
+            "width": int(v_d.get("width") or 0),
+            "height": int(v_d.get("height") or 0),
             "fps": fps,
-            "videoCodec": str(v_stream.get("codec_name") or ""),
-            "audioCodec": str(a_stream.get("codec_name") or ""),
+            "videoCodec": str(v_d.get("codec_name") or ""),
+            "audioCodec": audio_codec,
+            "hasAudio": a_stream is not None,
             "bitrate": int(fmt.get("bit_rate") or 0),
         }
-        self.cache.put(path, st.st_mtime_ns, st.st_size, meta)
+        if v_stream is not None or a_stream is not None or meta["durationMs"] > 0:
+            self.cache.put(path, st.st_mtime_ns, st.st_size, meta)
         return meta
 
     def invalidate_media_caches(self, path: str) -> None:
@@ -966,7 +1000,7 @@ class MediaService:
             assert proc.stdout is not None
             for raw_line in proc.stdout:
                 if proc_holder is not None and proc_holder.get("cancel"):
-                    proc.terminate()
+                    _terminate_process_tree(proc)
                     break
                 line = raw_line.strip()
                 if "=" not in line:
@@ -1000,6 +1034,13 @@ class MediaService:
                             "speed": speed_txt,
                             "remainingSec": round(rem_s, 1) if rem_s is not None else None,
                         })
+            if proc_holder is not None and proc_holder.get("cancel"):
+                _terminate_process_tree(proc)
+                try:
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
+                raise InterruptedError("Cancelled by user")
             rc = proc.wait(timeout=3600)
         finally:
             err_t.join(timeout=2)
@@ -1157,7 +1198,8 @@ class MediaService:
         old_stat = os.stat(path)
         old_size = old_stat.st_size
         meta = self.probe_video(path, old_stat)
-        has_audio = bool(meta.get("audioCodec"))
+        audio_codec_l = str(meta.get("audioCodec") or "").lower()
+        has_audio = bool(meta.get("hasAudio") or audio_codec_l)
         total_ms = meta.get("durationMs", 0)
         if total_ms > 0:
             end_ms = min(end_ms, total_ms) if end_ms > 0 else total_ms
@@ -1216,13 +1258,20 @@ class MediaService:
 
         try:
             if not needs_reencode:
+                audio_copy_args = ["-c", "copy"]
+                if (
+                    out_ext.lower() in (".mp4", ".mov", ".m4v")
+                    and audio_codec_l
+                    and audio_codec_l not in ("aac", "mp3", "alac", "ac3", "eac3", "opus")
+                ):
+                    audio_copy_args = ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]
                 cmd = [
                     self.ffmpeg, "-y",
                     "-ss", f"{start_s:.3f}",
                     "-i", path,
                     "-t", f"{dur_s:.3f}",
                     "-map", "0:v?", "-map", "0:a?", "-map", "0:s?",
-                    "-c", "copy",
+                    *audio_copy_args,
                     "-avoid_negative_ts", "make_zero",
                     tmp_path,
                 ]
@@ -1283,7 +1332,7 @@ class MediaService:
                     "-t", f"{dur_s:.3f}",
                     "-map", "0:v:0",
                 ]
-                if mute_audio or not has_audio:
+                if mute_audio:
                     cmd.append("-an")
                 else:
                     cmd.extend(["-map", "0:a?"])
@@ -1295,7 +1344,7 @@ class MediaService:
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
                     "-pix_fmt", "yuv420p",
                 ])
-                if has_audio and not mute_audio:
+                if not mute_audio:
                     cmd.extend(["-c:a", "aac", "-b:a", "192k"])
                 if out_ext.lower() != ".mkv":
                     cmd.extend(["-movflags", "+faststart"])
@@ -1611,7 +1660,7 @@ class MediaService:
         meta = self.probe_video(path, old_stat)
         dur_s = max(0.5, meta.get("durationMs", 0) / 1000.0)
         oh = int(meta.get("height", 0) or 1080)
-        has_audio = bool(meta.get("audioCodec"))
+        has_audio = bool(meta.get("hasAudio") or meta.get("audioCodec"))
         use_hevc = (codec.lower() in ("h265", "hevc")) and self.has_encoder("libx265")
         v_enc = "libx265" if use_hevc else "libx264"
         out_ext = ".mp4" if save_mode == "copy" else (ext if ext in (".mp4", ".mov", ".mkv", ".m4v") else ".mp4")
@@ -1619,7 +1668,7 @@ class MediaService:
 
         try:
             cmd = [self.ffmpeg, "-y", "-i", path, "-map", "0:v:0"]
-            if audio_kbps <= 0 or not has_audio:
+            if audio_kbps <= 0:
                 cmd.append("-an")
             else:
                 cmd.extend(["-map", "0:a?"])
@@ -1632,13 +1681,13 @@ class MediaService:
                 cmd.extend(["-tag:v", "hvc1"])
             if target_mb > 0:
                 total_bps = (float(target_mb) * 1024 * 1024 * 8.0) / dur_s
-                a_bps = max(0, int(audio_kbps)) * 1000 if has_audio else 0
+                a_bps = max(0, int(audio_kbps)) * 1000 if (audio_kbps > 0 and has_audio) else 0
                 v_bps = max(120_000, int((total_bps - a_bps) * 0.94))
                 v_kbps = max(120, v_bps // 1000)
                 cmd.extend(["-b:v", f"{v_kbps}k", "-maxrate", f"{int(v_kbps * 1.35)}k", "-bufsize", f"{v_kbps * 2}k"])
             else:
                 cmd.extend(["-crf", str(max(16, min(36, int(crf))))])
-            if audio_kbps > 0 and has_audio:
+            if audio_kbps > 0:
                 cmd.extend(["-c:a", "aac", "-b:a", f"{int(audio_kbps)}k"])
             if out_ext != ".mkv":
                 cmd.extend(["-movflags", "+faststart"])
@@ -1734,7 +1783,6 @@ class MediaService:
             raise RuntimeError("FFmpeg is required for video upscaling")
         meta = self.probe_video(path, old_stat)
         dur_s = max(0.5, meta.get("durationMs", 0) / 1000.0)
-        has_audio = bool(meta.get("audioCodec"))
         ow = int(meta.get("width", 0) or 1280)
         oh = int(meta.get("height", 0) or 720)
         target_long = {"4k": 3840, "1440p": 2560, "1080p": 1920}.get(preset, 0)
@@ -1774,19 +1822,14 @@ class MediaService:
                 vf_parts.append("framerate=fps=60")
             vf_parts.append("setsar=1")
 
-            cmd = [self.ffmpeg, "-y", "-i", path, "-map", "0:v:0"]
-            if has_audio:
-                cmd.extend(["-map", "0:a?"])
-            else:
-                cmd.append("-an")
+            cmd = [self.ffmpeg, "-y", "-i", path, "-map", "0:v:0", "-map", "0:a?"]
             cmd.extend([
                 "-vf", ",".join(vf_parts),
                 "-c:v", "libx264", "-preset", "fast",
                 "-crf", str(max(14, min(28, int(crf)))),
                 "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
             ])
-            if has_audio:
-                cmd.extend(["-c:a", "aac", "-b:a", "192k"])
             if out_ext != ".mkv":
                 cmd.extend(["-movflags", "+faststart"])
             cmd.append(tmp_path)
@@ -2016,7 +2059,7 @@ class MediaService:
                 max_w, max_h = w, h
             if m.get("fps"):
                 max_fps = max(max_fps, min(60.0, float(m["fps"])))
-            if m.get("audioCodec"):
+            if m.get("hasAudio") or m.get("audioCodec"):
                 any_audio = True
 
         tw = max(2, min(1920, (max_w // 2) * 2 or 1280))
@@ -2043,7 +2086,7 @@ class MediaService:
                 )
                 concat_inputs.append(f"[v{idx}]")
                 if any_audio:
-                    if m.get("audioCodec"):
+                    if m.get("hasAudio") or m.get("audioCodec"):
                         fc_parts.append(f"[{idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,aresample=async=1[a{idx}]")
                     else:
                         d_clip = max(0.1, float(m.get("durationMs", 1000) or 1000) / 1000.0)
@@ -2600,20 +2643,30 @@ class JobManager:
             raise ValueError(f"Unsupported job type: {job_type}")
         job_id = f"job_{uuid.uuid4().hex[:10]}"
         src_path = str(payload.get("path") or ((payload.get("paths") or [""])[0]))
-        host_id = str(payload.get("hostId") or self.rt.config.data["host_id"])
+        local_id = self.rt.config.data["host_id"]
+        host_id = str(payload.get("hostId") or local_id)
+        exec_target = str(payload.get("execTarget") or "auto").strip().lower()
+        target_note = "This PC"
+        if host_id != local_id:
+            peer = self.rt.fleet.get(host_id)
+            peer_os = str((peer or {}).get("os", "")).lower()
+            if exec_target != "local" and "android" not in peer_os and "ios" not in peer_os:
+                target_note = f"Remote: {(peer or {}).get('label') or (peer or {}).get('name') or 'PC'}"
         rec = {
             "id": job_id,
             "type": job_type,
             "route": route,
             "title": str(payload.get("title") or self._build_title(job_type, payload)),
             "hostId": host_id,
+            "execTarget": exec_target,
+            "execNote": target_note,
             "sourcePath": src_path,
             "sourceName": os.path.basename(src_path.rstrip("\\/")) or "Media",
             "status": "queued",
             "progressPct": 0.0,
             "speed": "",
             "remainingSec": None,
-            "message": "Queued",
+            "message": f"Queued [{target_note}]",
             "createdAt": time.time(),
             "startedAt": None,
             "finishedAt": None,
@@ -2628,7 +2681,7 @@ class JobManager:
         with self._lock:
             self._jobs[job_id] = rec
             self._order.insert(0, job_id)
-            self._proc_holders[job_id] = {"proc": None, "cancel": False}
+            self._proc_holders[job_id] = {"proc": None, "cancel": False, "remote_host": None, "remote_job_id": None}
             if len(self._order) > 60:
                 for old_id in list(self._order[60:]):
                     old_j = self._jobs.get(old_id)
@@ -2654,6 +2707,9 @@ class JobManager:
         }
 
     def cancel(self, job_id: str) -> dict[str, Any]:
+        remote_host = None
+        remote_job_id = None
+        proc = None
         with self._lock:
             rec = self._jobs.get(job_id)
             holder = self._proc_holders.get(job_id)
@@ -2663,6 +2719,8 @@ class JobManager:
                 return dict(rec)
             holder["cancel"] = True
             proc = holder.get("proc")
+            remote_host = holder.get("remote_host")
+            remote_job_id = holder.get("remote_job_id")
             if rec["status"] == "queued":
                 rec["status"] = "cancelled"
                 rec["finishedAt"] = time.time()
@@ -2670,10 +2728,20 @@ class JobManager:
             else:
                 rec["message"] = "Cancelling..."
         if proc is not None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+            _terminate_process_tree(proc)
+        if remote_host and remote_job_id:
+            def _cancel_remote() -> None:
+                try:
+                    creq = urllib.request.Request(
+                        f"http://{remote_host['ip']}:{remote_host['port']}/api/jobs/cancel",
+                        data=json.dumps({"id": remote_job_id}).encode("utf-8"),
+                        headers={"X-DeckVault-Token": remote_host["token"], "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    urllib.request.urlopen(creq, timeout=4).close()
+                except Exception:
+                    pass
+            threading.Thread(target=_cancel_remote, daemon=True).start()
         return self.get(job_id) or {}
 
     def get(self, job_id: str) -> dict[str, Any] | None:
@@ -2708,7 +2776,7 @@ class JobManager:
                     rec["status"] = "running"
                     rec["startedAt"] = time.time()
                     rec["progressPct"] = 2.0
-                    rec["message"] = "Processing..."
+                    rec["message"] = f"Processing [{rec.get('execNote', 'This PC')}]..."
 
                 def _on_prog(info: dict[str, Any]) -> None:
                     with self._lock:
@@ -2720,7 +2788,8 @@ class JobManager:
                         r["remainingSec"] = info.get("remainingSec")
                         spd_bit = f" • {r['speed']}" if r["speed"] else ""
                         eta_bit = f" • {int(round(r['remainingSec']))}s left" if r["remainingSec"] is not None else ""
-                        r["message"] = f"{r['progressPct']:.0f}%{spd_bit}{eta_bit}"
+                        where_bit = f"[{r.get('execNote', 'This PC')}] " if r.get("execNote") else ""
+                        r["message"] = f"{where_bit}{r['progressPct']:.0f}%{spd_bit}{eta_bit}"
 
                 res = self.rt.run_or_relay_media_op(route, payload, on_progress=_on_prog, proc_holder=holder)
                 out_p = str(res.get("path", "") or "")
@@ -3059,19 +3128,105 @@ class CompanionRuntime:
         if not host:
             raise ValueError("Paired device not found")
 
-        try:
-            req = urllib.request.Request(
-                f"http://{host['ip']}:{host['port']}{route}",
-                data=json.dumps(body).encode("utf-8"),
-                headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=3600) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            err_txt = exc.read().decode("utf-8", errors="replace")
-            if exc.code != 404 and "Unknown route" not in err_txt:
-                raise RuntimeError(err_txt or f"HTTP {exc.code}")
+        exec_target = str(body.get("execTarget") or "auto").strip().lower()
+        host_os_l = str(host.get("os", "")).lower()
+        is_mobile_peer = ("android" in host_os_l) or ("ios" in host_os_l)
+        route_to_job_type = {
+            "/api/video/edit": "edit",
+            "/api/media/compress": "compress",
+            "/api/media/upscale": "upscale",
+            "/api/media/extract-audio": "extract_audio",
+            "/api/media/gif": "gif",
+            "/api/media/merge": "merge",
+        }
+
+        if route == "/api/media/compress-estimate":
+            try:
+                req = urllib.request.Request(
+                    f"http://{host['ip']}:{host['port']}{route}",
+                    data=json.dumps(body).encode("utf-8"),
+                    headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/json"},
+                    method="POST",
+                )
+                timeout_s = 35 if bool(body.get("sampleProbe", False)) else 10
+                with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                err_txt = exc.read().decode("utf-8", errors="replace")
+                if exc.code != 404 and "Unknown route" not in err_txt:
+                    raise RuntimeError(err_txt or f"HTTP {exc.code}")
+        elif exec_target in ("remote", "auto") and not is_mobile_peer and route in route_to_job_type:
+            job_type = route_to_job_type[route]
+            remote_body = dict(body)
+            remote_body["hostId"] = host["hostId"]
+            remote_body["execTarget"] = "local"
+            try:
+                enq_req = urllib.request.Request(
+                    f"http://{host['ip']}:{host['port']}/api/jobs/enqueue",
+                    data=json.dumps({"type": job_type, "payload": remote_body}).encode("utf-8"),
+                    headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(enq_req, timeout=30) as eresp:
+                    enq_data = json.loads(eresp.read().decode("utf-8"))
+                remote_job_id = str(((enq_data.get("job") or {}).get("id")) or "")
+                if remote_job_id:
+                    if proc_holder is not None:
+                        proc_holder["remote_host"] = host
+                        proc_holder["remote_job_id"] = remote_job_id
+                    try:
+                        while True:
+                            if proc_holder is not None and proc_holder.get("cancel"):
+                                try:
+                                    creq = urllib.request.Request(
+                                        f"http://{host['ip']}:{host['port']}/api/jobs/cancel",
+                                        data=json.dumps({"id": remote_job_id}).encode("utf-8"),
+                                        headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/json"},
+                                        method="POST",
+                                    )
+                                    urllib.request.urlopen(creq, timeout=4).close()
+                                except Exception:
+                                    pass
+                                raise InterruptedError("Cancelled by user")
+                            jreq = urllib.request.Request(
+                                f"http://{host['ip']}:{host['port']}/api/jobs",
+                                headers={"X-DeckVault-Token": host["token"]},
+                                method="GET",
+                            )
+                            with urllib.request.urlopen(jreq, timeout=15) as jresp:
+                                snap = json.loads(jresp.read().decode("utf-8"))
+                            rj = next((x for x in (snap.get("jobs") or []) if x.get("id") == remote_job_id), None)
+                            if rj:
+                                st_s = str(rj.get("status", ""))
+                                if st_s in ("queued", "running"):
+                                    if on_progress is not None:
+                                        on_progress({
+                                            "progressPct": float(rj.get("progressPct", 2.0) or 2.0),
+                                            "speed": str(rj.get("speed", "") or ""),
+                                            "remainingSec": rj.get("remainingSec"),
+                                        })
+                                elif st_s == "done":
+                                    out_p = str(rj.get("outputPath", "") or "")
+                                    return {
+                                        "ok": True,
+                                        "path": out_p,
+                                        "name": str(rj.get("outputName") or os.path.basename(out_p)),
+                                        "newSizeBytes": int(rj.get("newSizeBytes", 0) or 0),
+                                        "savedBytes": int(rj.get("savedBytes", 0) or 0),
+                                    }
+                                elif st_s == "cancelled":
+                                    raise InterruptedError("Cancelled by user")
+                                elif st_s == "error":
+                                    raise RuntimeError(str(rj.get("error") or "Remote job failed"))
+                            time.sleep(0.5)
+                    finally:
+                        if proc_holder is not None:
+                            proc_holder["remote_host"] = None
+                            proc_holder["remote_job_id"] = None
+            except urllib.error.HTTPError as exc:
+                err_txt = exc.read().decode("utf-8", errors="replace")
+                if exc.code != 404 and "Unknown route" not in err_txt:
+                    raise RuntimeError(err_txt or f"HTTP {exc.code}")
 
         if route == "/api/media/compress-estimate" and not bool(body.get("sampleProbe", False)):
             old_sz = int(body.get("sizeBytes") or 0)
@@ -3116,7 +3271,12 @@ class CompanionRuntime:
         stage_dir = DRAG_STAGING_DIR / uuid.uuid4().hex
         stage_dir.mkdir(parents=True, exist_ok=True)
         try:
-            def _dl_remote(rpath: str) -> str:
+            def _check_cancel() -> None:
+                if proc_holder is not None and proc_holder.get("cancel"):
+                    raise InterruptedError("Cancelled by user")
+
+            def _dl_remote(rpath: str, base_pct: float = 2.0, weight_pct: float = 16.0) -> str:
+                _check_cancel()
                 base = rpath.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] or f"media_{uuid.uuid4().hex[:6]}.mp4"
                 dest = str(stage_dir / base)
                 q = url_quote(rpath, safe="")
@@ -3126,47 +3286,96 @@ class CompanionRuntime:
                     method="GET",
                 )
                 with urllib.request.urlopen(sreq, timeout=600) as resp, open(dest, "wb") as out:
-                    shutil.copyfileobj(resp, out)
+                    total_len = int(resp.headers.get("Content-Length") or 0)
+                    done_len = 0
+                    last_dl_emit = 0.0
+                    while True:
+                        _check_cancel()
+                        chunk = resp.read(256 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        done_len += len(chunk)
+                        if on_progress is not None and total_len > 0:
+                            now = time.monotonic()
+                            if (now - last_dl_emit) >= 0.25 or done_len >= total_len:
+                                last_dl_emit = now
+                                frac = min(1.0, done_len / total_len)
+                                on_progress({
+                                    "progressPct": round(base_pct + frac * weight_pct, 1),
+                                    "speed": "Fetch",
+                                    "remainingSec": None,
+                                })
                 return dest
+
+            def _scaled_local_progress(info: dict[str, Any]) -> None:
+                if on_progress is None:
+                    return
+                sub_pct = float(info.get("progressPct", 0.0) or 0.0)
+                scaled = dict(info)
+                scaled["progressPct"] = round(18.0 + (sub_pct * 0.70), 1)
+                on_progress(scaled)
 
             if route == "/api/media/merge":
                 raw_paths = [str(p) for p in (body.get("paths") or []) if str(p).strip()]
-                local_paths = [_dl_remote(rp) for rp in raw_paths]
+                local_paths = [
+                    _dl_remote(rp, 2.0 + (idx * 16.0 / max(1, len(raw_paths))), 16.0 / max(1, len(raw_paths)))
+                    for idx, rp in enumerate(raw_paths)
+                ]
                 first_rp = raw_paths[0]
                 sep = "\\" if "\\" in first_rp else "/"
                 remote_dir = first_rp.rsplit(sep, 1)[0] if sep in first_rp else ""
                 res = self.media.merge_videos(
                     local_paths, str(stage_dir), str(body.get("outputName", "Merged_Video.mp4")),
-                    int(body.get("crf", 20) or 20), on_progress, proc_holder,
+                    int(body.get("crf", 20) or 20), _scaled_local_progress, proc_holder,
                 )
             else:
                 sep = "\\" if "\\" in raw_path else "/"
                 remote_dir = raw_path.rsplit(sep, 1)[0] if sep in raw_path else ""
-                local_src = _dl_remote(raw_path)
+                local_src = _dl_remote(raw_path, 2.0, 16.0)
+                _check_cancel()
                 res = self.exec_local_media_op(
                     route, local_src, body,
                     force_copy=(route != "/api/media/compress-estimate"),
-                    on_progress=on_progress, proc_holder=proc_holder,
+                    on_progress=_scaled_local_progress, proc_holder=proc_holder,
                 )
                 if route == "/api/media/compress-estimate":
                     return res
 
+            _check_cancel()
             out_local = res["path"]
             out_name = os.path.basename(out_local)
-            up_url = (
-                f"http://{host['ip']}:{host['port']}/api/file/upload"
-                f"?dir={url_quote(remote_dir, safe='')}&name={url_quote(out_name, safe='')}&conflict=rename"
-            )
-            with open(out_local, "rb") as uf:
-                up_data = uf.read()
-            ureq = urllib.request.Request(
-                up_url, data=up_data,
-                headers={"X-DeckVault-Token": host["token"], "Content-Type": "application/octet-stream"},
-                method="POST",
-            )
-            with urllib.request.urlopen(ureq, timeout=600) as uresp:
+            out_sz = os.path.getsize(out_local)
+            if on_progress is not None:
+                on_progress({"progressPct": 90.0, "speed": "Upload", "remainingSec": None})
+            up_q = f"/api/file/upload?dir={url_quote(remote_dir, safe='')}&name={url_quote(out_name, safe='')}&conflict=rename"
+            conn = http.client.HTTPConnection(host["ip"], int(host["port"]), timeout=600)
+            try:
+                conn.putrequest("POST", up_q)
+                conn.putheader("X-DeckVault-Token", host["token"])
+                conn.putheader("Content-Type", "application/octet-stream")
+                conn.putheader("Content-Length", str(out_sz))
+                conn.endheaders()
+                sent = 0
+                with open(out_local, "rb") as uf:
+                    while True:
+                        _check_cancel()
+                        buf = uf.read(256 * 1024)
+                        if not buf:
+                            break
+                        conn.send(buf)
+                        sent += len(buf)
+                        if on_progress is not None and out_sz > 0:
+                            on_progress({"progressPct": round(90.0 + min(9.0, (sent / out_sz) * 9.0), 1), "speed": "Upload", "remainingSec": None})
+                uresp = conn.getresponse()
+                uresp.read()
                 if uresp.status >= 400:
                     raise OSError(f"Remote upload failed: HTTP {uresp.status}")
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
             want_overwrite = str(body.get("saveMode", "copy")) == "overwrite" and route != "/api/media/merge"
             if want_overwrite:

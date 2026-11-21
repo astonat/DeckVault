@@ -18,7 +18,7 @@ data class CachedVideoMetaRow(
  * mirroring the PC companion's MetadataCache so durations/resolutions survive restarts.
  */
 class AndroidMetaCache(context: Context) :
-    SQLiteOpenHelper(context.applicationContext, "deckvault_meta_cache.db", null, 1) {
+    SQLiteOpenHelper(context.applicationContext, "deckvault_meta_cache.db", null, 2) {
 
     private val lock = Any()
 
@@ -41,9 +41,46 @@ class AndroidMetaCache(context: Context) :
             )
             """.trimIndent(),
         )
+        ensureSnapshotTables(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            ensureSnapshotTables(db)
+        }
+    }
+
+    private fun ensureSnapshotTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS folder_snapshots (
+                cache_key TEXT PRIMARY KEY,
+                host_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS tree_snapshots (
+                cache_key TEXT PRIMARY KEY,
+                host_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS roots_snapshots (
+                host_id TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+    }
 
     fun get(path: String, mtimeMs: Long, sizeBytes: Long): VideoMeta? = synchronized(lock) {
         runCatching {
@@ -146,6 +183,99 @@ class AndroidMetaCache(context: Context) :
     fun invalidate(path: String) {
         synchronized(lock) {
             runCatching { writableDatabase.delete("video_meta", "path = ?", arrayOf(path)) }
+        }
+    }
+
+    fun getFolderSnapshot(cacheKey: String): String? = synchronized(lock) {
+        runCatching {
+            readableDatabase.rawQuery(
+                "SELECT payload_json FROM folder_snapshots WHERE cache_key = ?",
+                arrayOf(cacheKey),
+            ).use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull()
+    }
+
+    fun putFolderSnapshot(cacheKey: String, hostId: String, payloadJson: String) {
+        synchronized(lock) {
+            runCatching {
+                val cv = ContentValues(4).apply {
+                    put("cache_key", cacheKey)
+                    put("host_id", hostId)
+                    put("payload_json", payloadJson)
+                    put("updated_at", System.currentTimeMillis())
+                }
+                val db = writableDatabase
+                db.insertWithOnConflict("folder_snapshots", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                db.execSQL(
+                    "DELETE FROM folder_snapshots WHERE cache_key NOT IN (SELECT cache_key FROM folder_snapshots ORDER BY updated_at DESC LIMIT 120)",
+                )
+            }
+        }
+    }
+
+    fun getTreeSnapshot(cacheKey: String): String? = synchronized(lock) {
+        runCatching {
+            readableDatabase.rawQuery(
+                "SELECT payload_json FROM tree_snapshots WHERE cache_key = ?",
+                arrayOf(cacheKey),
+            ).use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull()
+    }
+
+    fun putTreeSnapshot(cacheKey: String, hostId: String, payloadJson: String) {
+        synchronized(lock) {
+            runCatching {
+                val cv = ContentValues(4).apply {
+                    put("cache_key", cacheKey)
+                    put("host_id", hostId)
+                    put("payload_json", payloadJson)
+                    put("updated_at", System.currentTimeMillis())
+                }
+                val db = writableDatabase
+                db.insertWithOnConflict("tree_snapshots", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                db.execSQL(
+                    "DELETE FROM tree_snapshots WHERE cache_key NOT IN (SELECT cache_key FROM tree_snapshots ORDER BY updated_at DESC LIMIT 120)",
+                )
+            }
+        }
+    }
+
+    fun getRootsSnapshot(hostId: String): String? = synchronized(lock) {
+        runCatching {
+            readableDatabase.rawQuery(
+                "SELECT payload_json FROM roots_snapshots WHERE host_id = ?",
+                arrayOf(hostId),
+            ).use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull()
+    }
+
+    fun putRootsSnapshot(hostId: String, payloadJson: String) {
+        synchronized(lock) {
+            runCatching {
+                val cv = ContentValues(3).apply {
+                    put("host_id", hostId)
+                    put("payload_json", payloadJson)
+                    put("updated_at", System.currentTimeMillis())
+                }
+                writableDatabase.insertWithOnConflict("roots_snapshots", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+            }
+        }
+    }
+
+    fun clearSnapshotsForHost(hostId: String?) {
+        synchronized(lock) {
+            runCatching {
+                val db = writableDatabase
+                if (hostId.isNullOrBlank()) {
+                    db.delete("folder_snapshots", null, null)
+                    db.delete("tree_snapshots", null, null)
+                    db.delete("roots_snapshots", null, null)
+                } else {
+                    db.delete("folder_snapshots", "host_id = ?", arrayOf(hostId))
+                    db.delete("tree_snapshots", "host_id = ?", arrayOf(hostId))
+                    db.delete("roots_snapshots", "host_id = ?", arrayOf(hostId))
+                }
+            }
         }
     }
 }
