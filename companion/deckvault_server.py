@@ -39,9 +39,10 @@ import urllib.request
 import uuid
 import zipfile
 from desktop_ui import DESKTOP_APP_HTML
+from player_ui import POPOUT_PLAYER_HTML
 
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 GITHUB_REPO = "astonat/DeckVault"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
@@ -3785,6 +3786,16 @@ def make_handler(rt: CompanionRuntime):
                 self.wfile.write(raw)
                 return
 
+            if route == "/player":
+                raw = POPOUT_PLAYER_HTML.encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+
             if route == "/api/desktop/bootstrap":
                 if not self._is_loopback():
                     self._send_json(HTTPStatus.FORBIDDEN, {"error": "Desktop bootstrap restricted to localhost"})
@@ -3906,6 +3917,75 @@ def make_handler(rt: CompanionRuntime):
                         raise PermissionError("Localhost only")
                     with rt.update_lock:
                         self._send_json(HTTPStatus.OK, dict(rt.update_status))
+                elif route == "/api/player/context":
+                    if not self._is_loopback():
+                        raise PermissionError("Localhost only")
+                    raw_path = (qs.get("path") or [""])[0]
+                    host_id = (qs.get("hostId") or [rt.config.data["host_id"]])[0] or rt.config.data["host_id"]
+                    if host_id == rt.config.data["host_id"]:
+                        safe = rt.config.resolve_safe_path(raw_path)
+                        if not os.path.isfile(safe):
+                            raise FileNotFoundError(safe)
+                        st_res = os.stat(safe)
+                        ext = os.path.splitext(safe)[1].lstrip(".").lower()
+                        meta = rt.media.probe_video(safe, st_res)
+                        f_obj = {
+                            "name": os.path.basename(safe),
+                            "path": safe,
+                            "sizeBytes": st_res.st_size,
+                            "modifiedMs": int(st_res.st_mtime * 1000),
+                            "extension": ext,
+                            "mediaType": "video",
+                            "meta": meta,
+                        }
+                        parent_dir = os.path.dirname(safe)
+                        siblings: list[dict[str, str]] = []
+                        try:
+                            with os.scandir(parent_dir) as it:
+                                for entry in it:
+                                    if entry.is_file() and classify_media_type(entry.name) == "video":
+                                        siblings.append({"name": entry.name, "path": entry.path})
+                        except OSError:
+                            pass
+                        siblings.sort(key=lambda x: x["name"].lower())
+                        norm_safe = os.path.normcase(os.path.abspath(safe))
+                        idx = next((i for i, x in enumerate(siblings) if os.path.normcase(os.path.abspath(x["path"])) == norm_safe), -1)
+                        self._send_json(HTTPStatus.OK, {"file": f_obj, "siblings": siblings, "index": idx})
+                    else:
+                        host = rt.fleet.get(host_id)
+                        if not host:
+                            raise ValueError("Paired device not found")
+                        sep = "\\" if "\\" in raw_path else "/"
+                        parent_dir = raw_path.rsplit(sep, 1)[0] if sep in raw_path else ""
+                        f_obj: dict[str, Any] = {
+                            "name": raw_path.rsplit(sep, 1)[-1],
+                            "path": raw_path,
+                            "extension": os.path.splitext(raw_path)[1].lstrip(".").lower(),
+                            "mediaType": "video",
+                            "meta": {},
+                        }
+                        siblings = []
+                        idx = -1
+                        try:
+                            lreq = urllib.request.Request(
+                                f"http://{host['ip']}:{host['port']}/api/list?path={url_quote(parent_dir, safe='')}&sort=name&order=asc&filter=video",
+                                headers={"X-DeckVault-Token": host["token"]},
+                                method="GET",
+                            )
+                            with urllib.request.urlopen(lreq, timeout=8) as lresp:
+                                ldata = json.loads(lresp.read().decode("utf-8"))
+                            v_files = [x for x in (ldata.get("files") or []) if x.get("mediaType") == "video"]
+                            siblings = [{"name": x.get("name", ""), "path": x.get("path", "")} for x in v_files]
+                            idx = next((i for i, x in enumerate(v_files) if x.get("path") == raw_path), -1)
+                            if idx >= 0:
+                                f_obj = v_files[idx]
+                        except Exception:
+                            pass
+                        self._send_json(HTTPStatus.OK, {"file": f_obj, "siblings": siblings, "index": idx})
+                elif route == "/api/system/file-assoc/status":
+                    if not self._is_loopback():
+                        raise PermissionError("Localhost only")
+                    self._send_json(HTTPStatus.OK, _check_windows_video_associations())
                 elif route == "/api/stream/playable":
                     raw_path = (qs.get("path") or [""])[0]
                     start_s = float((qs.get("start") or ["0"])[0] or "0")
@@ -4108,6 +4188,23 @@ def make_handler(rt: CompanionRuntime):
                     else:
                         os.startfile(safe)
                         self._send_json(HTTPStatus.OK, {"ok": True, "player": "System Default"})
+                elif route == "/api/system/popout-player":
+                    if not self._is_loopback():
+                        raise PermissionError("Localhost only")
+                    raw_p = str(body.get("path", "") or "").strip()
+                    hid = str(body.get("hostId", "") or "").strip()
+                    if raw_p and (not hid or hid == rt.config.data["host_id"]):
+                        raw_p = rt.config.resolve_safe_path(raw_p)
+                    cmd = [sys.executable, "--player", raw_p] if getattr(sys, "frozen", False) else [sys.executable, __file__, "--player", raw_p]
+                    if hid and hid != rt.config.data["host_id"]:
+                        cmd.extend(["--host-id", hid])
+                    subprocess.Popen(cmd, creationflags=SUBPROCESS_FLAGS)
+                    self._send_json(HTTPStatus.OK, {"ok": True})
+                elif route == "/api/system/file-assoc/register":
+                    if not self._is_loopback():
+                        raise PermissionError("Localhost only")
+                    res = _register_windows_video_associations(open_settings=bool(body.get("openSettings", False)))
+                    self._send_json(HTTPStatus.OK, res)
                 elif route == "/api/favorites/toggle":
                     added, favs = rt.favorites.toggle(body)
                     self._send_json(HTTPStatus.OK, {"added": added, "favorites": favs})
@@ -5916,6 +6013,211 @@ def _is_local_server_up(http_port: int) -> bool:
     return _get_local_server_ping(http_port) is not None
 
 
+def _resolve_deckvault_exe_cmd() -> tuple[str, str]:
+    if getattr(sys, "frozen", False):
+        exe_path = os.path.abspath(sys.executable)
+        return exe_path, f'"{exe_path}" --player "%1"'
+    installed_exe = r"C:\DeckVault\app\DeckVault.exe"
+    if os.path.isfile(installed_exe):
+        return installed_exe, f'"{installed_exe}" --player "%1"'
+    py_exe = os.path.abspath(sys.executable)
+    srv_py = os.path.abspath(__file__)
+    return py_exe, f'"{py_exe}" "{srv_py}" --player "%1"'
+
+
+def _check_windows_video_associations() -> dict[str, Any]:
+    if os.name != "nt":
+        return {"registered": False, "extensions": sorted(VIDEO_EXTS)}
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\RegisteredApplications") as k:
+            val, _ = winreg.QueryValueEx(k, "DeckVault")
+        return {"registered": bool(val), "extensions": sorted(VIDEO_EXTS)}
+    except OSError:
+        return {"registered": False, "extensions": sorted(VIDEO_EXTS)}
+
+
+def _register_windows_video_associations(open_settings: bool = False) -> dict[str, Any]:
+    if os.name != "nt":
+        raise RuntimeError("Windows file associations are only supported on Windows")
+    import winreg
+
+    exe_path, open_cmd = _resolve_deckvault_exe_cmd()
+    ico_path = _resolve_icon_path() or exe_path
+    icon_ref = f"{ico_path},0"
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\DeckVault.Video") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "DeckVault Video File")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\DeckVault.Video\DefaultIcon") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, icon_ref)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\DeckVault.Video\shell\open") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "Play with DeckVault Player")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\DeckVault.Video\shell\open\command") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, open_cmd)
+
+    app_base = r"Software\Classes\Applications\DeckVault.exe"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, app_base) as k:
+        winreg.SetValueEx(k, "FriendlyAppName", 0, winreg.REG_SZ, "DeckVault Player")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, app_base + r"\DefaultIcon") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, icon_ref)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, app_base + r"\shell\open\command") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, open_cmd)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, app_base + r"\SupportedTypes") as st_key:
+        for ext in sorted(VIDEO_EXTS):
+            winreg.SetValueEx(st_key, ext, 0, winreg.REG_SZ, "")
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\DeckVault\Capabilities") as cap:
+        winreg.SetValueEx(cap, "ApplicationName", 0, winreg.REG_SZ, "DeckVault Player")
+        winreg.SetValueEx(cap, "ApplicationDescription", 0, winreg.REG_SZ, "Minimalist OLED Pop-Out Video Player & Media Studio")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\DeckVault\Capabilities\FileAssociations") as fa:
+        for ext in sorted(VIDEO_EXTS):
+            winreg.SetValueEx(fa, ext, 0, winreg.REG_SZ, "DeckVault.Video")
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}\OpenWithProgids") as owp:
+                winreg.SetValueEx(owp, "DeckVault.Video", 0, winreg.REG_SZ, "")
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}\shell\DeckVaultPlay") as sh:
+                winreg.SetValueEx(sh, "", 0, winreg.REG_SZ, "Play with DeckVault Player")
+                winreg.SetValueEx(sh, "Icon", 0, winreg.REG_SZ, icon_ref)
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}\shell\DeckVaultPlay\command") as shc:
+                winreg.SetValueEx(shc, "", 0, winreg.REG_SZ, open_cmd)
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\RegisteredApplications") as ra:
+        winreg.SetValueEx(ra, "DeckVault", 0, winreg.REG_SZ, r"Software\DeckVault\Capabilities")
+
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+    except Exception:
+        pass
+
+    if open_settings:
+        try:
+            os.startfile("ms-settings:defaultapps")
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "registeredCount": len(VIDEO_EXTS),
+        "exePath": exe_path,
+        "message": f"Registered DeckVault Player for {len(VIDEO_EXTS)} video formats — pick DeckVault Player in Default Apps!",
+    }
+
+
+def _launch_player_webview(
+    http_port: int,
+    video_path: str = "",
+    host_id: str = "",
+    force_process_exit: bool = True,
+) -> None:
+    _set_app_user_model_id()
+    import webview
+
+    desk_name = _get_current_desktop_name()
+    safe_desk = "".join(c if c.isalnum() or c in "-_" else "_" for c in desk_name)
+    cache_name = "webview_cache" if safe_desk.lower() == "default" else f"webview_cache_{safe_desk}"
+    storage_dir = str(CONFIG_DIR / cache_name)
+    os.makedirs(storage_dir, exist_ok=True)
+    pstate: dict[str, Any] = {"win": None, "is_max": False, "on_top": False}
+
+    class PlayerWindowApi:
+        def minimize(self) -> None:
+            if pstate["win"] is not None:
+                pstate["win"].minimize()
+
+        def toggle_max(self) -> bool:
+            win = pstate["win"]
+            if win is None:
+                return False
+            if pstate["is_max"]:
+                win.restore()
+                pstate["is_max"] = False
+            else:
+                win.maximize()
+                pstate["is_max"] = True
+            return pstate["is_max"]
+
+        def toggle_fullscreen(self) -> None:
+            if pstate["win"] is not None:
+                pstate["win"].toggle_fullscreen()
+
+        def toggle_on_top(self) -> bool:
+            win = pstate["win"]
+            if win is None:
+                return False
+            pstate["on_top"] = not pstate["on_top"]
+            try:
+                win.on_top = pstate["on_top"]
+            except Exception:
+                pass
+            return pstate["on_top"]
+
+        def close(self) -> None:
+            if pstate["win"] is not None:
+                try:
+                    pstate["win"].destroy()
+                except Exception:
+                    pass
+            if force_process_exit:
+                threading.Timer(0.35, lambda: os._exit(0)).start()
+
+        def get_bounds(self) -> dict[str, int]:
+            win = pstate["win"]
+            if win is None:
+                return {"x": 0, "y": 0, "w": 960, "h": 560}
+            return {"x": int(win.x), "y": int(win.y), "w": int(win.width), "h": int(win.height)}
+
+        def set_bounds(self, x: int, y: int, w: int, h: int) -> None:
+            win = pstate["win"]
+            if win is None:
+                return
+            win.move(int(x), int(y))
+            win.resize(max(360, int(w)), max(220, int(h)))
+
+        def pick_video_file(self) -> str:
+            win = pstate["win"]
+            if win is None:
+                return ""
+            try:
+                dlg_mode = getattr(webview, "FileDialog", None)
+                open_mode = dlg_mode.OPEN if dlg_mode is not None else webview.OPEN_DIALOG
+                res = win.create_file_dialog(
+                    open_mode,
+                    file_types=(
+                        "Video Files (*.mp4;*.mkv;*.mov;*.avi;*.webm;*.m4v;*.wmv;*.flv;*.ts;*.m2ts)",
+                        "All files (*.*)",
+                    ),
+                )
+                return str(res[0]) if res else ""
+            except Exception:
+                return ""
+
+        def open_in_main_app(self, path: str = "") -> None:
+            cmd = [sys.executable, "--app"] if getattr(sys, "frozen", False) else [sys.executable, __file__, "--app"]
+            subprocess.Popen(cmd, creationflags=SUBPROCESS_FLAGS)
+
+    title = f"{os.path.basename(video_path)} — DeckVault Player" if video_path else "DeckVault Player"
+    url = f"http://127.0.0.1:{http_port}/player?path={url_quote(video_path, safe='')}&hostId={url_quote(host_id, safe='')}"
+    api = PlayerWindowApi()
+    win = webview.create_window(
+        title,
+        url,
+        js_api=api,
+        width=960,
+        height=560,
+        min_size=(360, 220),
+        frameless=True,
+        easy_drag=False,
+        shadow=True,
+        background_color="#000000",
+    )
+    pstate["win"] = win
+    ico = _resolve_icon_path()
+    try:
+        webview.start(gui="edgechromium", private_mode=False, storage_path=storage_dir, icon=ico)
+    finally:
+        if force_process_exit:
+            os._exit(0)
+
+
 def main() -> None:
     _set_app_user_model_id()
     parser = argparse.ArgumentParser(description="DeckVault Unified App & Server")
@@ -5923,8 +6225,14 @@ def main() -> None:
     parser.add_argument("--tray", "--minimized", dest="tray", action="store_true", help="Run lightweight server in system tray")
     parser.add_argument("--window", "--desktop", dest="window", action="store_true", help="Open single-instance Desktop window")
     parser.add_argument("--app", action="store_true", help="Ensure tray server is up and open or focus DeckVault window")
+    parser.add_argument("--player", nargs="?", const="", default=None, help="Open minimalist pop-out video player")
+    parser.add_argument("--host-id", dest="host_id", default="", help="Optional paired hostId for pop-out player")
     parser.add_argument("--port", type=int, default=0, help="Override HTTP port")
+    parser.add_argument("target_file", nargs="?", default=None, help="Optional video file path to play")
     args = parser.parse_args()
+
+    if args.target_file and args.player is None:
+        args.player = args.target_file
 
     rt = CompanionRuntime()
     if args.port > 0:
@@ -5932,6 +6240,24 @@ def main() -> None:
         rt.config.save()
 
     http_port = int(rt.config.data["http_port"])
+
+    if args.player is not None:
+        if _is_local_server_up(http_port):
+            _launch_player_webview(http_port, args.player, args.host_id, force_process_exit=True)
+            return
+        try:
+            p_srv = ThreadingHTTPServer(("127.0.0.1", http_port), make_handler(rt))
+        except OSError:
+            p_srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(rt))
+        p_srv.daemon_threads = True
+        p_thread = threading.Thread(target=p_srv.serve_forever, daemon=True)
+        p_thread.start()
+        try:
+            _launch_player_webview(int(p_srv.server_port), args.player, args.host_id, force_process_exit=False)
+        finally:
+            p_srv.shutdown()
+            os._exit(0)
+        return
 
     # Default app launch (--app): single-instance focus or start tray server + open window directly on caller desktop
     if args.app:

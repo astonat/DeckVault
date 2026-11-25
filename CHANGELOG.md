@@ -2,6 +2,16 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.5.1] - 2026-11-25
+
+### Standalone Pop-Out Video Player (MPC-HC Replacement) & Windows Video Associations
+- **Minimalist Pop-Out Video Player (`companion/player_ui.py`, `companion/deckvault_server.py`)**:
+  - Added a dedicated, auto-hiding OLED pop-out player (`--player` / `/player`) that launches independently in `<1s` without loading the full media browser or scanning drives.
+  - Features slim auto-hiding top/bottom controls, Always-on-Top (`Ctrl+T`), Minimal Hover-Only mode (`1`), compact Options popover (`⚙`) & right-click context menu (speed `0.25x–3x`, Fit/Fill/Stretch, aspect ratio, rotate/flip, loop & A-B loop, frame-step `,`/`.`, folder playlist `PgUp`/`PgDn`, mouse-wheel volume boost to `200%`, hover storyboard scrubbing, live H.264 FFmpeg fallback for MKV/AVI/HEVC/TS, and frame snapshot `F5`).
+- **Windows Default Video Player Integration (`companion/deckvault_server.py`, `companion/desktop_ui.py`)**:
+  - Added 1-click **Set as Windows Video Player** (`HKCU` file-association registration across all `VIDEO_EXTS`, no UAC required + Explorer `"Play with DeckVault Player"` context entry + Windows Default Apps integration).
+  - Double-clicking or opening any video file with `DeckVault.exe` now launches the Pop-Out Player directly, and 1-click **Pop-Out** buttons are available in the video HUD, right-click menu, Inspector, and Settings.
+
 ## [v1.5.0] - 2026-11-21
 
 ### Batch A — Reliability, Audio Preservation, Queue Control & Split Gallery Parity (Desktop + Android)

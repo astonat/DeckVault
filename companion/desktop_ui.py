@@ -543,6 +543,7 @@ DESKTOP_APP_HTML = r"""<!doctype html>
         <div id="vidMeta" style="font-size:11px;color:var(--muted)"></div>
       </div>
       <span class="mini-btn" id="vidCodecBadge" style="background:rgba(0,0,0,.65)">HD</span>
+      <button class="pill-btn" onclick="openInPopoutPlayer(state.activeFile?.path||'', state.activeFileHostId||state.activeHostId)" title="Open in minimalist floating MPC-HC-style player">⤢ Pop-Out</button>
       <button class="pill-btn" id="vidVlcBtn" onclick="openInExternalPlayer()" title="Open in VLC / System Player">Open VLC</button>
       <button class="pill-btn" onclick="toggleCropOverlay(event)" id="cropTopBtn">Crop Box (C)</button>
       <button class="pill-btn" onclick="toggleCropPreview(event)" id="cropPreviewBtn" title="Preview cropped & cut area">Preview Crop (P)</button>
@@ -2234,6 +2235,7 @@ function renderInspector(){
     <strong style="font-size:13px;word-break:break-word">${f.name}</strong>
     <div style="display:flex;gap:5px;flex-wrap:wrap">
       <button class="pill-btn primary" onclick='openFileViewer(state.focusedFile,false)'>Open / Play</button>
+      ${f.mediaType==="video"?`<button class="pill-btn" onclick='openInPopoutPlayer(state.focusedFile.path, state.activeHostId)'>⤢ Pop-Out</button>`:""}
       ${f.mediaType==="video"?`<button class="pill-btn" onclick='openFileViewer(state.focusedFile,true)'>Cut / Crop</button>`:""}
       ${canOpt?`<button class="mini-btn" onclick='openOptimizeModal([state.focusedFile],"compress")'>Compress</button>`:""}
       ${canOpt?`<button class="mini-btn" onclick='openOptimizeModal([state.focusedFile],"upscale")'>Upscale</button>`:""}
@@ -2287,6 +2289,7 @@ function showCtxMenu(ev, item, hostOverride=""){
     const selVideos = (!fromSplit && state.selected.size>=2) ? getSelectedFiles().filter(x=>x.mediaType==="video") : [];
     menu.innerHTML=`
       <button class="ctx-item" onclick='hideCtx();openFileViewer(${JSON.stringify(item)},false,${JSON.stringify(hid)})'>Open / Play</button>
+      ${item.mediaType==="video"?`<button class="ctx-item" onclick='hideCtx();openInPopoutPlayer(${JSON.stringify(item.path)},${JSON.stringify(hid)})'>⤢ Pop-Out Video Player</button>`:""}
       ${item.mediaType==="video"?`<button class="ctx-item" onclick='hideCtx();openFileViewer(${JSON.stringify(item)},true,${JSON.stringify(hid)})'>Cut, Rotate & Crop Studio</button>`:""}
       ${canOpt?`<button class="ctx-item" onclick='hideCtx();openOptimizeModal([${JSON.stringify(item)}],"compress",${JSON.stringify(hid)})'>🗜 Compress & Estimate Size...</button>`:""}
       ${canOpt?`<button class="ctx-item" onclick='hideCtx();openOptimizeModal([${JSON.stringify(item)}],"upscale",${JSON.stringify(hid)})'>✨ Upscale & Enhance...</button>`:""}
@@ -2660,6 +2663,24 @@ function setVolumePct(pct){
 }
 function setVideoFit(m){ layoutCinemaVideo(); }
 function setVideoAspect(a){ layoutCinemaVideo(); }
+async function openInPopoutPlayer(path="", hostId=""){
+  try{
+    await sysFetch("/api/system/popout-player", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({path: path || "", hostId: hostId || state.activeHostId || state.localHostId})
+    });
+    showToast("Opened Pop-Out Video Player");
+  }catch(e){showToast("Pop-out failed: "+e.message)}
+}
+async function registerWindowsVideoPlayer(openSettings=true){
+  try{
+    const res = await sysFetch("/api/system/file-assoc/register", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({openSettings: !!openSettings})
+    });
+    showToast(res.message || "Registered DeckVault Player!");
+  }catch(e){showToast("Registration failed: "+e.message)}
+}
 async function openInExternalPlayer(){
   if(!state.activeFile) return;
   const fHost = state.activeFileHostId || state.activeHostId;
@@ -4037,6 +4058,16 @@ function openSettingsModal(){
       <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:12px"><span>Default Cut Mode</span><div class="chip-row">${[["lossless","Lossless Copy"],["compress","Cut + Compress"]].map(([k,lbl])=>`<button class="chip ${(prefs.defaultTrimMode||"lossless")===k?"active":""}" onclick="setPref('defaultTrimMode','${k}');openSettingsModal()">${lbl}</button>`).join("")}</div></div>
       <div><div style="display:flex;justify-content:space-between;font-size:12px"><span>Default Compression Quality (CRF)</span><b>${prefs.defaultCrf}</b></div><input type="range" min="16" max="32" value="${prefs.defaultCrf}" oninput="setPref('defaultCrf',Number(this.value))" style="width:100%"/></div>
       <label style="display:flex;justify-content:space-between;font-size:12px"><span>Send Replaced / Deleted Originals to Recycle Bin</span><input type="checkbox" ${prefs.recycleDefault?"checked":""} onchange="setPref('recycleDefault',this.checked)"/></label>
+    </div>
+    <div class="section-card">
+      <strong style="font-size:13px">Pop-Out Video Player &amp; Windows Default Apps (MPC-HC Replacement)</strong>
+      <div style="font-size:12px;color:var(--muted);line-height:1.45">
+        Register <b>DeckVault Player</b> for MP4, MKV, MOV, AVI, WEBM &amp; more so double-clicking any video opens our minimalist, auto-hiding floating player (<code>Ctrl+T</code> Always on Top, <code>PgUp/PgDn</code> folder playlist, hover storyboard, 200% volume boost).
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="pill-btn primary" onclick="registerWindowsVideoPlayer(true)">⭐ Set as Windows Video Player</button>
+        <button class="pill-btn" onclick="openInPopoutPlayer('', state.localHostId)">⤢ Launch Pop-Out Player</button>
+      </div>
     </div>
     <div class="section-card">
       <strong style="font-size:13px">Google Drive Backup Destination</strong>
