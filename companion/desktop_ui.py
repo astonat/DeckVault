@@ -2488,9 +2488,10 @@ function openFileViewer(f, openStudio, hostOverride=""){
   }
 }
 
-function ensureAudioBoost(v){
+function ensureAudioBoost(v, createIfNeeded=false){
   try{
     if(!state.audioCtx){
+      if(!createIfNeeded) return;
       const AC = window.AudioContext || window.webkitAudioContext;
       state.audioCtx = new AC();
       const src = state.audioCtx.createMediaElementSource(v);
@@ -2498,15 +2499,18 @@ function ensureAudioBoost(v){
       src.connect(state.gainNode);
       state.gainNode.connect(state.audioCtx.destination);
     }
-    if(state.audioCtx.state==="suspended") state.audioCtx.resume();
+    if(state.audioCtx && state.audioCtx.state==="suspended") state.audioCtx.resume().catch(()=>{});
   }catch{}
 }
 
 function needsLiveTranscode(f){
   const vc = (f.meta?.videoCodec || "").toLowerCase();
+  const ac = (f.meta?.audioCodec || "").toLowerCase();
   const ext = ("." + (f.extension || "")).toLowerCase();
   const fps = f.meta?.fps || 0;
-  return ["hevc","h265","hev1","hvc1","mpeg4","msmpeg4v3","wmv3","vc1","prores","mpeg2video"].includes(vc)
+  const nativeAudio = !ac || /^(aac|mp4a|mp3|opus|vorbis|flac)$/.test(ac);
+  return !nativeAudio
+    || ["hevc","h265","hev1","hvc1","mpeg4","msmpeg4v3","wmv3","vc1","prores","mpeg2video"].includes(vc)
     || [".mkv",".avi",".wmv",".flv",".mts",".m2ts",".ts",".vob"].includes(ext)
     || fps > 90;
 }
@@ -2607,7 +2611,7 @@ function openVideoOverlay(f, openStudio, hostOverride=""){
     updateTransformButtons();
   };
   v.ontimeupdate=updateCinemaTimeHUD;
-  v.onplay=()=>{document.getElementById("playPauseBtn").textContent="Pause";ensureAudioBoost(v);};
+  v.onplay=()=>{document.getElementById("playPauseBtn").textContent="Pause";ensureAudioBoost(v, false);};
   v.onpause=()=>{document.getElementById("playPauseBtn").textContent="Play";};
 
   loadStoryboardCells(f.path);
@@ -2657,7 +2661,7 @@ function toggleMute(){ const v=document.getElementById("vidEl"); v.muted=!v.mute
 function setVolumePct(pct){
   const v=document.getElementById("vidEl"); v.muted=pct===0;
   document.getElementById("volLbl").textContent=pct+"%";
-  ensureAudioBoost(v);
+  ensureAudioBoost(v, pct>100);
   if(pct<=100){ v.volume=pct/100; if(state.gainNode) state.gainNode.gain.value=1.0; }
   else { v.volume=1.0; if(state.gainNode) state.gainNode.gain.value=pct/100; }
 }

@@ -42,7 +42,7 @@ from desktop_ui import DESKTOP_APP_HTML
 from player_ui import POPOUT_PLAYER_HTML
 
 
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 GITHUB_REPO = "astonat/DeckVault"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
@@ -815,8 +815,8 @@ class MediaService:
         cols = max(2, min(6, cols))
         rows = max(2, min(6, rows))
         total_frames = cols * rows
-        cell_w = 320
-        cell_h = 180
+        cell_w = 240
+        cell_h = 135
 
         out_path = STORYBOARDS_DIR / f"{sig}_{cols}x{rows}.jpg"
         meta = self.probe_video(path, st)
@@ -853,7 +853,8 @@ class MediaService:
                         from PIL import Image
                         sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), (0, 0, 0))
                         got_any = False
-                        for i in range(total_frames):
+
+                        def _grab_tile(i: int) -> tuple[int, bytes | None]:
                             frac = (i + 0.5) / total_frames
                             t_s = max(0.0, min(dur_s - 0.1, dur_s * frac))
                             cmd = [
@@ -861,24 +862,32 @@ class MediaService:
                                 "-ss", f"{t_s:.3f}", "-noaccurate_seek", "-i", path,
                                 "-an", "-sn", "-dn", "-frames:v", "1",
                                 "-vf", f"scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black",
-                                "-q:v", "5", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+                                "-q:v", "6", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
                             ]
                             try:
                                 res = subprocess.run(
                                     cmd, capture_output=True, check=True, timeout=8,
                                     creationflags=SUBPROCESS_FLAGS,
                                 )
-                                if res.stdout:
-                                    tile = Image.open(io.BytesIO(res.stdout)).convert("RGB")
+                                return i, res.stdout if res.stdout else None
+                            except Exception:
+                                return i, None
+
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                            for i, raw_bytes in pool.map(_grab_tile, range(total_frames)):
+                                if not raw_bytes:
+                                    continue
+                                try:
+                                    tile = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
                                     r, c = i // cols, i % cols
                                     sheet.paste(tile, (c * cell_w, r * cell_h))
                                     tile.close()
                                     got_any = True
-                            except Exception:
-                                continue
+                                except Exception:
+                                    continue
                         if not got_any:
                             raise RuntimeError("No storyboard frames extracted")
-                        sheet.save(tmp_out, format="JPEG", quality=82, optimize=False)
+                        sheet.save(tmp_out, format="JPEG", quality=80, optimize=False)
                         sheet.close()
                     else:
                         step_s = max(0.25, dur_s / total_frames)
@@ -3734,7 +3743,7 @@ def make_handler(rt: CompanionRuntime):
             if self.command == "HEAD" or length == 0:
                 return
 
-            chunk_size = 256 * 1024
+            chunk_size = 512 * 1024
             try:
                 with open(path_str, "rb") as f:
                     f.seek(start)
@@ -4612,16 +4621,33 @@ def make_handler(rt: CompanionRuntime):
                 self.end_headers()
                 return
 
-            cmd = [rt.media.ffmpeg, "-y", "-err_detect", "ignore_err", "-fflags", "+genpts"]
+            meta = rt.media.probe_video(file_path)
+            vcodec = str(meta.get("videoCodec") or "").lower()
+            acodec = str(meta.get("audioCodec") or "").lower()
+            fps = float(meta.get("fps") or 0.0)
+            can_copy_video = vcodec in ("h264", "avc1", "avc") and fps <= 90.0
+            can_copy_audio = acodec in ("aac", "mp4a", "mp3")
+
+            cmd = [rt.media.ffmpeg, "-y", "-err_detect", "ignore_err", "-fflags", "+genpts+nobuffer"]
             if start_s > 0.05:
                 cmd.extend(["-ss", f"{start_s:.3f}"])
+            cmd.extend(["-i", file_path, "-map", "0:v:0", "-map", "0:a:0?"])
+            if can_copy_video:
+                cmd.extend(["-c:v", "copy", "-avoid_negative_ts", "make_zero"])
+            else:
+                vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+                if fps > 90.0:
+                    vf += ",fps=60"
+                cmd.extend([
+                    "-threads", "0", "-vf", vf,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                    "-crf", "23", "-g", "30", "-keyint_min", "30", "-pix_fmt", "yuv420p",
+                ])
+            if can_copy_audio:
+                cmd.extend(["-c:a", "copy"])
+            else:
+                cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"])
             cmd.extend([
-                "-i", file_path,
-                "-threads", "4",
-                "-map", "0:v:0", "-map", "0:a?",
-                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=60",
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "22", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
                 "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof",
                 "pipe:1",
             ])
@@ -4629,7 +4655,7 @@ def make_handler(rt: CompanionRuntime):
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                bufsize=64 * 1024,
+                bufsize=32 * 1024,
                 creationflags=SUBPROCESS_FLAGS,
             )
             self.send_response(HTTPStatus.OK)
@@ -4639,11 +4665,16 @@ def make_handler(rt: CompanionRuntime):
             self.end_headers()
             try:
                 assert proc.stdout is not None
+                chunk_idx = 0
                 while True:
-                    chunk = proc.stdout.read(64 * 1024)
+                    read_sz = 16 * 1024 if chunk_idx < 8 else 64 * 1024
+                    chunk = proc.stdout.read(read_sz)
                     if not chunk:
                         break
                     self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii") + chunk + b"\r\n")
+                    if chunk_idx < 8:
+                        self.wfile.flush()
+                    chunk_idx += 1
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
@@ -4742,7 +4773,7 @@ def make_handler(rt: CompanionRuntime):
             written = 0
             try:
                 remaining = content_length
-                chunk_size = 256 * 1024
+                chunk_size = 512 * 1024
                 with open(tmp_path, "wb") as out:
                     while remaining > 0:
                         data = self.rfile.read(min(chunk_size, remaining))

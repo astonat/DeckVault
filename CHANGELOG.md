@@ -2,6 +2,18 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.5.3] - 2026-11-25
+
+### Pop-Out Player Audio, Speed & Seeking Preview Overhaul
+- **Fixed Silent Videos (`companion/player_ui.py`, `companion/desktop_ui.py`, `companion/deckvault_server.py`)**:
+  - Detected non-browser audio codecs (`ac3`, `eac3`, `dts`, `truehd`, `pcm_*`, `wma*`, `mp2`, `alac`, etc.) in `needsLiveTranscode()` so videos with unsupported audio automatically route through `/api/stream/playable` with AAC transcoding.
+  - Made Web Audio `AudioContext` (`ensureAudioBoost`) lazy — only attached when volume boost `> 100%` is actually used, preventing Chromium/WebView2 autoplay policies from silencing native `<video>` audio at `<= 100%`.
+- **Faster Playback & Instant Seeking (`companion/deckvault_server.py`, `companion/player_ui.py`)**:
+  - Upgraded `/api/stream/playable` to stream-copy H.264 video (`-c:v copy`) and compatible AAC/MP3 audio (`-c:a copy`) when possible instead of full re-encoding, removed forced 60fps upsampling on normal-fps transcodes, and flushed initial fMP4 chunks immediately.
+  - Deferred transcode stream restarts until drag-seek release (`mouseup`) and used `fastSeek` + `requestAnimationFrame` throttling for native drag scrubbing.
+- **Instant Pre-Warmed Seeking Preview (`companion/deckvault_server.py`, `companion/player_ui.py`)**:
+  - Parallelized 4x4 storyboard extraction across 4 worker threads, pre-warmed the storyboard image immediately on video load, and added a debounced `/api/video/frame` fallback preview while a storyboard is still generating.
+
 ## [v1.5.2] - 2026-11-25
 
 ### Pop-Out Player Fix

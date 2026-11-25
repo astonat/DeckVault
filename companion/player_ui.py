@@ -69,7 +69,8 @@ POPOUT_PLAYER_HTML = r"""<!doctype html>
   .tl-ab{position:absolute;top:0;bottom:0;background:rgba(122,214,162,.42);display:none}
   .tl-fill{position:absolute;top:0;bottom:0;left:0;background:var(--primary);border-radius:99px}
   .tl-tip{position:absolute;bottom:20px;transform:translateX(-50%);background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:3px;display:none;flex-direction:column;align-items:center;gap:2px;pointer-events:none;z-index:20;box-shadow:0 8px 22px rgba(0,0,0,.85)}
-  .tl-tip-img{width:136px;height:76px;border-radius:6px;background-repeat:no-repeat;background-color:#000}
+  .tl-tip-img{width:192px;height:108px;border-radius:6px;background-repeat:no-repeat;background-color:#000;position:relative;overflow:hidden}
+  .tl-tip-img.loading::after{content:"Loading preview...";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--muted);background:rgba(0,0,0,.45)}
   .tl-tip-txt{font-size:10px;font-weight:700;font-family:Consolas,monospace}
 
   .ctrl-row{display:flex;align-items:center;gap:4px;min-height:26px}
@@ -126,7 +127,7 @@ POPOUT_PLAYER_HTML = r"""<!doctype html>
 <div class="stage-wrap" id="stageWrap">
   <div class="video-box" id="videoBox">
     <div class="video-stage" id="videoStage">
-      <video id="vidEl" playsinline crossorigin="anonymous"></video>
+      <video id="vidEl" playsinline preload="auto" crossorigin="anonymous"></video>
     </div>
   </div>
 </div>
@@ -271,6 +272,13 @@ const st = {
   gainNode: null,
   hideTimer: null,
   osdTimer: null,
+  sbUrl: "",
+  sbReady: false,
+  sbSeq: 0,
+  frameTimer: null,
+  draggingSeek: false,
+  dragTargetSec: 0,
+  seekRaf: 0,
 };
 
 const PALETTE_ACCENTS = {
@@ -328,9 +336,10 @@ function setBuffering(on){
   document.getElementById("bufBar").classList.toggle("active", !!on);
 }
 
-function ensureAudioBoost(v){
+function ensureAudioBoost(v, createIfNeeded=false){
   try{
     if(!st.audioCtx){
+      if(!createIfNeeded) return;
       const AC = window.AudioContext || window.webkitAudioContext;
       st.audioCtx = new AC();
       const src = st.audioCtx.createMediaElementSource(v);
@@ -338,7 +347,7 @@ function ensureAudioBoost(v){
       src.connect(st.gainNode);
       st.gainNode.connect(st.audioCtx.destination);
     }
-    if(st.audioCtx.state === "suspended") st.audioCtx.resume();
+    if(st.audioCtx && st.audioCtx.state === "suspended") st.audioCtx.resume().catch(()=>{});
   }catch{}
 }
 
@@ -348,9 +357,12 @@ function currentAbsSec(){
 
 function needsLiveTranscode(f){
   const vc = (f?.meta?.videoCodec || "").toLowerCase();
+  const ac = (f?.meta?.audioCodec || "").toLowerCase();
   const ext = ("." + (f?.extension || "")).toLowerCase();
   const fps = f?.meta?.fps || 0;
-  return ["hevc","h265","hev1","hvc1","mpeg4","msmpeg4v3","wmv3","vc1","prores","mpeg2video"].includes(vc)
+  const nativeAudio = !ac || /^(aac|mp4a|mp3|opus|vorbis|flac)$/.test(ac);
+  return !nativeAudio
+    || ["hevc","h265","hev1","hvc1","mpeg4","msmpeg4v3","wmv3","vc1","prores","mpeg2video"].includes(vc)
     || [".mkv",".avi",".wmv",".flv",".mts",".m2ts",".ts",".vob",".mpg",".mpeg"].includes(ext)
     || fps > 90;
 }
@@ -364,7 +376,9 @@ function startTranscodeStream(startSec=0){
   v.playbackRate = st.speed;
   const mt = document.getElementById("metaTag");
   mt.style.display = "";
-  mt.textContent = "LIVE H.264";
+  const vc = (st.file?.meta?.videoCodec || "").toLowerCase();
+  const fps = st.file?.meta?.fps || 0;
+  mt.textContent = (["h264","avc1","avc"].includes(vc) && fps <= 90) ? "FAST REMUX" : "LIVE H.264";
   v.play().catch(()=>{});
 }
 
@@ -433,9 +447,11 @@ function updateHud(){
   const v = document.getElementById("vidEl");
   const d = Math.max(0.01, st.durationSec || v.duration || 1);
   const cur = currentAbsSec();
-  document.getElementById("tlFill").style.width = Math.min(100, (cur / d) * 100).toFixed(2) + "%";
-  const rightTxt = st.showRemaining ? ("-" + fmtTime(Math.max(0, d - cur))) : fmtTime(d);
-  document.getElementById("timeLbl").textContent = `${fmtTime(cur)} / ${rightTxt}`;
+  if(!st.draggingSeek){
+    document.getElementById("tlFill").style.width = Math.min(100, (cur / d) * 100).toFixed(2) + "%";
+    const rightTxt = st.showRemaining ? ("-" + fmtTime(Math.max(0, d - cur))) : fmtTime(d);
+    document.getElementById("timeLbl").textContent = `${fmtTime(cur)} / ${rightTxt}`;
+  }
   if(v.buffered.length > 0 && !st.isTranscode){
     document.getElementById("tlBuf").style.width = Math.min(100, (v.buffered.end(v.buffered.length - 1) / d) * 100).toFixed(1) + "%";
   }
@@ -469,7 +485,7 @@ function setVolumePct(pct){
   document.getElementById("volRange").value = String(st.volPct);
   document.getElementById("volPct").textContent = st.volPct + "%";
   document.getElementById("muteBtn").textContent = v.muted ? "🔇" : (st.volPct > 100 ? "🔊+" : "🔊");
-  ensureAudioBoost(v);
+  ensureAudioBoost(v, st.volPct > 100);
   if(st.volPct <= 100){ v.volume = st.volPct / 100; if(st.gainNode) st.gainNode.gain.value = 1.0; }
   else{ v.volume = 1.0; if(st.gainNode) st.gainNode.gain.value = st.volPct / 100; }
   localStorage.setItem("dv_player_vol", String(st.volPct));
@@ -668,7 +684,39 @@ async function loadVideo(path, hostId=""){
     v.src = hostMediaUrl(st.hostId, "/api/stream", {path: st.path, v: Date.now()});
     v.play().catch(()=>{});
   }
+  preloadStoryboard(st.hostId, st.path);
   showChrome();
+}
+
+function preloadStoryboard(hostId, path){
+  st.sbSeq += 1;
+  const seq = st.sbSeq;
+  clearTimeout(st.frameTimer);
+  const sb = hostMediaUrl(hostId, "/api/video/storyboard", {path, cols: 4, rows: 4});
+  st.sbUrl = sb;
+  st.sbReady = false;
+  const img = document.getElementById("tlTipImg");
+  if(img){
+    img.style.backgroundImage = "";
+    img.classList.add("loading");
+  }
+  const pre = new Image();
+  pre.onload = ()=>{
+    if(st.sbSeq !== seq) return;
+    st.sbReady = true;
+    const tipImg = document.getElementById("tlTipImg");
+    if(tipImg){
+      tipImg.classList.remove("loading");
+      tipImg.style.backgroundImage = `url("${sb}")`;
+      tipImg.style.backgroundSize = "400% 400%";
+    }
+  };
+  pre.onerror = ()=>{
+    if(st.sbSeq !== seq) return;
+    const tipImg = document.getElementById("tlTipImg");
+    if(tipImg) tipImg.classList.remove("loading");
+  };
+  pre.src = sb;
 }
 
 function stepSibling(delta){
@@ -684,7 +732,7 @@ function initInteractions(){
   v.onwaiting = ()=>setBuffering(true);
   v.onstalled = ()=>setBuffering(true);
   v.oncanplay = ()=>setBuffering(false);
-  v.onplaying = ()=>{ setBuffering(false); document.getElementById("playBtn").textContent = "⏸"; ensureAudioBoost(v); showChrome(); };
+  v.onplaying = ()=>{ setBuffering(false); document.getElementById("playBtn").textContent = "⏸"; ensureAudioBoost(v, false); showChrome(); };
   v.onpause = ()=>{ document.getElementById("playBtn").textContent = "▶"; showChrome(true); };
   v.ontimeupdate = updateHud;
   v.onloadedmetadata = ()=>{
@@ -703,31 +751,78 @@ function initInteractions(){
 
   // Timeline hover storyboard & click/drag seek
   const tl = document.getElementById("tlWrap"), tip = document.getElementById("tlTip"), img = document.getElementById("tlTipImg"), txt = document.getElementById("tlTipTxt");
-  let draggingSeek = false;
   const fracFromEv = (e) => {
     const r = tl.getBoundingClientRect();
     return Math.max(0, Math.min(0.999, (e.clientX - r.left) / Math.max(1, r.width)));
+  };
+  const previewDragAt = (frac, d) => {
+    const targetSec = frac * d;
+    st.dragTargetSec = targetSec;
+    document.getElementById("tlFill").style.width = Math.min(100, frac * 100).toFixed(2) + "%";
+    const rightTxt = st.showRemaining ? ("-" + fmtTime(Math.max(0, d - targetSec))) : fmtTime(d);
+    document.getElementById("timeLbl").textContent = `${fmtTime(targetSec)} / ${rightTxt}`;
   };
   tl.onmousemove = (e) => {
     const d = st.durationSec || v.duration || 0; if(!d || !st.path) return;
     const r = tl.getBoundingClientRect(), frac = fracFromEv(e);
     const idx = Math.floor(frac * 16), col = idx % 4, row = Math.floor(idx / 4);
-    const sb = hostMediaUrl(st.hostId, "/api/video/storyboard", {path: st.path, cols: 4, rows: 4});
     tip.style.display = "flex";
-    tip.style.left = Math.max(72, Math.min(r.width - 72, e.clientX - r.left)) + "px";
-    img.style.backgroundImage = `url("${sb}")`; img.style.backgroundSize = "400% 400%";
-    img.style.backgroundPosition = `${col*(100/3)}% ${row*(100/3)}%`;
+    tip.style.left = Math.max(104, Math.min(r.width - 104, e.clientX - r.left)) + "px";
     txt.textContent = fmtTime(frac * d);
-    if(draggingSeek) seekTo(frac * d);
+    if(st.sbReady){
+      img.classList.remove("loading");
+      img.style.backgroundPosition = `${col*(100/3)}% ${row*(100/3)}%`;
+    }else{
+      img.classList.add("loading");
+      const seq = st.sbSeq;
+      const ms = Math.round(frac * d * 1000);
+      clearTimeout(st.frameTimer);
+      st.frameTimer = setTimeout(()=>{
+        if(st.sbReady || st.sbSeq !== seq || !st.path) return;
+        const fUrl = hostMediaUrl(st.hostId, "/api/video/frame", {path: st.path, ms, w: 320});
+        const fi = new Image();
+        fi.onload = ()=>{
+          if(st.sbReady || st.sbSeq !== seq) return;
+          img.classList.remove("loading");
+          img.style.backgroundImage = `url("${fUrl}")`;
+          img.style.backgroundSize = "cover";
+          img.style.backgroundPosition = "center";
+        };
+        fi.src = fUrl;
+      }, 120);
+    }
+    if(st.draggingSeek){
+      previewDragAt(frac, d);
+      if(!st.isTranscode && !st.seekRaf){
+        st.seekRaf = requestAnimationFrame(()=>{
+          st.seekRaf = 0;
+          if(st.draggingSeek){
+            if(v.fastSeek) v.fastSeek(st.dragTargetSec);
+            else v.currentTime = st.dragTargetSec;
+          }
+        });
+      }
+    }
   };
-  tl.onmouseleave = ()=>{ if(!draggingSeek) tip.style.display = "none"; };
+  tl.onmouseleave = ()=>{ if(!st.draggingSeek) tip.style.display = "none"; };
   tl.onmousedown = (e)=>{
     if(e.button !== 0) return;
     const d = st.durationSec || v.duration || 0; if(!d) return;
-    draggingSeek = true;
-    seekTo(fracFromEv(e) * d);
+    const frac = fracFromEv(e);
+    st.draggingSeek = true;
+    previewDragAt(frac, d);
+    if(!st.isTranscode){
+      if(v.fastSeek) v.fastSeek(st.dragTargetSec);
+      else v.currentTime = st.dragTargetSec;
+    }
   };
-  window.addEventListener("mouseup", ()=>{ if(draggingSeek){ draggingSeek = false; tip.style.display = "none"; } });
+  window.addEventListener("mouseup", ()=>{
+    if(st.draggingSeek){
+      st.draggingSeek = false;
+      tip.style.display = "none";
+      seekTo(st.dragTargetSec);
+    }
+  });
 
   // Stage click, double-click fullscreen, right-click menu, mouse wheel volume
   const wrap = document.getElementById("stageWrap");
