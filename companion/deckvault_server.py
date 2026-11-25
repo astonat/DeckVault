@@ -42,7 +42,7 @@ from desktop_ui import DESKTOP_APP_HTML
 from player_ui import POPOUT_PLAYER_HTML
 
 
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 GITHUB_REPO = "astonat/DeckVault"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
@@ -6144,10 +6144,25 @@ def _launch_player_webview(
             if win is None:
                 return False
             pstate["on_top"] = not pstate["on_top"]
-            try:
-                win.on_top = pstate["on_top"]
-            except Exception:
-                pass
+            if os.name == "nt":
+                try:
+                    from webview.platforms import winforms
+                    inst = winforms.BrowserView.instances.get(win.uid)
+                    hwnd = int(inst.Handle.ToInt64()) if inst is not None else int(ctypes.windll.user32.GetForegroundWindow())
+                    if hwnd:
+                        HWND_TOPMOST = -1
+                        HWND_NOTOPMOST = -2
+                        SWP_NOSIZE = 0x0001
+                        SWP_NOMOVE = 0x0002
+                        SWP_NOACTIVATE = 0x0010
+                        ctypes.windll.user32.SetWindowPos(
+                            wintypes.HWND(hwnd),
+                            wintypes.HWND(HWND_TOPMOST if pstate["on_top"] else HWND_NOTOPMOST),
+                            0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                        )
+                except Exception:
+                    pstate["on_top"] = not pstate["on_top"]
             return pstate["on_top"]
 
         def close(self) -> None:

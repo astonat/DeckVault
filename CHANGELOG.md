@@ -2,6 +2,13 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.5.2] - 2026-11-25
+
+### Pop-Out Player Fix
+- **Fixed Always-on-Top Crash & Cleaned Up Top Bar (`companion/deckvault_server.py`, `companion/player_ui.py`)**:
+  - Replaced `pywebview`'s off-thread `win.on_top` WinForms call with thread-safe Win32 `SetWindowPos` (`HWND_TOPMOST` / `HWND_NOTOPMOST`), preventing the pop-out window from crashing when toggling Always on Top.
+  - Removed the pin icon button from the slim top bar and placed **Always on Top** cleanly inside the `⚙` Options popover (alongside `Ctrl+T` and the right-click context menu).
+
 ## [v1.5.1] - 2026-11-25
 
 ### Standalone Pop-Out Video Player (MPC-HC Replacement) & Windows Video Associations

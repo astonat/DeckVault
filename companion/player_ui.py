@@ -148,7 +148,6 @@ POPOUT_PLAYER_HTML = r"""<!doctype html>
     <span class="vid-title" id="vidTitle">DeckVault Player</span>
     <span class="meta-tag" id="metaTag" style="display:none">HD</span>
   </div>
-  <button class="ico-btn" id="pinBtn" onclick="toggleOnTop()" title="Always on Top (Ctrl+T)">📌</button>
   <button class="ico-btn" id="minChromeBtn" onclick="toggleMinimalMode()" title="Minimal Hover-Only Controls (1)">▢</button>
   <button class="ico-btn" id="optBtn" onclick="toggleOptionsMenu(event)" title="Player Options">⚙</button>
   <button class="ico-btn" onclick="winAction('minimize')" title="Minimize">─</button>
@@ -174,6 +173,7 @@ POPOUT_PLAYER_HTML = r"""<!doctype html>
       <button class="m-chip" id="flipHChip" onclick="toggleFlip('h')">Flip H</button>
       <button class="m-chip" id="flipVChip" onclick="toggleFlip('v')">Flip V</button>
       <button class="m-chip" id="loopFileChip" onclick="toggleLoopFile()">Loop: Off</button>
+      <button class="m-chip" id="onTopChip" onclick="toggleOnTop()">Always on Top</button>
     </div>
     <div class="chip-row">
       <button class="m-chip" id="abAChip" onclick="markAbPoint('a')">Set A</button>
@@ -569,8 +569,8 @@ function winAction(fn){ if(window.pywebview?.api?.[fn]) window.pywebview.api[fn]
 async function toggleOnTop(){
   if(window.pywebview?.api?.toggle_on_top){
     st.onTop = await window.pywebview.api.toggle_on_top();
-    document.getElementById("pinBtn").classList.toggle("active", st.onTop);
-    showOsd(st.onTop ? "📌 Always on Top: On" : "Always on Top: Off");
+    document.getElementById("onTopChip")?.classList.toggle("active", st.onTop);
+    showOsd(st.onTop ? "Always on Top: On" : "Always on Top: Off");
   }
 }
 function toggleFullscreen(){
