@@ -253,6 +253,7 @@ const st = {
   siblingIdx: -1,
   durationSec: 0,
   isTranscode: false,
+  forceTranscode: false,
   transcodeOffsetSec: 0,
   rotate: 0,
   flipH: false,
@@ -274,7 +275,9 @@ const st = {
   osdTimer: null,
   sbUrl: "",
   sbReady: false,
+  sbPending: false,
   sbSeq: 0,
+  sbTimer: null,
   frameTimer: null,
   draggingSeek: false,
   dragTargetSec: 0,
@@ -367,26 +370,34 @@ function needsLiveTranscode(f){
     || fps > 90;
 }
 
-function startTranscodeStream(startSec=0){
+function startTranscodeStream(startSec=0, force=false){
   if(!st.path) return;
   const v = document.getElementById("vidEl");
   st.isTranscode = true;
+  st.forceTranscode = !!force;
   st.transcodeOffsetSec = Math.max(0, startSec);
-  v.src = hostMediaUrl(st.hostId, "/api/stream/playable", {path: st.path, start: st.transcodeOffsetSec.toFixed(2), v: Date.now()});
+  v.src = hostMediaUrl(st.hostId, "/api/stream/playable", {
+    path: st.path,
+    start: st.transcodeOffsetSec.toFixed(2),
+    forceTranscode: st.forceTranscode ? "1" : "0",
+    v: Date.now()
+  });
   v.playbackRate = st.speed;
   const mt = document.getElementById("metaTag");
   mt.style.display = "";
   const vc = (st.file?.meta?.videoCodec || "").toLowerCase();
+  const ext = ("." + (st.file?.extension || "")).toLowerCase();
   const fps = st.file?.meta?.fps || 0;
-  mt.textContent = (["h264","avc1","avc"].includes(vc) && fps <= 90) ? "FAST REMUX" : "LIVE H.264";
-  v.play().catch(()=>{});
+  const isRemux = !st.forceTranscode && ["h264","avc1","avc"].includes(vc) && fps <= 90 && [".mp4",".m4v",".mov",".mkv",".ts",".m2ts",".mts",".flv"].includes(ext);
+  mt.textContent = isRemux ? "FAST REMUX" : "LIVE H.264";
+  v.play().catch(()=>{ showChrome(true); showOsd("Click anywhere to play"); });
 }
 
 function seekTo(sec){
   const d = Math.max(0.1, st.durationSec || 1);
   const clamped = Math.max(0, Math.min(d, sec));
   if(st.isTranscode){
-    startTranscodeStream(clamped);
+    startTranscodeStream(clamped, st.forceTranscode);
   }else{
     document.getElementById("vidEl").currentTime = clamped;
   }
@@ -649,7 +660,10 @@ async function loadVideo(path, hostId=""){
   st.path = path;
   st.hostId = hostId || st.localHostId;
   st.isTranscode = false;
+  st.forceTranscode = false;
   st.transcodeOffsetSec = 0;
+  st.sbPending = true;
+  clearTimeout(st.sbTimer);
   st.abA = null; st.abB = null;
   st.rotate = 0; st.flipH = false; st.flipV = false;
   renderOptionChips();
@@ -678,13 +692,20 @@ async function loadVideo(path, hostId=""){
   const v = document.getElementById("vidEl");
   v.loop = st.loopFile;
   v.playbackRate = st.speed;
+  layoutVideo();
   if(needsLiveTranscode(st.file)){
-    startTranscodeStream(0);
+    startTranscodeStream(0, false);
   }else{
     v.src = hostMediaUrl(st.hostId, "/api/stream", {path: st.path, v: Date.now()});
-    v.play().catch(()=>{});
+    v.play().catch(()=>{ showChrome(true); showOsd("Click anywhere to play"); });
   }
-  preloadStoryboard(st.hostId, st.path);
+  const sbHost = st.hostId, sbPath = st.path;
+  st.sbTimer = setTimeout(()=>{
+    if(st.sbPending && st.path === sbPath && st.hostId === sbHost){
+      st.sbPending = false;
+      preloadStoryboard(sbHost, sbPath);
+    }
+  }, 900);
   showChrome();
 }
 
@@ -732,7 +753,18 @@ function initInteractions(){
   v.onwaiting = ()=>setBuffering(true);
   v.onstalled = ()=>setBuffering(true);
   v.oncanplay = ()=>setBuffering(false);
-  v.onplaying = ()=>{ setBuffering(false); document.getElementById("playBtn").textContent = "⏸"; ensureAudioBoost(v, false); showChrome(); };
+  v.onplaying = ()=>{
+    setBuffering(false);
+    document.getElementById("playBtn").textContent = "⏸";
+    ensureAudioBoost(v, false);
+    layoutVideo();
+    if(st.sbPending && st.path){
+      st.sbPending = false;
+      clearTimeout(st.sbTimer);
+      preloadStoryboard(st.hostId, st.path);
+    }
+    showChrome();
+  };
   v.onpause = ()=>{ document.getElementById("playBtn").textContent = "▶"; showChrome(true); };
   v.ontimeupdate = updateHud;
   v.onloadedmetadata = ()=>{
@@ -741,12 +773,13 @@ function initInteractions(){
     updateHud(); layoutVideo();
   };
   v.onloadeddata = ()=>{
-    if(!st.isTranscode && v.videoWidth === 0){ startTranscodeStream(0); }
+    if(!st.isTranscode && v.videoWidth === 0){ startTranscodeStream(0, false); }
     layoutVideo();
   };
   v.onerror = ()=>{
     setBuffering(false);
-    if(!st.isTranscode && st.path){ startTranscodeStream(0); }
+    if(!st.isTranscode && st.path){ startTranscodeStream(0, false); }
+    else if(st.isTranscode && !st.forceTranscode && st.path){ startTranscodeStream(currentAbsSec(), true); }
   };
 
   // Timeline hover storyboard & click/drag seek
@@ -924,14 +957,18 @@ async function initPlayer(){
   renderOptionChips();
   const savedVol = Number(localStorage.getItem("dv_player_vol") || "100");
   setVolumePct(isFinite(savedVol) ? savedVol : 100);
-  try{
-    const bs = await fetch("/api/desktop/bootstrap");
-    if(bs.ok){
-      const d = await bs.json();
-      st.token = d.token || "";
-      st.localHostId = d.localHostId || "";
-    }
-  }catch{}
+  for(let attempt = 0; attempt < 5; attempt++){
+    try{
+      const bs = await fetch("/api/desktop/bootstrap");
+      if(bs.ok){
+        const d = await bs.json();
+        st.token = d.token || "";
+        st.localHostId = d.localHostId || "";
+        break;
+      }
+    }catch{}
+    await new Promise(r => setTimeout(r, 250));
+  }
   const params = new URLSearchParams(window.location.search);
   const p = params.get("path") || "";
   const hid = params.get("hostId") || st.localHostId;

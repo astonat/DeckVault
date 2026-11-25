@@ -2515,15 +2515,21 @@ function needsLiveTranscode(f){
     || fps > 90;
 }
 
-function startTranscodeStream(startSec=0){
+function startTranscodeStream(startSec=0, force=false){
   if(!state.activeFile) return;
   const v=document.getElementById("vidEl");
   const fHost = state.activeFileHostId || state.activeHostId;
   state.isTranscode=true;
+  state.forceTranscode=!!force;
   state.transcodeOffsetSec=Math.max(0, startSec);
-  v.src=hostMediaUrl(fHost, "/api/stream/playable", {path:state.activeFile.path, start:state.transcodeOffsetSec.toFixed(2), v:Date.now()});
+  v.src=hostMediaUrl(fHost, "/api/stream/playable", {
+    path:state.activeFile.path,
+    start:state.transcodeOffsetSec.toFixed(2),
+    forceTranscode:state.forceTranscode ? "1" : "0",
+    v:Date.now()
+  });
   v.playbackRate=parseFloat(document.getElementById("vidSpeed").value)||1;
-  document.getElementById("vidCodecBadge").textContent="LIVE H.264 STREAM";
+  document.getElementById("vidCodecBadge").textContent=state.forceTranscode ? "LIVE H.264 STREAM" : "FAST STREAM";
   v.play().catch(()=>{});
 }
 
@@ -2531,7 +2537,7 @@ function seekVideoTo(sec){
   const d = Math.max(0.1, state.vidDurationSec || 1);
   const clamped = Math.max(0, Math.min(d, sec));
   if(state.isTranscode){
-    startTranscodeStream(clamped);
+    startTranscodeStream(clamped, !!state.forceTranscode);
   }else{
     document.getElementById("vidEl").currentTime = clamped;
   }
@@ -2544,6 +2550,7 @@ function openVideoOverlay(f, openStudio, hostOverride=""){
   state.edit = { cropActive:false, cropPreview:false, x:0.1, y:0.1, w:0.8, h:0.8, rotate:0, flipH:false, flipV:false, muteOut:false };
   state.abLoop = false;
   state.isTranscode = false;
+  state.forceTranscode = false;
   state.transcodeOffsetSec = 0;
   state.vidDurationSec = (f.meta?.durationMs || 0) / 1000.0;
   document.getElementById("abLoopBtn").textContent="A-B Loop: Off";
@@ -2589,7 +2596,10 @@ function openVideoOverlay(f, openStudio, hostOverride=""){
     setVidBuf(false);
     if(!state.isTranscode){
       showToast("Converting codec cleanly for playback...");
-      startTranscodeStream(0);
+      startTranscodeStream(0, false);
+    }else if(!state.forceTranscode){
+      const cur = state.transcodeOffsetSec + (v.currentTime || 0);
+      startTranscodeStream(cur, true);
     }
   };
   v.onloadeddata = () => {

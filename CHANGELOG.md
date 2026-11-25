@@ -2,6 +2,16 @@
 
 All notable changes to **DeckVault** are documented here.
 
+## [v1.5.4] - 2026-11-25
+
+### Pop-Out Player Freeze, ADTS Audio & First-Launch Fix
+- **Fixed `.ts` Playback Freeze & Missing Audio (`companion/deckvault_server.py`)**:
+  - Added `-bsf:a aac_adtstoasc` when stream-copying AAC/MP4A audio into fragmented MP4 in `_stream_transcoded_playable` (fixing MPEG-TS `.ts`/`.m2ts` streams that previously aborted after ~1s with `Malformed AAC bitstream detected` and 0 audio).
+  - Restricted `-c:v copy` to MP4/MOV/MKV/TS/FLV containers and added automatic `forceTranscode=1` fallback if a stream-copied source ever errors.
+- **Fixed First-Launch Blank Video & Autoplay (`companion/deckvault_server.py`, `companion/player_ui.py`, `companion/desktop_ui.py`)**:
+  - Enabled `--autoplay-policy=no-user-gesture-required` in WebView2 for both the Pop-Out Player and Main Desktop App so unmuted playback starts immediately on launch.
+  - Added retry logic on `/api/desktop/bootstrap`, upfront `layoutVideo()`, and deferred storyboard pre-warming until playback starts (or `900ms`) so startup buffering doesn't contend with storyboard extraction.
+
 ## [v1.5.3] - 2026-11-25
 
 ### Pop-Out Player Audio, Speed & Seeking Preview Overhaul

@@ -42,7 +42,7 @@ from desktop_ui import DESKTOP_APP_HTML
 from player_ui import POPOUT_PLAYER_HTML
 
 
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 GITHUB_REPO = "astonat/DeckVault"
 DEFAULT_HTTP_PORT = 48720
 DEFAULT_UDP_PORT = 48721
@@ -3998,8 +3998,9 @@ def make_handler(rt: CompanionRuntime):
                 elif route == "/api/stream/playable":
                     raw_path = (qs.get("path") or [""])[0]
                     start_s = float((qs.get("start") or ["0"])[0] or "0")
+                    force_tc = (qs.get("forceTranscode") or ["0"])[0] == "1"
                     safe = rt.config.resolve_safe_path(raw_path)
-                    self._stream_transcoded_playable(safe, start_s)
+                    self._stream_transcoded_playable(safe, start_s, force_transcode=force_tc)
                 elif route == "/api/stream":
                     raw_path = (qs.get("path") or [""])[0]
                     safe = rt.config.resolve_safe_path(raw_path)
@@ -4608,7 +4609,7 @@ def make_handler(rt: CompanionRuntime):
 
             self._send_json(HTTPStatus.OK, {"transferredCount": transferred})
 
-        def _stream_transcoded_playable(self, file_path: str, start_s: float = 0.0) -> None:
+        def _stream_transcoded_playable(self, file_path: str, start_s: float = 0.0, force_transcode: bool = False) -> None:
             if not rt.media.ffmpeg:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "FFmpeg required for live transcode"})
                 return
@@ -4625,8 +4626,14 @@ def make_handler(rt: CompanionRuntime):
             vcodec = str(meta.get("videoCodec") or "").lower()
             acodec = str(meta.get("audioCodec") or "").lower()
             fps = float(meta.get("fps") or 0.0)
-            can_copy_video = vcodec in ("h264", "avc1", "avc") and fps <= 90.0
-            can_copy_audio = acodec in ("aac", "mp4a", "mp3")
+            ext = os.path.splitext(file_path)[1].lower()
+            can_copy_video = (
+                (not force_transcode)
+                and vcodec in ("h264", "avc1", "avc")
+                and fps <= 90.0
+                and ext in (".mp4", ".m4v", ".mov", ".mkv", ".ts", ".m2ts", ".mts", ".flv")
+            )
+            can_copy_audio = (not force_transcode) and acodec in ("aac", "mp4a", "mp3")
 
             cmd = [rt.media.ffmpeg, "-y", "-err_detect", "ignore_err", "-fflags", "+genpts+nobuffer"]
             if start_s > 0.05:
@@ -4645,6 +4652,8 @@ def make_handler(rt: CompanionRuntime):
                 ])
             if can_copy_audio:
                 cmd.extend(["-c:a", "copy"])
+                if acodec in ("aac", "mp4a"):
+                    cmd.extend(["-bsf:a", "aac_adtstoasc"])
             else:
                 cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"])
             cmd.extend([
@@ -5895,6 +5904,9 @@ def _launch_desktop_webview(http_port: int, force_process_exit: bool = True) -> 
     except Exception:
         pass
 
+    cur_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+    if "--autoplay-policy=no-user-gesture-required" not in cur_args:
+        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (cur_args + " --autoplay-policy=no-user-gesture-required").strip()
     import webview
     desk_name = _get_current_desktop_name()
     safe_desk = "".join(c if c.isalnum() or c in "-_" else "_" for c in desk_name)
@@ -6140,6 +6152,9 @@ def _launch_player_webview(
     force_process_exit: bool = True,
 ) -> None:
     _set_app_user_model_id()
+    cur_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+    if "--autoplay-policy=no-user-gesture-required" not in cur_args:
+        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (cur_args + " --autoplay-policy=no-user-gesture-required").strip()
     import webview
 
     desk_name = _get_current_desktop_name()
